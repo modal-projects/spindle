@@ -6,12 +6,12 @@ import struct
 import httpx
 import pytest
 from tinker import types
-from tinker.lib._pydantic_conv import deserialize_json_response, to_pydantic_request
 from tinker.proto.request_conv import forward_backward_request_to_proto
 
 from spindle.backends.miles_runtime.data import _datum_row, pad_slot_rows
 from spindle.backends.miles_runtime.replay_data import add_replay_to_train_data
 from spindle.engine.ingress import decode_forward_backward
+from spindle.engine.operations import serialize_operation_payload
 from spindle.inference.sampling import sample_task
 from spindle.replay import ReplaySampleResponse, SamplingReplay, capture_replay
 
@@ -63,7 +63,7 @@ def sample_response():
         and r["routed_experts_start_len"] == 0
         for r in sent
     )
-    return deserialize_json_response(result, ReplaySampleResponse)
+    return ReplaySampleResponse.model_validate(result)
 
 
 @pytest.mark.parametrize("encoding", ["json", "protobuf"])
@@ -90,7 +90,15 @@ def test_sampler_sdk_training_roundtrip(encoding):
         ),
     )
     if encoding == "json":
-        body = to_pydantic_request(request).model_dump_json().encode()
+        body = json.dumps(
+            {
+                "model_id": request.model_id,
+                "seq_id": request.seq_id,
+                "forward_backward_input": serialize_operation_payload(
+                    request.forward_backward_input
+                ),
+            }
+        ).encode()
         content_type = "application/json"
     else:
         body = forward_backward_request_to_proto(request).SerializeToString()

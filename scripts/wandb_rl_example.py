@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11,<3.13"
-# dependencies = ["tinker>=0.24,<0.25", "wandb"]
+# dependencies = ["tinker>=0.24.1,<0.26", "wandb"]
 # ///
 """Minimal Tinker RL loop against Spindle with per-step Weights & Biases logging.
 
