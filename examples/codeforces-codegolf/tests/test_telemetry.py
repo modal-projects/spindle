@@ -43,7 +43,11 @@ def test_step_metrics_use_run_identity_and_omit_sensitive_fields(monkeypatch):
     )
     assert all(
         attrs
-        == {"spindle.run_id": "golf", "spindle.run_attempt_id": "restore-2", "phase": "train"}
+        == {
+            "spindle.run_id": "golf",
+            "spindle.run_attempt_id": "restore-2",
+            "phase": "train",
+        }
         for _, _, attrs in seen
     )
     assert any(name == "codegolf.reward" and value == 1.2 for name, value, _ in seen)
