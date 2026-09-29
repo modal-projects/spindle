@@ -1,0 +1,229 @@
+{
+  "run_id": "spindle-assets-0929-165728",
+  "date": "2026-09-29",
+  "model": "Qwen/Qwen3.5-9B-Base",
+  "clients": 16,
+  "client_versions": {
+    "modal": "1.5.5",
+    "tinker": "0.24.1",
+    "huggingface-hub": "1.28.0",
+    "tokenizers": "0.22.2"
+  },
+  "diagnostic": {
+    "baseline": {
+      "status": "completed",
+      "event_counts": {
+        "prepare_requested": 80,
+        "prepare_started": 80,
+        "snapshot_started": 80,
+        "file_download_started": 15,
+        "file_download_finished": 15,
+        "snapshot_finished": 80,
+        "prepare_finished": 80,
+        "prepare_returned": 80
+      },
+      "completed_rollouts": 48,
+      "file_payload_bytes": 19329310976,
+      "weight_bytes_added": 19306310872,
+      "total_snapshot_seconds": 79.66253897800006,
+      "phases": {
+        "cold_clients": {
+          "wall_seconds": 311.6914336681366,
+          "first_rollout_seconds": 306.93143701553345,
+          "p50_seconds": 308.7192770242691,
+          "max_seconds": 311.68987584114075,
+          "output_tokens": 192
+        },
+        "warm_rollouts": {
+          "wall_seconds": 35.9726505279541,
+          "first_rollout_seconds": 18.820167064666748,
+          "p50_seconds": 26.223408699035645,
+          "max_seconds": 35.9714469909668,
+          "output_tokens": 192
+        },
+        "warm_new_clients": {
+          "wall_seconds": 55.03061532974243,
+          "first_rollout_seconds": 37.36206293106079,
+          "p50_seconds": 44.4578275680542,
+          "max_seconds": 55.02942609786987,
+          "output_tokens": 192
+        }
+      },
+      "initial_download_seconds": 54.747694092,
+      "after_assets_ready": {
+        "first_client_ready_seconds": 17.293853998184204,
+        "all_clients_ready_seconds": 19.69992160797119,
+        "first_rollout_seconds": 237.39878702163696,
+        "all_rollouts_seconds": 242.15817165374756
+      },
+      "cached_snapshot_seconds": {
+        "count": 79,
+        "median": 0.27189774,
+        "minimum": 0.23643863700000622,
+        "maximum": 3.778660178
+      }
+    },
+    "locked": {
+      "status": "completed",
+      "event_counts": {
+        "prepare_requested": 1,
+        "prepare_started": 1,
+        "snapshot_started": 1,
+        "file_download_started": 15,
+        "file_download_finished": 15,
+        "snapshot_finished": 1,
+        "prepare_finished": 1,
+        "prepare_returned": 1
+      },
+      "completed_rollouts": 48,
+      "file_payload_bytes": 19329310976,
+      "weight_bytes_added": 19306310872,
+      "total_snapshot_seconds": 42.949219717000005,
+      "phases": {
+        "cold_clients": {
+          "wall_seconds": 281.0299127101898,
+          "first_rollout_seconds": 275.973237991333,
+          "p50_seconds": 278.2046979665756,
+          "max_seconds": 281.0285596847534,
+          "output_tokens": 192
+        },
+        "warm_rollouts": {
+          "wall_seconds": 2.4459407329559326,
+          "first_rollout_seconds": 2.3136184215545654,
+          "p50_seconds": 2.3777129650115967,
+          "max_seconds": 2.445103645324707,
+          "output_tokens": 192
+        },
+        "warm_new_clients": {
+          "wall_seconds": 4.028324842453003,
+          "first_rollout_seconds": 2.9785666465759277,
+          "p50_seconds": 3.0940072536468506,
+          "max_seconds": 4.027155160903931,
+          "output_tokens": 192
+        }
+      },
+      "initial_download_seconds": 42.949219717000005,
+      "after_assets_ready": {
+        "first_client_ready_seconds": 17.16707491874695,
+        "all_clients_ready_seconds": 17.191059112548828,
+        "first_rollout_seconds": 217.15148043632507,
+        "all_rollouts_seconds": 222.20764350891113
+      }
+    },
+    "marker": {
+      "status": "completed",
+      "event_counts": {
+        "prepare_requested": 1,
+        "prepare_started": 1,
+        "snapshot_started": 1,
+        "file_download_started": 15,
+        "file_download_finished": 15,
+        "snapshot_finished": 1,
+        "prepare_finished": 1,
+        "prepare_returned": 1
+      },
+      "completed_rollouts": 48,
+      "file_payload_bytes": 19329310976,
+      "weight_bytes_added": 19306310872,
+      "total_snapshot_seconds": 121.730062484,
+      "phases": {
+        "cold_clients": {
+          "wall_seconds": 482.8882484436035,
+          "first_rollout_seconds": 478.51350712776184,
+          "p50_seconds": 480.3465219736099,
+          "max_seconds": 482.88595843315125,
+          "output_tokens": 192
+        },
+        "warm_rollouts": {
+          "wall_seconds": 2.903834342956543,
+          "first_rollout_seconds": 2.636150360107422,
+          "p50_seconds": 2.761268138885498,
+          "max_seconds": 2.9027230739593506,
+          "output_tokens": 192
+        },
+        "warm_new_clients": {
+          "wall_seconds": 3.370840549468994,
+          "first_rollout_seconds": 2.912731170654297,
+          "p50_seconds": 3.1044002771377563,
+          "max_seconds": 3.370069980621338,
+          "output_tokens": 192
+        }
+      },
+      "initial_download_seconds": 121.730062484,
+      "after_assets_ready": {
+        "first_client_ready_seconds": 15.877200603485107,
+        "all_clients_ready_seconds": 15.938063859939575,
+        "first_rollout_seconds": 339.41036915779114,
+        "all_rollouts_seconds": 343.7846329212189
+      }
+    }
+  },
+  "uninstrumented_warm": {
+    "baseline": {
+      "status": "completed",
+      "completed_rollouts": 97,
+      "new_clients": {
+        "wall_seconds": [
+          37.679646036587656,
+          42.308756654150784,
+          36.460716229863465
+        ],
+        "median_wall_seconds": 37.679646036587656,
+        "median_p50_seconds": 30.536275739548728
+      },
+      "existing_clients": {
+        "wall_seconds": [
+          21.815721731167287,
+          21.815665611065924,
+          21.397076680790633
+        ],
+        "median_wall_seconds": 21.815665611065924,
+        "median_p50_seconds": 14.364608890609816
+      }
+    },
+    "locked": {
+      "status": "completed",
+      "completed_rollouts": 97,
+      "new_clients": {
+        "wall_seconds": [
+          4.27327918400988,
+          3.1322203879244626,
+          2.699266178999096
+        ],
+        "median_wall_seconds": 3.1322203879244626,
+        "median_p50_seconds": 2.677991388598457
+      },
+      "existing_clients": {
+        "wall_seconds": [
+          2.9570500259287655,
+          22.18873937195167,
+          2.309635126963258
+        ],
+        "median_wall_seconds": 2.9570500259287655,
+        "median_p50_seconds": 1.7898340448737144
+      }
+    },
+    "marker": {
+      "status": "completed",
+      "completed_rollouts": 97,
+      "new_clients": {
+        "wall_seconds": [
+          5.208007436711341,
+          4.771161319222301,
+          5.342942440882325
+        ],
+        "median_wall_seconds": 5.208007436711341,
+        "median_p50_seconds": 4.4485378039535135
+      },
+      "existing_clients": {
+        "wall_seconds": [
+          3.3875008118338883,
+          3.5420589158311486,
+          2.9243795280344784
+        ],
+        "median_wall_seconds": 3.3875008118338883,
+        "median_p50_seconds": 2.8360195294953883
+      }
+    }
+  }
+}
