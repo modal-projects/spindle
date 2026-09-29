@@ -1,0 +1,372 @@
+import asyncio
+import json
+import socket
+import subprocess
+import sys
+import time
+
+import httpx
+import pytest
+
+from spindle.engine import Engine, FutureStatus
+from spindle.engine.api import Command, OperationKind
+from spindle.engine.backend_http import HttpBackendClient, create_backend_app
+from spindle.engine.operations import parse_operation_payload
+from tests.support import EchoExecutor
+
+MODEL_SPEC = {"base_model": "test/model", "parameterization": "full"}
+
+
+def http_executor(backend_executor) -> HttpBackendClient:
+    app = create_backend_app(backend_executor)
+    return HttpBackendClient(
+        "http://backend",
+        transport=httpx.ASGITransport(app=app),
+    )
+
+
+def test_engine_runs_operations_over_backend_http() -> None:
+    async def run() -> None:
+        executor = http_executor(EchoExecutor())
+        server = Engine(executor)
+        await server.accept_model("model-a", MODEL_SPEC)
+        body = json.dumps(
+            {
+                "model_id": "model-a",
+                "seq_id": 1,
+                "forward_backward_input": {
+                    "data": [
+                        {
+                            "model_input": {"chunks": [{"tokens": [1]}]},
+                            "loss_fn_inputs": {},
+                        }
+                    ],
+                    "loss_fn": "cross_entropy",
+                },
+            }
+        ).encode()
+        await server.forward_backward(body, "application/json")
+        state = await server.retrieve_future("model-a:1", timeout=2.0)
+        assert state.status == FutureStatus.COMPLETE
+        assert state.result == {
+            "model_id": "model-a",
+            "kind": "forward_backward",
+            "payload": {
+                "data": [
+                    {
+                        "loss_fn_inputs": {},
+                        "model_input": {"chunks": [{"tokens": [1]}]},
+                    }
+                ],
+                "loss_fn": "cross_entropy",
+            },
+        }
+        request_id = await server.save_weights_for_sampler(
+            {
+                "model_id": "model-a",
+                "seq_id": 2,
+                "publish_version": 1,
+            }
+        )
+        state = await server.retrieve_future(request_id, timeout=2.0)
+        assert state.status == FutureStatus.COMPLETE
+        assert state.result == {"publish_version": 1}
+        await server.close()
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_errors_cross_http() -> None:
+    async def run() -> None:
+        class FailingExecutor(EchoExecutor):
+            async def execute(self, model_id, kind, payload):
+                raise RuntimeError("cuda out of memory")
+
+        executor = http_executor(FailingExecutor())
+        server = Engine(executor)
+        await server.accept_model("model-a", MODEL_SPEC)
+        await server.optim_step({"model_id": "model-a", "seq_id": 1, "adam_params": {}})
+        state = await server.retrieve_future("model-a:1", timeout=2.0)
+        assert state.status == FutureStatus.FAILED
+        assert state.error == "RuntimeError: cuda out of memory"
+        await server.close()
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_read_timeout_fences_engine() -> None:
+    async def run() -> None:
+        fenced = []
+
+        async def timeout(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("stalled", request=request)
+
+        executor = HttpBackendClient(
+            "http://backend",
+            transport=httpx.MockTransport(timeout),
+            read_timeout=42,
+            on_read_timeout=lambda: fenced.append(True),
+        )
+        with pytest.raises(TimeoutError, match="backend /execute exceeded 42s"):
+            await executor.execute(
+                "model-a",
+                OperationKind.OPTIM_STEP,
+                parse_operation_payload(OperationKind.OPTIM_STEP, {"adam_params": {}}),
+            )
+        assert fenced == [True]
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_batches_cross_http() -> None:
+    async def run() -> None:
+        executor = http_executor(EchoExecutor())
+        results = await executor.execute_forward_backward_batch(
+            (
+                Command(
+                    "model-a",
+                    OperationKind.FORWARD_BACKWARD,
+                    parse_operation_payload(
+                        OperationKind.FORWARD_BACKWARD,
+                        {
+                            "data": [
+                                {
+                                    "model_input": {"chunks": [{"tokens": [1]}]},
+                                    "loss_fn_inputs": {},
+                                }
+                            ],
+                            "loss_fn": "cross_entropy",
+                        },
+                    ),
+                ),
+                Command(
+                    "model-b",
+                    OperationKind.FORWARD_BACKWARD,
+                    parse_operation_payload(
+                        OperationKind.FORWARD_BACKWARD,
+                        {
+                            "data": [
+                                {
+                                    "model_input": {"chunks": [{"tokens": [2]}]},
+                                    "loss_fn_inputs": {},
+                                }
+                            ],
+                            "loss_fn": "cross_entropy",
+                        },
+                    ),
+                ),
+            )
+        )
+
+        assert [result["model_id"] for result in results] == ["model-a", "model-b"]
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_shutdown_is_idempotent() -> None:
+    class CloseableExecutor(EchoExecutor):
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    async def run() -> None:
+        backend = CloseableExecutor()
+        executor = http_executor(backend)
+
+        await executor.shutdown_backend()
+        await executor.shutdown_backend()
+
+        assert backend.close_calls == 1
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_runner_serves_executor_in_subprocess() -> None:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    backend = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "spindle.engine.backend_http",
+            "tests.support:EchoExecutor",
+            str(port),
+        ]
+    )
+
+    async def run() -> None:
+        executor = HttpBackendClient(f"http://127.0.0.1:{port}")
+        deadline = time.time() + 10
+        while True:
+            assert backend.poll() is None, "backend exited"
+            try:
+                if (await executor.http.get("/healthz")).is_success:
+                    break
+            except httpx.TransportError:
+                assert time.time() < deadline, "backend never became healthy"
+                await asyncio.sleep(0.1)
+        await executor.accept_model("model-a", MODEL_SPEC)
+        result = await executor.execute(
+            "model-a",
+            OperationKind.OPTIM_STEP,
+            parse_operation_payload(
+                OperationKind.OPTIM_STEP,
+                {"adam_params": {}},
+            ),
+        )
+        assert result == {
+            "model_id": "model-a",
+            "kind": "optim_step",
+            "payload": {"adam_params": {}},
+        }
+        await executor.shutdown_backend()
+        await executor.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        backend.terminate()
+        backend.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.ConnectError],
+)
+def test_lost_backend_response_fences_commands_without_replay(error_type) -> None:
+    async def run() -> None:
+        applied = []
+        fenced = []
+
+        async def lose_response(request):
+            # The command may have mutated state before its response was lost.
+            applied.append(request.url.path)
+            raise error_type("connection lost", request=request)
+
+        executor = HttpBackendClient(
+            "http://backend",
+            transport=httpx.MockTransport(lose_response),
+            on_transport_error=lambda: fenced.append(True),
+        )
+        payload = parse_operation_payload(OperationKind.OPTIM_STEP, {"adam_params": {}})
+        with pytest.raises(RuntimeError, match="execution outcome unknown") as error:
+            await executor.execute("model-a", OperationKind.OPTIM_STEP, payload)
+        assert isinstance(error.value.__cause__, error_type)
+        with pytest.raises(RuntimeError, match="checkpoint recovery required"):
+            await executor.execute("model-a", OperationKind.OPTIM_STEP, payload)
+        assert applied == ["/execute"]
+        assert fenced == [True]
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_application_error_does_not_fence_transport() -> None:
+    async def run() -> None:
+        responses = [
+            httpx.Response(500, json={"error": "invalid input"}),
+            httpx.Response(200, json={"result": "ok"}),
+        ]
+        fenced = []
+        executor = HttpBackendClient(
+            "http://backend",
+            transport=httpx.MockTransport(lambda request: responses.pop(0)),
+            on_transport_error=lambda: fenced.append(True),
+        )
+        payload = parse_operation_payload(OperationKind.OPTIM_STEP, {"adam_params": {}})
+        with pytest.raises(RuntimeError, match="invalid input"):
+            await executor.execute("model-a", OperationKind.OPTIM_STEP, payload)
+        assert (
+            await executor.execute("model-a", OperationKind.OPTIM_STEP, payload) == "ok"
+        )
+        assert fenced == []
+        await executor.close()
+
+    asyncio.run(run())
+
+
+def test_backend_commands_do_not_reuse_idle_connections() -> None:
+    from fastapi import FastAPI, Request
+
+    from tests.support import serve
+
+    app = FastAPI()
+    peers = []
+
+    @app.post("/execute")
+    async def execute(request: Request):
+        peers.append(request.client.port)
+        return {"result": "ok"}
+
+    async def run(url):
+        executor = HttpBackendClient(url)
+        payload = parse_operation_payload(OperationKind.OPTIM_STEP, {"adam_params": {}})
+        try:
+            for _ in range(2):
+                assert (
+                    await executor.execute("model-a", OperationKind.OPTIM_STEP, payload)
+                    == "ok"
+                )
+        finally:
+            await executor.close()
+
+    with serve(app) as url:
+        asyncio.run(run(url))
+    assert len(set(peers)) == 2
+
+
+@pytest.mark.parametrize("fatal", [False, True])
+def test_miles_worker_failure_fences_trainer_across_executor_http(fatal):
+    from types import SimpleNamespace
+    from spindle.backends.miles_runtime.runtime import MilesRuntime
+    from spindle.engine.spmd import DistributedExecutor
+
+    async def run():
+        fenced, calls = [], []
+        runtime = MilesRuntime.__new__(MilesRuntime)
+        runtime._closed = False
+        runtime._failure = None
+        runtime._call = asyncio.run
+
+        async def worker_failure():
+            calls.append("worker")
+            return {"error": "trainer cell lost"}
+
+        def accept(*args):
+            if fatal:
+                runtime._run(worker_failure())
+            raise ValueError("invalid model specification")
+
+        app = create_backend_app(
+            DistributedExecutor(SimpleNamespace(accept_model=accept))
+        )
+        client = HttpBackendClient(
+            "http://backend",
+            transport=httpx.ASGITransport(app=app),
+            on_transport_error=lambda: fenced.append(True),
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match="trainer cell lost" if fatal else "invalid model"
+            ):
+                await client.accept_model("a", MODEL_SPEC)
+            if fatal:
+                with pytest.raises(RuntimeError, match="checkpoint recovery required"):
+                    await client.accept_model("b", MODEL_SPEC)
+                assert calls == ["worker"]
+                assert fenced == [True]
+            else:
+                assert fenced == []
+                assert runtime._failure is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())

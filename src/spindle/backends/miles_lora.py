@@ -1,0 +1,746 @@
+from __future__ import annotations
+
+import contextlib
+import json
+import math
+import os
+import shutil
+import threading
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import modal
+import torch
+from stitch.types import VersionRef
+from tinker import AdamParams, ForwardBackwardOutput, OptimStepResponse
+
+from spindle.engine.spmd import DistributedExecutor
+from spindle.errors import BackendFailed
+from spindle.inference.bulletin import SnapshotBulletin
+
+from .contract import (
+    Backend,
+    ForwardBatch,
+    ModelSpec,
+    SamplerPublication,
+)
+from .miles_config import (
+    MilesBackendConfig,
+    lora_target_flags,
+    parse_backend_config,
+)
+from .miles_runtime.data import build_outputs, pad_slot_rows, prepare_batch
+from .miles_runtime.profiling import RankProfiler, StepPhaseTimer, TorchProfileConfig
+from .miles_runtime.runtime import MilesRuntime
+
+
+@dataclass(slots=True)
+class MilesJobState:
+    rank: int
+    alpha: float
+    seed: int | None
+    train_attn: bool
+    train_mlp: bool
+    train_unembed: bool
+    accumulating: bool = False
+    optimizer_step: int = 0
+
+
+class MilesCommandBackend(Backend):
+    """Spindle command protocol backed by one Miles Ray trainer group."""
+
+    def __init__(
+        self,
+        config: MilesBackendConfig,
+        *,
+        checkpoint_dir: Path,
+        capture_dir: Path,
+        base_model: str,
+        runtime: Any | None = None,
+    ) -> None:
+        config.validate()
+        self.config = config
+        self.base_model = base_model
+        self.checkpoint_dir = checkpoint_dir
+        self.capture_dir = capture_dir
+        self.runtime = runtime if runtime is not None else MilesRuntime(config)
+        self.max_slots = config.max_lora_slots
+        self.free_slots = set(range(self.max_slots))
+        self.jobs: dict[str, MilesJobState] = {}
+        self.job_to_slot: dict[str, int] = {}
+        self.slot_to_job: dict[int, str] = {}
+        # A volume refresh must not race checkpoint writes on the persistence lane.
+        self._checkpoint_io_lock = threading.RLock()
+        self._checkpoint_captures: dict[str, dict[str, Any]] = {}
+        self._sampler_captures: dict[str, dict[str, Any]] = {}
+        self._timer = StepPhaseTimer()
+        self._profile = TorchProfileConfig.from_env()
+        self._profiling_active = False
+        self._profile_step_done = False
+        self._controller_profiler: RankProfiler | None = None
+        self._closed = False
+        if self._profile.enabled:
+            print(
+                json.dumps(
+                    {
+                        "event": "spindle_torch_profile",
+                        "state": "configured",
+                        "step": self._profile.step,
+                        "ranks": (
+                            "all"
+                            if self._profile.ranks is None
+                            else sorted(self._profile.ranks)
+                        ),
+                        "output_dir": self._profile.output_dir,
+                    }
+                ),
+                flush=True,
+            )
+
+    def accept_model(self, model_id: str, spec: ModelSpec) -> None:
+        if spec.parameterization != "lora" or spec.lora_config is None:
+            raise ValueError("Miles backend requires lora parameterization")
+        if spec.base_model != self.base_model:
+            raise ValueError(
+                f"base model {spec.base_model!r} does not match deployment "
+                f"{self.base_model!r}"
+            )
+        lora = spec.lora_config
+        state = MilesJobState(
+            rank=int(lora.rank),
+            alpha=float(self.config.default_lora_alpha),
+            seed=lora.seed,
+            train_attn=bool(lora.train_attn),
+            train_mlp=bool(lora.train_mlp),
+            train_unembed=bool(lora.train_unembed),
+        )
+        self._validate_job(state)
+        if model_id in self.jobs:
+            current = self.jobs[model_id]
+            if (
+                current.rank,
+                current.alpha,
+                current.seed,
+                current.train_attn,
+                current.train_mlp,
+                current.train_unembed,
+            ) != (
+                state.rank,
+                state.alpha,
+                state.seed,
+                state.train_attn,
+                state.train_mlp,
+                state.train_unembed,
+            ):
+                raise ValueError(
+                    f"model {model_id} already has a different specification"
+                )
+            return
+        if not self.free_slots:
+            raise ValueError("no free Miles LoRA slots")
+
+        slot = min(self.free_slots)
+        self.free_slots.remove(slot)
+        self.jobs[model_id] = state
+        self.job_to_slot[model_id] = slot
+        self.slot_to_job[slot] = model_id
+        try:
+            self.runtime.load_slot(slot, state.rank, state.alpha)
+        except BaseException:
+            self._release(model_id, slot)
+            self.jobs.pop(model_id, None)
+            raise
+
+    def forward_backward(
+        self,
+        batch: ForwardBatch,
+    ) -> tuple[ForwardBackwardOutput, ...]:
+        if not batch.items:
+            return ()
+        self._require_jobs(tuple(item.model_id for item in batch.items))
+        step = self.jobs[batch.items[0].model_id].optimizer_step
+        if (
+            self._profile.enabled
+            and not self._profile_step_done
+            and not self._profiling_active
+            and step == self._profile.step
+            and not batch.forward_only
+        ):
+            self._start_profiling(step)
+        elif (
+            self._profiling_active
+            and self._profile.step is not None
+            and step > self._profile.step
+        ):
+            self._stop_profiling()
+        with self._timer.phase("prepare_batch", step, model_id=batch.items[0].model_id):
+            prepared = prepare_batch(
+                batch,
+                self.job_to_slot,
+                sequence_alignment=self.config.sequence_alignment,
+            )
+            rows = [row for _, row in prepared.slot_rows]
+            if any("routed_experts" in row for row in rows):
+                if not all("routed_experts" in row for row in rows):
+                    raise ValueError(
+                        "router replay is required for every datum in a batch"
+                    )
+                if "--use-rollout-routing-replay" not in self.config.extra_args:
+                    raise ValueError(
+                        "router replay requires --use-rollout-routing-replay in the Miles configuration"
+                    )
+            if any("sampling_mask_ids" in row for row in rows):
+                temperature = batch.loss_fn_config.get("sampling_temperature")
+                if temperature is None or not 0 < temperature < float("inf"):
+                    raise ValueError(
+                        "sampling replay requires a positive finite sampling_temperature in loss_fn_config"
+                    )
+        phase_name = "forward_only" if batch.forward_only else "forward_backward"
+        with (
+            self._timer.phase(phase_name, step, model_id=batch.items[0].model_id),
+            self._record(f"spindle/{phase_name}"),
+        ):
+            slot_rows = pad_slot_rows(
+                prepared.slot_rows,
+                self.config.data_parallel_size,
+            )
+            raw_outputs = self.runtime.forward_backward(
+                slot_rows,
+                loss_fn=str(batch.loss_fn),
+                loss_fn_config=dict(batch.loss_fn_config),
+                forward_only=batch.forward_only,
+            )
+        raw_outputs = raw_outputs[: len(prepared.slot_rows)]
+        if not batch.forward_only:
+            for item in batch.items:
+                self.jobs[item.model_id].accumulating = True
+        with self._timer.phase("build_outputs", step, model_id=batch.items[0].model_id):
+            return build_outputs(batch, prepared, raw_outputs)
+
+    def optim_step(
+        self,
+        model_ids: tuple[str, ...],
+        adam: AdamParams,
+    ) -> tuple[OptimStepResponse, ...]:
+        if not model_ids:
+            return ()
+        if len(set(model_ids)) != len(model_ids):
+            raise ValueError("optim_step contains duplicate model ids")
+        self._require_jobs(model_ids)
+        for model_id in model_ids:
+            if not self.jobs[model_id].accumulating:
+                raise ValueError(f"model {model_id} has no accumulated gradients")
+        parameters = _adam_parameters(adam)
+        by_slot = {
+            self.job_to_slot[model_id]: parameters.copy() for model_id in model_ids
+        }
+        step = self.jobs[model_ids[0]].optimizer_step
+        with (
+            self._timer.phase("optim_step", step, model_id=model_ids[0]),
+            self._record("spindle/optim_step"),
+        ):
+            outcomes = self.runtime.optim_step(by_slot)
+        timing_metrics = self._timer.metrics_for_step(step)
+        self._timer.pop_step(step)
+        outputs = []
+        for model_id in model_ids:
+            state = self.jobs[model_id]
+            state.accumulating = False
+            slot = self.job_to_slot[model_id]
+            outcome = outcomes[slot]
+            if "error" in outcome:
+                raise BackendFailed(
+                    f"Miles optimizer failed for {model_id}: {outcome['error']}"
+                )
+            successful = "grad_norm" in outcome
+            if not successful and "skipped_nonfinite" not in outcome:
+                raise BackendFailed(f"unexpected Miles optimizer outcome: {outcome}")
+            state.optimizer_step += int(successful)
+            metrics = {
+                "update_successful:mean": float(successful),
+                "timing/optimizer_step": float(step),
+                **timing_metrics,
+            }
+            if successful:
+                metrics["grad_norm:mean"] = float(outcome["grad_norm"])
+            else:
+                metrics["skipped_nonfinite:sum"] = float(outcome["skipped_nonfinite"])
+            outputs.append(OptimStepResponse(metrics=metrics))
+        return tuple(outputs)
+
+    def capture_checkpoint(
+        self,
+        model_id: str,
+        snapshot_id: str,
+        *,
+        destination: str,
+        include_optimizer: bool,
+    ) -> None:
+        self._require_jobs((model_id,))
+        if snapshot_id in self._checkpoint_captures:
+            raise ValueError(f"checkpoint snapshot already exists: {snapshot_id}")
+        capture_path = self.capture_dir / "checkpoints" / snapshot_id
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+        state = self.jobs[model_id]
+        with (
+            self._timer.phase(
+                "save_checkpoint", state.optimizer_step, model_id=model_id
+            ),
+            self._record("spindle/save_checkpoint"),
+        ):
+            self.runtime.save_slot(
+                self.job_to_slot[model_id],
+                str(capture_path / "miles"),
+                include_optimizer=include_optimizer,
+            )
+        metadata = {
+            "schema_version": 1,
+            "checkpoint_format": "miles_torch_dist",
+            "backend": "miles",
+            "miles_revision": self.runtime.revision,
+            "base_model": self.base_model,
+            "engine_definition_id": os.environ.get("SPINDLE_DEFINITION_ID"),
+            "parameterization": {"type": "lora"},
+            "lora_config": {
+                "rank": state.rank,
+                "alpha": state.alpha,
+                "seed": state.seed,
+                "train_attn": state.train_attn,
+                "train_mlp": state.train_mlp,
+                "train_unembed": state.train_unembed,
+            },
+            "optimizer_step": state.optimizer_step,
+            "has_optimizer": include_optimizer,
+            "topology": {
+                "world_size": self.config.world_size,
+                "data_parallel_size": self.config.data_parallel_size,
+                "tensor_model_parallel_size": (self.config.tensor_model_parallel_size),
+                "context_parallel_size": self.config.context_parallel_size,
+                "expert_model_parallel_size": (self.config.expert_model_parallel_size),
+                "expert_tensor_parallel_size": (
+                    self.config.expert_tensor_parallel_size
+                ),
+                "pipeline_model_parallel_size": 1,
+            },
+        }
+        (capture_path / "metadata.json").write_text(
+            json.dumps(metadata, sort_keys=True),
+            encoding="utf-8",
+        )
+        self._checkpoint_captures[snapshot_id] = {
+            "model_id": model_id,
+            "destination": destination,
+            "path": capture_path,
+        }
+
+    def persist_checkpoint(
+        self,
+        snapshot_id: str,
+        destination: str,
+        *,
+        overwrite: bool = False,
+    ) -> str:
+        with self._checkpoint_io_lock:
+            try:
+                capture = self._checkpoint_captures[snapshot_id]
+                if capture["destination"] != destination:
+                    raise ValueError("snapshot destination does not match its capture")
+                model_id = capture["model_id"]
+                target = self.checkpoint_dir / destination / model_id
+                job = self.jobs.get(model_id)
+                persist_step = job.optimizer_step if job is not None else -1
+                with (
+                    self._timer.phase(
+                        "persist_checkpoint", persist_step, model_id=model_id
+                    ),
+                    self._record("spindle/persist_checkpoint"),
+                ):
+                    _install_capture(
+                        capture["path"],
+                        target,
+                        overwrite=overwrite,
+                        world_size=self.config.world_size,
+                    )
+                    _commit_volume(os.environ.get("SPINDLE_CHECKPOINT_VOLUME"))
+                return str(target)
+            finally:
+                capture = self._checkpoint_captures.pop(snapshot_id, None)
+                if capture is not None:
+                    shutil.rmtree(capture["path"], ignore_errors=True)
+
+    def load_checkpoint(
+        self,
+        model_id: str,
+        uri: str,
+        *,
+        restore_optimizer: bool = False,
+    ) -> None:
+        self._require_jobs((model_id,))
+        with self._checkpoint_io_lock:
+            _reload_volume(os.environ.get("SPINDLE_CHECKPOINT_VOLUME"))
+            checkpoint = Path(uri)
+            try:
+                metadata = json.loads(
+                    (checkpoint / "metadata.json").read_text(encoding="utf-8")
+                )
+            except (FileNotFoundError, json.JSONDecodeError) as exc:
+                raise ValueError(f"invalid Miles checkpoint: {uri}") from exc
+            state = self.jobs[model_id]
+            self._validate_checkpoint(metadata, state, restore_optimizer)
+            self.runtime.load_slot(
+                self.job_to_slot[model_id],
+                state.rank,
+                state.alpha,
+                checkpoint=str(checkpoint / "miles"),
+                restore_optimizer=restore_optimizer,
+            )
+            state.accumulating = False
+            state.optimizer_step = (
+                int(metadata.get("optimizer_step", 0)) if restore_optimizer else 0
+            )
+
+    def capture_sampler_snapshot(
+        self,
+        model_id: str,
+        capture_id: str,
+        requested_version: int,
+    ) -> SamplerPublication:
+        self._require_jobs((model_id,))
+        if capture_id in self._sampler_captures:
+            raise ValueError(f"sampler capture already exists: {capture_id}")
+        state = self.jobs[model_id]
+        path = self.capture_dir / "sampler" / capture_id
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            self._timer.phase(
+                "save_sampler_weights", state.optimizer_step, model_id=model_id
+            ),
+            self._record("spindle/save_sampler_weights"),
+        ):
+            self.runtime.export_slot_peft(
+                slot=self.job_to_slot[model_id],
+                path=str(path),
+                rank=state.rank,
+                alpha=state.alpha,
+                base_model=self.base_model,
+                target_modules=self.config.peft_target_modules,
+                lora_dropout=self.config.lora_dropout,
+            )
+        self._sampler_captures[capture_id] = {
+            "model_id": model_id,
+            "publish_version": requested_version,
+            "path": path,
+        }
+        return SamplerPublication(
+            publish_version=requested_version,
+            base_model=self.base_model,
+            optimizer_step=state.optimizer_step,
+        )
+
+    def publish_sampler_snapshot(self, capture_id: str) -> None:
+        try:
+            capture = self._sampler_captures[capture_id]
+            volume_name = os.environ.get("SPINDLE_BULLETIN_VOLUME")
+            bulletin = SnapshotBulletin(
+                os.environ["SPINDLE_BULLETIN_ROOT"],
+                commit=(
+                    (lambda: _commit_volume(volume_name))
+                    if volume_name is not None
+                    else None
+                ),
+            )
+            job = self.jobs.get(capture["model_id"])
+            publish_step = job.optimizer_step if job is not None else -1
+            with (
+                self._timer.phase(
+                    "publish_weights", publish_step, model_id=capture["model_id"]
+                ),
+                self._record("spindle/publish_weights"),
+            ):
+                bulletin.publish(
+                    VersionRef(
+                        capture["model_id"],
+                        int(capture["publish_version"]),
+                    ),
+                    capture["path"],
+                )
+            if (
+                self._profiling_active
+                and self._profile.step is not None
+                and publish_step > self._profile.step
+            ):
+                self._stop_profiling()
+        finally:
+            capture = self._sampler_captures.pop(capture_id, None)
+            if capture is not None:
+                shutil.rmtree(capture["path"], ignore_errors=True)
+
+    def unload_model(self, model_id: str) -> None:
+        if model_id not in self.jobs:
+            return
+        slot = self.job_to_slot[model_id]
+        self.runtime.unload_slot(slot)
+        self._release(model_id, slot)
+        self.jobs.pop(model_id, None)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._profiling_active:
+            self._stop_profiling()
+        self.runtime.close()
+
+    def _record(self, name: str):
+        """Controller-side profiler span; inert when profiling is off."""
+        if self._controller_profiler is None:
+            return contextlib.nullcontext()
+        return torch.profiler.record_function(name)
+
+    def _start_profiling(self, step: int) -> None:
+        try:
+            self.runtime.torch_profile_start()
+            self._controller_profiler = RankProfiler(activities_cpu_only=True)
+            self._controller_profiler.start()
+            self._profiling_active = True
+            print(
+                json.dumps(
+                    {
+                        "event": "spindle_torch_profile",
+                        "state": "start",
+                        "step": step,
+                        "output_dir": self._profile.output_dir,
+                    }
+                ),
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001 - profiling must not kill training
+            self._profiling_active = False
+            self._controller_profiler = None
+            print(
+                json.dumps(
+                    {"event": "spindle_torch_profile", "state": "error", "step": step}
+                ),
+                flush=True,
+            )
+
+    def _stop_profiling(self) -> None:
+        files: list[str] = []
+        try:
+            results = self.runtime.torch_profile_stop(self._profile.output_dir)
+            for result in results or []:
+                if result:
+                    files.extend(result.values())
+            if self._controller_profiler is not None:
+                controller = self._controller_profiler.stop(
+                    self._profile.output_dir, "controller"
+                )
+                files.extend(controller.values())
+            _commit_volume(os.environ.get("SPINDLE_CHECKPOINT_VOLUME"))
+        except Exception as exc:  # noqa: BLE001 - profiling must not kill training
+            print(
+                json.dumps(
+                    {
+                        "event": "spindle_torch_profile",
+                        "state": "error",
+                        "error": str(exc),
+                    }
+                ),
+                flush=True,
+            )
+        finally:
+            self._profiling_active = False
+            self._profile_step_done = True
+            self._controller_profiler = None
+        if files:
+            print(
+                json.dumps(
+                    {
+                        "event": "spindle_torch_profile",
+                        "state": "stop",
+                        "files": files,
+                    }
+                ),
+                flush=True,
+            )
+
+    def _validate_job(self, state: MilesJobState) -> None:
+        if not 0 < state.rank <= self.config.max_lora_rank:
+            raise ValueError(
+                f"LoRA rank must be between 1 and {self.config.max_lora_rank}"
+            )
+        if state.seed is not None:
+            raise ValueError("Miles multi-LoRA does not support per-model seeds")
+        configured = lora_target_flags(self.config.target_modules)
+        requested = (state.train_attn, state.train_mlp, state.train_unembed)
+        if requested != configured:
+            raise ValueError(
+                "Miles uses deployment-wide LoRA targets; model train_attn, "
+                "train_mlp, and train_unembed must match the deployment"
+            )
+
+    def _require_jobs(self, model_ids: tuple[str, ...]) -> None:
+        for model_id in model_ids:
+            if model_id not in self.jobs:
+                raise KeyError(f"unknown model: {model_id}")
+            if model_id not in self.job_to_slot:
+                raise ValueError(f"model {model_id} is not loaded")
+
+    def _release(self, model_id: str, slot: int) -> None:
+        self.job_to_slot.pop(model_id, None)
+        self.slot_to_job.pop(slot, None)
+        self.free_slots.add(slot)
+
+    def _validate_checkpoint(
+        self,
+        metadata: dict[str, Any],
+        state: MilesJobState,
+        restore_optimizer: bool,
+    ) -> None:
+        if metadata.get("schema_version") != 1:
+            raise ValueError("unsupported Miles checkpoint schema")
+        if metadata.get("backend") != "miles":
+            raise ValueError("checkpoint was not created by the Miles backend")
+        if metadata.get("miles_revision") != self.runtime.revision:
+            raise ValueError("checkpoint Miles revision does not match the deployment")
+        if metadata.get("checkpoint_format") != "miles_torch_dist":
+            raise ValueError("unsupported Miles checkpoint format")
+        if metadata.get("base_model") != self.base_model:
+            raise ValueError("checkpoint base model does not match the deployment")
+        lora = metadata.get("lora_config") or {}
+        if (
+            int(lora.get("rank", 0)) != state.rank
+            or float(lora.get("alpha", 0)) != state.alpha
+        ):
+            raise ValueError("checkpoint LoRA configuration does not match the model")
+        expected_targets = {
+            "train_attn": state.train_attn,
+            "train_mlp": state.train_mlp,
+            "train_unembed": state.train_unembed,
+        }
+        if any(lora.get(name) != value for name, value in expected_targets.items()):
+            raise ValueError("checkpoint LoRA targets do not match the model")
+        expected_topology = {
+            "world_size": self.config.world_size,
+            "data_parallel_size": self.config.data_parallel_size,
+            "tensor_model_parallel_size": self.config.tensor_model_parallel_size,
+            "context_parallel_size": self.config.context_parallel_size,
+            "expert_model_parallel_size": self.config.expert_model_parallel_size,
+            "expert_tensor_parallel_size": self.config.expert_tensor_parallel_size,
+            "pipeline_model_parallel_size": 1,
+        }
+        stored_topology = dict(metadata.get("topology") or {})
+        stored_topology.setdefault("data_parallel_size", 1)
+        stored_topology.setdefault("context_parallel_size", 1)
+        if stored_topology != expected_topology:
+            raise ValueError("checkpoint topology does not match deployment")
+        if restore_optimizer and not metadata.get("has_optimizer"):
+            raise ValueError("checkpoint does not include optimizer state")
+
+
+def _adam_parameters(adam: AdamParams) -> dict[str, float]:
+    values = {
+        "learning_rate": float(adam.learning_rate),
+        "beta1": float(adam.beta1),
+        "beta2": float(adam.beta2),
+        "eps": float(adam.eps),
+        "weight_decay": float(adam.weight_decay),
+        "grad_clip_norm": float(adam.grad_clip_norm),
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("Adam parameters must be finite")
+    if values["learning_rate"] < 0:
+        raise ValueError("learning_rate must be non-negative")
+    if not 0 <= values["beta1"] < 1 or not 0 <= values["beta2"] < 1:
+        raise ValueError("adam betas must be in [0, 1)")
+    if values["eps"] <= 0:
+        raise ValueError("adam eps must be positive")
+    if values["weight_decay"] < 0 or values["grad_clip_norm"] < 0:
+        raise ValueError("weight_decay and grad_clip_norm must be non-negative")
+    return values
+
+
+def _install_capture(
+    source: Path, target: Path, *, overwrite: bool, world_size: int
+) -> None:
+    """Install a capture whose shards were written across several nodes.
+
+    Each trainer node writes its shards into its own view of the checkpoint
+    volume, so copying the capture out of this container's filesystem would
+    install only the shards of the node it shares — a checkpoint that loads
+    on no rank but the ones that wrote it. The committed volume state holds
+    every node's shards, and a server-side copy from it needs no local view.
+    """
+    volume_name = os.environ.get("SPINDLE_CHECKPOINT_VOLUME")
+    root = Path(os.environ.get("SPINDLE_CHECKPOINT_ROOT") or "/checkpoints")
+    try:
+        relative = (str(source.relative_to(root)), str(target.relative_to(root)))
+    except ValueError:
+        relative = None
+    if volume_name is None or relative is None:
+        _install_directory(source, target, overwrite=overwrite)
+        return
+
+    volume = modal.Volume.from_name(volume_name)
+    volume.commit()
+    entries = [entry.path for entry in volume.listdir(relative[0])]
+    shards = [path for path in entries if path.endswith(".distcp")]
+    if shards and len(shards) < world_size:
+        raise RuntimeError(
+            f"capture {relative[0]} holds {len(shards)} of {world_size} shards; "
+            "a checkpoint short of a node's shards fails only on the resume "
+            "that needs it"
+        )
+    if target.exists():
+        if not overwrite:
+            raise FileExistsError(f"checkpoint already exists: {target}")
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    volume.commit()
+    volume.copy_files(entries, relative[1], recursive=True)
+    print(
+        f"spindle_checkpoint_install path={relative[1]} files={len(entries)} "
+        f"shards={len(shards)}",
+        flush=True,
+    )
+
+
+def _install_directory(source: Path, target: Path, *, overwrite: bool) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copytree(source, temporary)
+        if target.exists():
+            if not overwrite:
+                raise FileExistsError(f"checkpoint already exists: {target}")
+            shutil.rmtree(target)
+        os.replace(temporary, target)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def _commit_volume(name: str | None) -> None:
+    if name is None:
+        return
+    modal.Volume.from_name(name).commit()
+
+
+def _reload_volume(name: str | None) -> None:
+    if name is None:
+        return
+    modal.Volume.from_name(name).reload()
+
+
+def build_executor() -> DistributedExecutor:
+    config, checkpoint_dir, capture_dir = parse_backend_config(
+        json.loads(os.environ["SPINDLE_BACKEND_CONFIG"])
+    )
+    backend = MilesCommandBackend(
+        config,
+        checkpoint_dir=checkpoint_dir,
+        capture_dir=capture_dir,
+        base_model=os.environ["SPINDLE_BASE_MODEL"],
+    )
+    return DistributedExecutor(backend)

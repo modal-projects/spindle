@@ -1,0 +1,875 @@
+import asyncio
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import SimpleNamespace
+
+import modal
+import pytest
+from stitch.types import VersionRef
+from tinker import AdamParams, Datum, LoraConfig, ModelInput, TensorData
+
+from spindle.backends import ForwardBatch, ForwardItem, ModelSpec, miles_lora
+from spindle.backends.miles_config import (
+    MilesBackendConfig,
+    lora_target_flags,
+    parse_backend_config,
+)
+from spindle.backends.miles_lora import (
+    MilesCommandBackend,
+    _adam_parameters,
+    _install_capture,
+)
+from spindle.backends.miles_runtime.data import _datum_row, pad_slot_rows, prepare_batch
+from spindle.control_plane.service import ControlPlane
+from spindle.errors import BackendFailed
+from spindle.inference.bulletin import SnapshotBulletin
+from spindle.providers.modal.checkpoint_storage import ModalCheckpointStorage
+
+
+class FakeMilesRuntime:
+    revision = "a" * 40
+
+    def __init__(self) -> None:
+        self.calls = []
+        self.closed = False
+
+    def load_slot(
+        self,
+        slot,
+        rank,
+        alpha,
+        *,
+        checkpoint=None,
+        restore_optimizer=True,
+    ):
+        self.calls.append(
+            ("load_slot", slot, rank, alpha, checkpoint, restore_optimizer)
+        )
+
+    def unload_slot(self, slot):
+        self.calls.append(("unload_slot", slot))
+
+    def forward_backward(
+        self,
+        slot_rows,
+        *,
+        loss_fn,
+        loss_fn_config,
+        forward_only,
+    ):
+        self.last_slot_rows = tuple((slot, dict(row)) for slot, row in slot_rows)
+        self.calls.append(
+            (
+                "forward_backward",
+                tuple(slot for slot, _ in slot_rows),
+                loss_fn,
+                loss_fn_config,
+                forward_only,
+            )
+        )
+        return [
+            {
+                "loss": float(slot + 1),
+                "logprobs": [-float(slot + 1)] * row["target_len"],
+            }
+            for slot, row in slot_rows
+        ]
+
+    def optim_step(self, adam_params_by_slot):
+        self.calls.append(("optim_step", adam_params_by_slot))
+        return {slot: {"grad_norm": slot + 0.5} for slot in adam_params_by_slot}
+
+    def save_slot(self, slot, path, *, include_optimizer=True):
+        self.calls.append(("save_slot", slot, path))
+        destination = Path(path)
+        destination.mkdir(parents=True)
+        (destination / "adapter_megatron_tp0_pp0.pt").write_bytes(b"weights")
+        (destination / "metadata.json").write_text('{"sharded_backend": "torch_dist"}')
+        if include_optimizer:
+            (destination / "optim_rank0.pt").write_bytes(b"optimizer")
+
+    def export_slot_peft(self, **kwargs):
+        self.calls.append(("export_slot_peft", kwargs))
+        destination = Path(kwargs["path"])
+        destination.mkdir(parents=True)
+        (destination / "adapter_model.safetensors").write_bytes(b"adapter")
+        (destination / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    def torch_profile_start(self):
+        self.calls.append(("torch_profile_start",))
+
+    def torch_profile_stop(self, output_dir):
+        self.calls.append(("torch_profile_stop", output_dir))
+        return [{"trace": f"{output_dir}/rank0.trace.json.gz"}]
+
+    def close(self):
+        self.closed = True
+
+
+def _config(**overrides) -> MilesBackendConfig:
+    values = {
+        "hf_checkpoint": "/models/qwen",
+        "model_type": "qwen3-4B",
+        "actor_num_gpus_per_node": 2,
+        "tensor_model_parallel_size": 2,
+        "max_lora_slots": 2,
+    }
+    values.update(overrides)
+    return MilesBackendConfig(**values)
+
+
+def _spec(rank=8) -> ModelSpec:
+    return ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=rank),
+    )
+
+
+def _datum(tokens, final_token) -> Datum:
+    targets = [*tokens[1:], final_token]
+    return Datum(
+        ModelInput.from_ints(tokens),
+        {
+            "target_tokens": TensorData(
+                data=targets,
+                dtype="int64",
+                shape=[len(targets)],
+            ),
+            "weights": TensorData(
+                data=[1.0] * len(targets),
+                dtype="float32",
+                shape=[len(targets)],
+            ),
+        },
+    )
+
+
+def _backend(tmp_path, runtime=None) -> MilesCommandBackend:
+    return MilesCommandBackend(
+        _config(),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=runtime or FakeMilesRuntime(),
+    )
+
+
+def test_config_translates_stable_fields_to_miles_arguments() -> None:
+    config, checkpoint_dir, capture_dir = parse_backend_config(
+        {
+            "miles": {
+                "hf_checkpoint": "/models/qwen",
+                "model_type": "qwen3-4B",
+                "actor_num_gpus_per_node": 4,
+                "tensor_model_parallel_size": 4,
+                "expert_model_parallel_size": 2,
+                "max_lora_slots": 4,
+                "extra_args": ["--recompute-granularity", "full"],
+            },
+            "checkpoint_dir": "/checkpoints",
+        }
+    )
+
+    assert config.world_size == 4
+    assert config.data_parallel_size == 1
+    assert config.peft_target_modules == (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        "lm_head",
+    )
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--multi-lora-n-adapters") + 1] == "4"
+    assert "--debug-train-only" in arguments
+    assert arguments[-2:] == ["--recompute-granularity", "full"]
+    assert checkpoint_dir == Path("/checkpoints")
+    assert capture_dir == Path("/tmp/spindle-miles-captures")
+
+
+def test_config_context_parallel_topology() -> None:
+    config = _config(
+        actor_num_gpus_per_node=8,
+        tensor_model_parallel_size=4,
+        context_parallel_size=2,
+    )
+
+    assert config.data_parallel_size == 1
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--context-parallel-size") + 1] == "2"
+
+
+def test_config_multi_node_topology() -> None:
+    config = _config(
+        actor_num_gpus_per_node=8,
+        actor_num_nodes=3,
+        tensor_model_parallel_size=8,
+        context_parallel_size=3,
+    )
+
+    assert config.world_size == 24
+    assert config.data_parallel_size == 1
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--actor-num-nodes") + 1] == "3"
+    assert arguments[arguments.index("--actor-num-gpus-per-node") + 1] == "8"
+
+
+def test_config_rejects_tensor_parallel_spanning_nodes() -> None:
+    config = _config(
+        actor_num_gpus_per_node=8,
+        actor_num_nodes=2,
+        tensor_model_parallel_size=16,
+    )
+
+    with pytest.raises(ValueError, match="must evenly divide"):
+        config.validate()
+
+    config = _config(
+        actor_num_gpus_per_node=8,
+        actor_num_nodes=3,
+        tensor_model_parallel_size=6,
+        context_parallel_size=2,
+    )
+
+    with pytest.raises(ValueError, match="must evenly divide"):
+        config.validate()
+
+
+def test_config_rejects_non_divisible_context_parallel_topology() -> None:
+    config = _config(
+        actor_num_gpus_per_node=8,
+        tensor_model_parallel_size=4,
+        context_parallel_size=4,
+    )
+
+    with pytest.raises(ValueError, match="must be a multiple"):
+        config.validate()
+
+
+def test_config_rejects_non_divisible_data_parallel_topology() -> None:
+    config = _config(
+        actor_num_gpus_per_node=4,
+        tensor_model_parallel_size=3,
+    )
+
+    with pytest.raises(ValueError, match="must be a multiple"):
+        config.validate()
+
+
+def test_backend_routes_batches_and_preserves_per_model_state(tmp_path) -> None:
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _spec())
+    backend.accept_model("model-b", _spec())
+
+    batch = ForwardBatch(
+        items=(
+            ForwardItem("model-b", (_datum([4, 5], 6),)),
+            ForwardItem("model-a", (_datum([1, 2, 3], 4),)),
+        ),
+        loss_fn="cross_entropy",
+    )
+    outputs = backend.forward_backward(batch)
+
+    assert runtime.calls[-1][0:3] == (
+        "forward_backward",
+        (0, 1),
+        "cross_entropy",
+    )
+    assert outputs[0].loss_fn_outputs[0]["logprobs"].data == [-2.0, -2.0]
+    assert outputs[1].loss_fn_outputs[0]["logprobs"].data == [-1.0, -1.0, -1.0]
+    assert backend.jobs["model-a"].accumulating
+    assert backend.jobs["model-b"].accumulating
+
+    (result,) = backend.optim_step(
+        ("model-a",),
+        AdamParams(learning_rate=2e-4),
+    )
+    assert result.metrics["grad_norm:mean"] == 0.5
+    assert not backend.jobs["model-a"].accumulating
+    assert backend.jobs["model-b"].accumulating
+    assert backend.jobs["model-a"].optimizer_step == 1
+
+    backend.accept_model("model-a", _spec())
+    backend.unload_model("model-a")
+    backend.unload_model("model-a")
+    assert backend.job_to_slot == {"model-b": 1}
+    assert 0 in backend.free_slots
+
+
+def test_pad_slot_rows_adds_zero_weight_rows() -> None:
+    rows = tuple((0, {"tokens": [1, 2], "target_len": 1}) for _ in range(11))
+    padded = pad_slot_rows(rows, 2)
+    assert len(padded) == 12
+    assert padded[-1] == (
+        0,
+        {"tokens": [1, 2], "target_len": 1, "target_tokens": [2]},
+    )
+
+    rows = tuple((0, {"tokens": [1, 2], "target_len": 1}) for _ in range(3))
+    assert len(pad_slot_rows(rows, 4)) == 4
+
+
+def test_backend_pads_dp_ragged_batches(tmp_path) -> None:
+    runtime = FakeMilesRuntime()
+    backend = MilesCommandBackend(
+        _config(actor_num_gpus_per_node=4, tensor_model_parallel_size=2),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=runtime,
+    )
+    backend.accept_model("model-a", _spec())
+
+    outputs = backend.forward_backward(
+        ForwardBatch(
+            items=(ForwardItem("model-a", (_datum([1, 2], 3),)),),
+            loss_fn="cross_entropy",
+        )
+    )
+    assert len(outputs) == 1
+    assert len(runtime.last_slot_rows) == 2
+    assert runtime.last_slot_rows[-1][1] == {
+        "tokens": [1, 2],
+        "target_len": 1,
+        "target_tokens": [2],
+        "weights": [0.0],
+    }
+
+    backend.forward_backward(
+        ForwardBatch(
+            items=(
+                ForwardItem(
+                    "model-a",
+                    (
+                        _datum([1, 2], 3),
+                        _datum([4, 5], 6),
+                    ),
+                ),
+            ),
+            loss_fn="cross_entropy",
+        )
+    )
+    assert len(runtime.last_slot_rows) == 2
+
+    dp1_runtime = FakeMilesRuntime()
+    dp1_backend = _backend(tmp_path / "dp1", dp1_runtime)
+    dp1_backend.accept_model("model-a", _spec())
+    dp1_backend.forward_backward(
+        ForwardBatch(
+            items=(ForwardItem("model-a", (_datum([1, 2], 3),)),),
+            loss_fn="cross_entropy",
+        )
+    )
+    assert len(dp1_runtime.last_slot_rows) == 1
+
+
+def test_checkpoint_capture_persist_and_restore(tmp_path, monkeypatch) -> None:
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    monkeypatch.setenv("SPINDLE_DEFINITION_ID", "qwen3_4b_miles_lora_2k")
+    backend.accept_model("model-a", _spec())
+    backend.jobs["model-a"].optimizer_step = 3
+
+    backend.capture_checkpoint(
+        "model-a",
+        "capture-a",
+        destination="step-3",
+        include_optimizer=True,
+    )
+    uri = backend.persist_checkpoint("capture-a", "step-3")
+    assert Path(uri) == tmp_path / "checkpoints" / "step-3" / "model-a"
+    metadata = json.loads((Path(uri) / "metadata.json").read_text())
+
+    assert metadata["miles_revision"] == runtime.revision
+    assert metadata["backend"] == "miles"
+    assert json.loads((Path(uri) / "miles" / "metadata.json").read_text()) == {
+        "sharded_backend": "torch_dist"
+    }
+    assert metadata["optimizer_step"] == 3
+    assert (Path(uri) / "miles" / "optim_rank0.pt").exists()
+    backend.load_checkpoint("model-a", uri, restore_optimizer=True)
+    assert runtime.calls[-1] == (
+        "load_slot",
+        0,
+        8,
+        32.0,
+        str(Path(uri) / "miles"),
+        True,
+    )
+    assert backend.jobs["model-a"].optimizer_step == 3
+
+
+def test_checkpoint_restore_refreshes_files_saved_by_another_container(
+    tmp_path, monkeypatch
+):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=True
+    )
+    checkpoint = Path(backend.persist_checkpoint("capture-a", "step-1"))
+    # Model the stale mount: the committed checkpoint is absent until reload.
+    staged = tmp_path / "remote-checkpoint"
+    checkpoint.rename(staged)
+    monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "checkpoint-volume")
+    refreshed = []
+
+    def reload_volume(name):
+        assert name == "checkpoint-volume"
+        staged.rename(checkpoint)
+        refreshed.append(name)
+
+    monkeypatch.setattr(miles_lora, "_reload_volume", reload_volume)
+    backend.load_checkpoint("model-a", str(checkpoint), restore_optimizer=True)
+    assert refreshed == ["checkpoint-volume"]
+    assert runtime.calls[-1] == (
+        "load_slot",
+        0,
+        8,
+        32.0,
+        str(checkpoint / "miles"),
+        True,
+    )
+
+
+def test_checkpoint_restore_rejects_different_lora_targets(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    backend = _backend(tmp_path)
+    monkeypatch.setenv("SPINDLE_DEFINITION_ID", "qwen3_4b_miles_lora_2k")
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a",
+        "capture-a",
+        destination="step-1",
+        include_optimizer=False,
+    )
+    uri = Path(backend.persist_checkpoint("capture-a", "step-1"))
+    metadata = json.loads((uri / "metadata.json").read_text())
+    metadata["lora_config"]["train_attn"] = False
+    (uri / "metadata.json").write_text(json.dumps(metadata))
+
+    with pytest.raises(ValueError, match="LoRA targets"):
+        backend.load_checkpoint("model-a", str(uri))
+
+
+def test_checkpoint_topology_defaults_legacy_data_parallel_size(tmp_path) -> None:
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=False
+    )
+    uri = Path(backend.persist_checkpoint("capture-a", "step-1"))
+    metadata = json.loads((uri / "metadata.json").read_text())
+    del metadata["topology"]["data_parallel_size"]
+
+    backend._validate_checkpoint(metadata, backend.jobs["model-a"], False)
+
+
+def test_checkpoint_topology_defaults_legacy_context_parallel_size(tmp_path) -> None:
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=False
+    )
+    uri = Path(backend.persist_checkpoint("capture-a", "step-1"))
+    metadata = json.loads((uri / "metadata.json").read_text())
+    del metadata["topology"]["context_parallel_size"]
+
+    backend._validate_checkpoint(metadata, backend.jobs["model-a"], False)
+
+
+def test_checkpoint_topology_rejects_legacy_data_parallel_size_for_dp2(
+    tmp_path,
+) -> None:
+    source = _backend(tmp_path / "source")
+    source.accept_model("model-a", _spec())
+    source.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=False
+    )
+    uri = Path(source.persist_checkpoint("capture-a", "step-1"))
+    metadata = json.loads((uri / "metadata.json").read_text())
+
+    dp2 = MilesCommandBackend(
+        _config(actor_num_gpus_per_node=4, tensor_model_parallel_size=2),
+        checkpoint_dir=tmp_path / "dp2" / "checkpoints",
+        capture_dir=tmp_path / "dp2" / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=FakeMilesRuntime(),
+    )
+    dp2.accept_model("model-a", _spec())
+    with pytest.raises(ValueError, match="topology"):
+        dp2._validate_checkpoint(metadata, dp2.jobs["model-a"], False)
+
+
+def test_sampler_capture_publishes_existing_spindle_format(tmp_path, monkeypatch) -> None:
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    bulletin_root = tmp_path / "bulletin"
+    monkeypatch.setenv("SPINDLE_BULLETIN_ROOT", str(bulletin_root))
+    monkeypatch.delenv("SPINDLE_BULLETIN_VOLUME", raising=False)
+    backend.accept_model("model-a", _spec())
+
+    publication = backend.capture_sampler_snapshot("model-a", "capture-a", 7)
+    backend.publish_sampler_snapshot("capture-a")
+
+    assert publication.publish_version == 7
+    resolved = SnapshotBulletin(bulletin_root).resolve(VersionRef("model-a", 7))
+    assert (resolved / "adapter_model.safetensors").read_bytes() == b"adapter"
+    assert "capture-a" not in backend._sampler_captures
+
+
+def test_sampler_snapshots_persist_concurrently_without_crossing_adapters(
+    tmp_path, monkeypatch
+) -> None:
+    backend = _backend(tmp_path, FakeMilesRuntime())
+    root = tmp_path / "bulletin"
+    monkeypatch.setenv("SPINDLE_BULLETIN_ROOT", str(root))
+    monkeypatch.setenv("SPINDLE_BULLETIN_VOLUME", "test-volume")
+    committing = threading.Barrier(2, timeout=5)
+    monkeypatch.setattr(miles_lora, "_commit_volume", lambda name: committing.wait())
+    for model in ["model-a", "model-b"]:
+        backend.accept_model(model, _spec())
+        backend.capture_sampler_snapshot(model, model, 1)
+        capture = backend._sampler_captures[model]
+        (capture["path"] / "adapter_model.safetensors").write_bytes(model.encode())
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        futures = [
+            workers.submit(backend.publish_sampler_snapshot, model)
+            for model in ["model-a", "model-b"]
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    bulletin = SnapshotBulletin(root)
+    for model in ["model-a", "model-b"]:
+        ref = VersionRef(model, 1)
+        assert bulletin.read_latest(model) == ref
+        assert (
+            bulletin.resolve(ref) / "adapter_model.safetensors"
+        ).read_bytes() == model.encode()
+    assert not backend._sampler_captures
+
+
+def test_backend_rejects_unsupported_per_model_miles_options(tmp_path) -> None:
+    backend = _backend(tmp_path)
+    with pytest.raises(ValueError, match="per-model seeds"):
+        backend.accept_model(
+            "model-a",
+            ModelSpec(
+                base_model="Qwen/Qwen3-4B",
+                parameterization="lora",
+                lora_config=LoraConfig(rank=8, seed=7),
+            ),
+        )
+
+
+def test_build_executor_uses_single_process_mode(monkeypatch, tmp_path) -> None:
+    config = _config()
+    captured = {}
+
+    def construct(parsed_config, **kwargs):
+        captured.update(config=parsed_config, **kwargs)
+        return "backend"
+
+    monkeypatch.setenv("SPINDLE_BACKEND_CONFIG", "{}")
+    monkeypatch.setenv("SPINDLE_BASE_MODEL", "Qwen/Qwen3-4B")
+    monkeypatch.setattr(
+        miles_lora,
+        "parse_backend_config",
+        lambda _value: (config, tmp_path / "checkpoints", tmp_path / "captures"),
+    )
+    monkeypatch.setattr(miles_lora, "MilesCommandBackend", construct)
+
+    executor = miles_lora.build_executor()
+
+    assert executor.backend == "backend"
+    assert executor.command_group is None
+    assert executor.checkpoint_persistence_group is None
+    assert executor.sampler_persistence_group is None
+    assert captured["config"] == config
+
+
+def test_nonfinite_optimizer_skip_does_not_advance_policy(tmp_path):
+    runtime = FakeMilesRuntime()
+    runtime.optim_step = lambda params: {
+        slot: {"skipped_nonfinite": 1.0} for slot in params
+    }
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _spec())
+    backend.jobs["model-a"].accumulating = True
+    (result,) = backend.optim_step(("model-a",), AdamParams(learning_rate=1e-5))
+    assert result.metrics["update_successful:mean"] == 0.0
+    assert result.metrics["skipped_nonfinite:sum"] == 1.0
+    assert result.metrics["timing/optimizer_step"] == 0.0
+    assert result.metrics["timing/optim_step_s"] >= 0.0
+    assert result.metrics["timing/optim_step_calls"] == 1.0
+    assert backend.jobs["model-a"].optimizer_step == 0
+    assert not backend.jobs["model-a"].accumulating
+
+
+def test_datum_preserves_explicit_targets_for_upstream():
+    row = _datum_row(_datum([1, 2, 3], 4), "cross_entropy", 0)
+    assert row["tokens"] == [1, 2, 3, 4]
+    assert row["target_tokens"] == [2, 3, 4]
+
+
+def test_weights_only_capture_excludes_optimizer(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "weights-only", destination="weights", include_optimizer=False
+    )
+    uri = Path(backend.persist_checkpoint("weights-only", "weights"))
+    assert not (uri / "miles" / "optim_rank0.pt").exists()
+    assert json.loads((uri / "metadata.json").read_text())["has_optimizer"] is False
+    with pytest.raises(ValueError, match="optimizer"):
+        backend.load_checkpoint("model-a", str(uri), restore_optimizer=True)
+
+
+def test_checkpoint_rejects_different_resolved_main_commit(tmp_path):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=True
+    )
+    uri = backend.persist_checkpoint("capture-a", "step-1")
+    runtime.revision = "b" * 40
+    calls = list(runtime.calls)
+    with pytest.raises(ValueError, match="Miles revision does not match"):
+        backend.load_checkpoint("model-a", uri, restore_optimizer=True)
+    assert runtime.calls == calls
+
+
+def test_miles_checkpoint_storage_lifecycle_uses_control_plane_layout(tmp_path):
+    backend = _backend(tmp_path, FakeMilesRuntime())
+    storage = ModalCheckpointStorage(
+        SimpleNamespace(reload=lambda: None, commit=lambda: None),
+        str(backend.checkpoint_dir),
+    )
+    plane = SimpleNamespace(checkpoint_root=str(backend.checkpoint_dir))
+    paths = {}
+    for model in ("a", "b"):
+        backend.accept_model(model, _spec())
+        backend.capture_checkpoint(
+            model, model, destination="final", include_optimizer=True
+        )
+        paths[model] = backend.persist_checkpoint(model, "final")
+        path = ControlPlane.tinker_path(plane, paths[model])
+        assert path == f"tinker://{model}/weights/final"
+        assert ControlPlane.resolve_checkpoint_path(plane, path) == paths[model]
+        backend.load_checkpoint(model, paths[model], restore_optimizer=True)
+
+    async def check():
+        assert {
+            (entry["model_id"], entry["name"]) for entry in await storage.list(None)
+        } == {("a", "final"), ("b", "final")}
+        assert (await storage.read_metadata(paths["a"]))["backend"] == "miles"
+        await storage.delete(paths["a"])
+        assert await storage.list("a") == []
+        assert len(await storage.list("b")) == 1
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("loss_fn", ["cross_entropy", "importance_sampling"])
+def test_mixed_clients_only_forward_fields_consumed_by_loss(tmp_path, loss_fn):
+    first = _datum([1, 2, 3], 4)
+    second = _datum([1, 2, 3], 4)
+    inputs = first.loss_fn_inputs
+    extra = TensorData(
+        data=[0.0] * len(inputs["target_tokens"].data),
+        dtype="float32",
+        shape=inputs["target_tokens"].shape,
+    )
+    inputs["advantages"] = extra
+    inputs["logprobs"] = extra
+    if loss_fn != "cross_entropy":
+        second.loss_fn_inputs["advantages"] = extra
+        second.loss_fn_inputs["logprobs"] = extra
+        second.loss_fn_inputs.pop("weights")
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (first,)), ForwardItem("b", (second,))),
+        loss_fn=loss_fn,
+        loss_fn_config={},
+    )
+    rows = [row for _, row in prepare_batch(batch, {"a": 0, "b": 1}).slot_rows]
+    assert rows[0].keys() == rows[1].keys()
+    assert ("weights" in rows[0]) == (loss_fn == "cross_entropy")
+    assert ("sampling_logprobs" in rows[0]) == (loss_fn != "cross_entropy")
+
+
+def test_sequence_alignment_pads_rows_and_trims_returned_logprobs(tmp_path) -> None:
+    runtime = FakeMilesRuntime()
+    backend = MilesCommandBackend(
+        _config(
+            actor_num_gpus_per_node=8,
+            tensor_model_parallel_size=8,
+            context_parallel_size=3,
+            actor_num_nodes=3,
+            align_sequences_to_parallel_layout=True,
+        ),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=runtime,
+    )
+    backend.accept_model("a", _spec())
+    datum = _datum(list(range(1, 11)), 11)
+    outputs = backend.forward_backward(
+        ForwardBatch(
+            items=(ForwardItem("a", (datum,)),),
+            loss_fn="cross_entropy",
+            loss_fn_config={},
+        )
+    )
+
+    (_, row), *_ = runtime.last_slot_rows
+    assert len(row["tokens"]) == 48
+    assert row["target_len"] == 47
+    assert row["weights"][10:] == [0.0] * 37
+    assert len(outputs[0].loss_fn_outputs[0]["logprobs"].data) == 10
+
+
+def test_sequence_alignment_is_off_by_default() -> None:
+    assert _config().sequence_alignment == 1
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (_datum([1, 2, 3], 4),)),),
+        loss_fn="cross_entropy",
+        loss_fn_config={},
+    )
+    (_, row), *_ = prepare_batch(batch, {"a": 0}).slot_rows
+    assert row["target_len"] == 3
+
+
+@pytest.mark.parametrize(
+    "name", ["learning_rate", "beta1", "beta2", "eps", "weight_decay", "grad_clip_norm"]
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_adam_parameters_rejected_before_runtime(name, value):
+    values = {
+        "learning_rate": 1e-4,
+        "beta1": 0.9,
+        "beta2": 0.99,
+        "eps": 1e-8,
+        "weight_decay": 0.0,
+        "grad_clip_norm": 1.0,
+    }
+    values[name] = value
+    with pytest.raises(ValueError, match="finite"):
+        _adam_parameters(SimpleNamespace(**values))
+
+
+@pytest.mark.parametrize("outcome", [{"error": "worker update failed"}, {}])
+def test_optimizer_worker_failure_is_fatal(tmp_path, outcome):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("a", _spec())
+    backend.jobs["a"].accumulating = True
+    runtime.optim_step = lambda parameters: {0: outcome}
+    with pytest.raises(BackendFailed):
+        backend.optim_step(("a",), AdamParams(learning_rate=1e-4))
+
+
+class _FakeCheckpointVolume:
+    """A volume whose committed state holds shards this container never wrote."""
+
+    def __init__(self, entries: list[str], copies: list) -> None:
+        self.entries = entries
+        self.copies = copies
+
+    def commit(self) -> None:
+        pass
+
+    def reload(self) -> None:
+        raise AssertionError("a colocated engine keeps a capture file open")
+
+    def listdir(self, path):
+        return [SimpleNamespace(path=f"{path}/{name}") for name in self.entries]
+
+    def copy_files(self, src_paths, dst_path, recursive=False) -> None:
+        self.copies.append((tuple(src_paths), dst_path, recursive))
+
+
+def _install_environment(monkeypatch, tmp_path, entries, copies) -> None:
+    monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "spindle-checkpoints")
+    monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        modal.Volume,
+        "from_name",
+        staticmethod(lambda *args, **kwargs: _FakeCheckpointVolume(entries, copies)),
+    )
+
+
+def test_installing_a_capture_copies_the_shards_of_every_node(monkeypatch, tmp_path):
+    entries = ["__0_0.distcp", "__1_0.distcp", "metadata.json"]
+    copies: list = []
+    _install_environment(monkeypatch, tmp_path, entries, copies)
+    source = tmp_path / ".captures" / "engine" / "capture-a"
+    source.mkdir(parents=True)
+    (source / "__0_0.distcp").write_text("mine")
+
+    _install_capture(
+        source, tmp_path / "000000" / "model-a", overwrite=False, world_size=2
+    )
+
+    assert copies == [
+        (
+            (
+                ".captures/engine/capture-a/__0_0.distcp",
+                ".captures/engine/capture-a/__1_0.distcp",
+                ".captures/engine/capture-a/metadata.json",
+            ),
+            "000000/model-a",
+            True,
+        )
+    ]
+
+
+def test_a_capture_short_of_a_nodes_shards_is_refused(monkeypatch, tmp_path):
+    copies: list = []
+    _install_environment(monkeypatch, tmp_path, ["__0_0.distcp"], copies)
+    source = tmp_path / ".captures" / "engine" / "capture-a"
+    source.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="1 of 2 shards"):
+        _install_capture(
+            source, tmp_path / "000000" / "model-a", overwrite=False, world_size=2
+        )
+    assert copies == []
+
+
+@pytest.mark.parametrize(
+    "targets,expected",
+    [
+        (
+            (
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+                "lm_head",
+            ),
+            (True, True, True),
+        ),
+        (("model.layers.0.self_attn.q_proj",), (True, False, False)),
+        (("gate_proj", "up_proj", "down_proj"), (False, True, False)),
+        (("lm_head",), (False, False, True)),
+    ],
+)
+def test_hf_targets_match_tinker_training_flags(targets, expected):
+    assert lora_target_flags(targets) == expected

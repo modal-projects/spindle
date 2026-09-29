@@ -1,0 +1,603 @@
+import asyncio
+
+import httpx
+import pytest
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from spindle.engine import Engine
+from spindle.engine.http import HttpEngineClient, create_engine_app
+from spindle.telemetry import trainer
+from tests.support import EchoExecutor
+
+
+@pytest.fixture
+def setup(monkeypatch):
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trainer, "provider", lambda: provider)
+    reader = InMemoryMetricReader()
+    telemetry = trainer.TrainerTelemetry(
+        "instance", "definition", "boot", metric_reader=reader
+    )
+    yield telemetry, exporter, reader
+    telemetry.close()
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("header_value", [b"ascii", b"\xff"])
+def test_transport_queue_execution_and_duplicate_submission(setup, header_value):
+    telemetry, exporter, _ = setup
+
+    async def run():
+        server = Engine(EchoExecutor(), observer=telemetry)
+        await server.accept_model("model", {})
+        client = HttpEngineClient(
+            "http://engine",
+            transport=httpx.ASGITransport(app=create_engine_app(server)),
+        )
+
+        async def submit(scope, receive, send):
+            request = {"model_id": "model", "seq_id": 1, "adam_params": {}}
+            rid = await client.optim_step(request)
+            assert await client.optim_step(request) == rid
+            assert (
+                await server.retrieve_future(rid, timeout=1)
+            ).status.value == "complete"
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        app = trainer.CommandMiddleware(submit)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://control"
+        ) as http:
+            assert (
+                await http.post(
+                    "/api/v1/optim_step", headers=[(b"x-client-label", header_value)]
+                )
+            ).status_code == 200
+        await client.close()
+        await server.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (command,) = [s for s in spans if s.name == "spindle.command.optim_step"]
+    (control,) = [s for s in spans if s.name == "spindle.control.submit"]
+    assert command.parent is None
+    assert control.parent.span_id == command.context.span_id
+    assert not any(s.name == "spindle.trainer.queue" for s in spans)
+    for name in ("spindle.command.execute", "spindle.trainer.result_ready"):
+        (child,) = [s for s in spans if s.name == name]
+        assert child.parent.span_id == command.context.span_id
+        assert child.start_time >= command.start_time
+        assert child.end_time <= command.end_time
+    assert not telemetry.commands
+
+
+def test_state_one_hot_and_background_overlap(setup):
+    telemetry, _, reader = setup
+    telemetry.state(("model",), "executing:forward_backward")
+    telemetry.set_activity("checkpoint", "save_weights")
+    data = reader.get_metrics_data()
+    points = data.resource_metrics[0].scope_metrics[0].metrics[0].data.data_points
+    for lane in ("execution", "checkpoint", "sampler"):
+        assert sum(p.value for p in points if p.attributes["spindle.lane"] == lane) == 1
+    active = {
+        (p.attributes["spindle.lane"], p.attributes["spindle.operation"])
+        for p in points
+        if p.value
+    }
+    assert active == {
+        ("execution", "forward_backward"),
+        ("checkpoint", "save_weights"),
+        ("sampler", "idle"),
+    }
+    telemetry.state(("model",), "idle")
+    assert telemetry.activity["checkpoint"] == "save_weights"
+
+
+def test_batch_links_all_commands_and_error_omits_payload(setup):
+    from types import SimpleNamespace
+
+    from spindle.engine import FutureState, FutureStatus, OperationKind
+
+    telemetry, exporter, _ = setup
+    ops = [
+        SimpleNamespace(
+            request_id=f"{m}:1",
+            model_id=m,
+            seq_id=1,
+            kind=OperationKind.FORWARD_BACKWARD,
+        )
+        for m in ("a", "b")
+    ]
+    from spindle.engine.operations import parse_operation_payload
+
+    for index, op in enumerate(ops):
+        telemetry.register_model(
+            op.model_id, {"user_metadata": {"run_id": "run", "attempt_id": str(index)}}
+        )
+        op.payload = parse_operation_payload(
+            OperationKind.FORWARD_BACKWARD,
+            {
+                "data": [
+                    {
+                        "model_input": {
+                            "chunks": [
+                                {
+                                    "type": "encoded_text",
+                                    "tokens": list(range(index + 3)),
+                                }
+                            ]
+                        },
+                        "loss_fn_inputs": {},
+                    }
+                ]
+                * (index + 1),
+                "loss_fn": "cross_entropy",
+            },
+        )
+        telemetry.begin(op)
+    import time
+
+    from spindle.telemetry import backend
+
+    backend.received.set(
+        {
+            "attributes": {
+                "spindle.padded_tokens": 16,
+                "spindle.packed_microbatch_count": 2,
+                "secret": "PRIVATE",
+            },
+            "models": {"a": {"spindle.loss_tokens": 2}, "b": {"spindle.loss_tokens": 5}},
+        }
+    )
+    telemetry.span(
+        ("a", "b"),
+        "forward_backward",
+        "gpu",
+        time.time(),
+        seq_ids=[1, 1],
+        n=2,
+        ok=False,
+        error="PRIVATE",
+    )
+    for op in ops:
+        telemetry.finish(op, FutureState(FutureStatus.FAILED, error="PRIVATE"))
+    spans = exporter.get_finished_spans()
+    (batch,) = [s for s in spans if s.name == "spindle.trainer.forward_backward"]
+    roots = [s for s in spans if s.name == "spindle.command.forward_backward"]
+    assert batch.parent is None
+    assert batch.attributes["spindle.run_id"] == "run"
+    assert "spindle.run_attempt_id" not in batch.attributes
+    assert {s.attributes["spindle.run_attempt_id"] for s in roots} == {"0", "1"}
+    assert batch.attributes["spindle.command_count"] == 2
+    assert batch.attributes["spindle.example_count"] == 3
+    assert batch.attributes["spindle.input_tokens"] == 11
+    assert batch.attributes["spindle.loss_tokens"] == 7
+    assert batch.attributes["spindle.padded_tokens"] == 16
+    assert sorted(s.attributes["spindle.loss_tokens"] for s in roots) == [2, 5]
+    assert all("spindle.padded_tokens" not in s.attributes for s in roots)
+    assert backend.received.get() is None
+    assert sorted(s.attributes["spindle.input_tokens"] for s in roots) == [3, 8]
+    assert {l.context.span_id for l in batch.links} == {
+        s.context.span_id for s in roots
+    }
+    assert all("PRIVATE" not in str(s.attributes) and not s.events for s in spans)
+
+
+def test_persistence_keeps_original_command_and_overlaps_next_operation(setup):
+    telemetry, exporter, _ = setup
+
+    async def run():
+        persisting, release = asyncio.Event(), asyncio.Event()
+
+        class Executor(EchoExecutor):
+            async def persist_checkpoint(self, *args):
+                persisting.set()
+                await release.wait()
+                return await super().persist_checkpoint(*args)
+
+        server = Engine(Executor(), observer=telemetry)
+        await server.accept_model("model", {})
+        save_id = await server.save_weights(
+            {"model_id": "model", "seq_id": 1, "path": "private-checkpoint"}
+        )
+        await asyncio.wait_for(persisting.wait(), 1)
+        assert telemetry.activity["checkpoint"] == "save_weights"
+        optim_id = await server.optim_step(
+            {"model_id": "model", "seq_id": 2, "adam_params": {}}
+        )
+        assert (await server.retrieve_future(optim_id, 1)).status.value == "complete"
+        assert (await server.retrieve_future(save_id)).status.value == "pending"
+        assert save_id in telemetry.commands and optim_id not in telemetry.commands
+        release.set()
+        assert (await server.retrieve_future(save_id, 1)).status.value == "complete"
+        await server.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (command,) = [s for s in spans if s.name == "spindle.command.save_weights"]
+    (persist,) = [s for s in spans if s.name == "spindle.trainer.persist.save_weights"]
+    (optim,) = [s for s in spans if s.name == "spindle.trainer.optim_step"]
+    assert persist.parent is None
+    assert persist.links[0].context.span_id == command.context.span_id
+    assert persist.start_time <= optim.start_time < optim.end_time <= persist.end_time
+    for phase in ("capture", "persist"):
+        (child,) = [s for s in spans if s.name == "spindle.command." + phase]
+        (physical,) = [
+            s for s in spans if s.name == "spindle.trainer." + phase + ".save_weights"
+        ]
+        assert child.parent.span_id == command.context.span_id
+        assert (child.start_time, child.end_time) == (
+            physical.start_time,
+            physical.end_time,
+        )
+        assert child.links[0].context.span_id == physical.context.span_id
+    assert not any(s.name == "spindle.command.wait_persistence" for s in spans)
+    assert all("private-checkpoint" not in str(s.attributes) for s in spans)
+
+
+def test_unload_ends_buffered_command_without_retaining_span(setup):
+    telemetry, exporter, _ = setup
+
+    async def run():
+        server = Engine(EchoExecutor(), observer=telemetry)
+        await server.accept_model("model", {})
+        # Sequence 2 must wait for missing sequence 1, then be discarded on unload.
+        await server.optim_step({"model_id": "model", "seq_id": 2, "adam_params": {}})
+        assert telemetry.commands
+        await server.unload_model("model")
+        assert not telemetry.commands
+        await server.close()
+
+    asyncio.run(run())
+    (command,) = [
+        s for s in exporter.get_finished_spans() if s.name == "spindle.command.optim_step"
+    ]
+    assert command.status.status_code.name == "ERROR"
+
+
+def test_workload_counts_and_independent_execution_for_one_command(setup):
+    from tests.engine.test_server import forward_backward
+
+    telemetry, exporter, _ = setup
+
+    async def run():
+        server = Engine(EchoExecutor(), observer=telemetry)
+        await server.accept_model("model-a", {})
+        rid = await forward_backward(server, 1, [1, 2, 3, 4, 5])
+        assert (await server.retrieve_future(rid, 1)).status.value == "complete"
+        await server.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (command,) = [s for s in spans if s.name == "spindle.command.forward_backward"]
+    (batch,) = [s for s in spans if s.name == "spindle.trainer.forward_backward"]
+    assert command.parent is None and batch.parent is None
+    assert command.context.trace_id != batch.context.trace_id
+    assert batch.links[0].context == command.context
+    for span in (command, batch):
+        assert span.attributes["spindle.example_count"] == 1
+        assert span.attributes["spindle.input_tokens"] == 5
+    assert batch.attributes["spindle.command_count"] == 1
+    assert "spindle.batch_size" not in batch.attributes
+
+
+def test_retried_http_submission_joins_original_completed_root(setup):
+    telemetry, exporter, _ = setup
+
+    async def run():
+        server = Engine(EchoExecutor(), observer=telemetry)
+        await server.accept_model("model", {})
+        client = HttpEngineClient(
+            "http://engine",
+            transport=httpx.ASGITransport(app=create_engine_app(server)),
+        )
+
+        async def submit(scope, receive, send):
+            rid = await client.optim_step(
+                {"model_id": "model", "seq_id": 1, "adam_params": {}}
+            )
+            await server.retrieve_future(rid, 1)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"{}"})
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=trainer.CommandMiddleware(submit)),
+            base_url="http://control",
+        ) as http:
+            for _ in range(2):
+                assert (await http.post("/api/v1/optim_step")).status_code == 200
+        await client.close()
+        await server.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (command,) = [s for s in spans if s.name == "spindle.command.optim_step"]
+    submissions = [s for s in spans if s.name == "spindle.control.submit"]
+    assert len(submissions) == 2
+    assert all(
+        s.parent.span_id == command.context.span_id
+        and s.context.trace_id == command.context.trace_id
+        for s in submissions
+    )
+
+
+def test_engine_combines_commands_once_with_aggregate_workload(setup):
+    import json
+
+    from spindle.engine import OperationKind
+
+    telemetry, exporter, _ = setup
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        class Executor(EchoExecutor):
+            async def execute(self, model_id, kind, payload):
+                if kind == OperationKind.OPTIM_STEP:
+                    entered.set()
+                    await release.wait()
+                return await super().execute(model_id, kind, payload)
+
+        server = Engine(Executor(), observer=telemetry)
+        for model in ("a", "b"):
+            await server.accept_model(
+                model, {"user_metadata": {"run_id": "run", "attempt_id": model}}
+            )
+        await server.optim_step({"model_id": "a", "seq_id": 1, "adam_params": {}})
+        await asyncio.wait_for(entered.wait(), 1)
+        requests = []
+        for model, seq, count, tokens in [
+            ("a", 2, 1, [1, 2, 3]),
+            ("b", 1, 2, [4, 5, 6, 7]),
+        ]:
+            body = {
+                "model_id": model,
+                "seq_id": seq,
+                "forward_backward_input": {
+                    "data": [
+                        {
+                            "model_input": {"chunks": [{"tokens": tokens}]},
+                            "loss_fn_inputs": {},
+                        }
+                    ]
+                    * count,
+                    "loss_fn": "cross_entropy",
+                },
+            }
+            requests.append(
+                await server.forward_backward(
+                    json.dumps(body).encode(), "application/json"
+                )
+            )
+        release.set()
+        for rid in requests:
+            assert (await server.retrieve_future(rid, 1)).status.value == "complete"
+        await server.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (batch,) = [s for s in spans if s.name == "spindle.trainer.forward_backward"]
+    commands = [s for s in spans if s.name == "spindle.command.forward_backward"]
+    assert len(commands) == 2
+    assert batch.parent is None
+    assert batch.attributes["spindle.command_count"] == 2
+    assert batch.attributes["spindle.example_count"] == 3
+    assert batch.attributes["spindle.input_tokens"] == 11
+    assert batch.attributes["spindle.run_id"] == "run"
+    assert "spindle.run_attempt_id" not in batch.attributes
+    assert {(link.context.trace_id, link.context.span_id) for link in batch.links} == {
+        (command.context.trace_id, command.context.span_id) for command in commands
+    }
+
+    children = [
+        s
+        for s in spans
+        if s.name == "spindle.command.execute"
+        and s.attributes["spindle.operation"] == "forward_backward"
+    ]
+    assert len(children) == 2
+    for command in commands:
+        (child,) = [s for s in children if s.parent.span_id == command.context.span_id]
+        assert child.context.trace_id == command.context.trace_id
+        assert child.start_time == batch.start_time > command.start_time
+        assert child.end_time == batch.end_time <= command.end_time
+        assert (
+            child.attributes["spindle.input_tokens"]
+            == command.attributes["spindle.input_tokens"]
+        )
+        assert (
+            child.attributes["spindle.run_attempt_id"]
+            == command.attributes["spindle.run_attempt_id"]
+        )
+        assert [
+            (link.context.trace_id, link.context.span_id) for link in child.links
+        ] == [(batch.context.trace_id, batch.context.span_id)]
+
+
+def test_only_scoped_metrics_promote_the_deployment_run_resource(monkeypatch):
+    monkeypatch.setenv(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "spindle.run_id=owned-run,spindle.run_attempt_id=not-a-metric-tag",
+    )
+    for scoped in (False, True):
+        telemetry = trainer.TrainerTelemetry(
+            "physical-instance",
+            "definition",
+            "boot",
+            metric_reader=InMemoryMetricReader(),
+            scoped=scoped,
+        )
+        try:
+            # Changing model attempts must not change physical deployment labels.
+            telemetry.register_model(
+                "m",
+                {"user_metadata": {"run_id": "different", "attempt_id": "replacement"}},
+            )
+            observations = telemetry.observe(None)
+            assert observations
+            for point in observations:
+                assert point.attributes.get("spindle.run_id") == (
+                    "owned-run" if scoped else None
+                )
+                assert "spindle.run_attempt_id" not in point.attributes
+                assert (
+                    point.attributes["spindle.trainer_instance_id"] == "physical-instance"
+                )
+        finally:
+            telemetry.close()
+
+
+def test_backend_measurements_cross_http_without_changing_results(
+    setup, monkeypatch, tmp_path
+):
+    from spindle.engine import backend_http
+    from spindle.telemetry import backend
+
+    telemetry, exporter, _ = setup
+    monkeypatch.setattr(backend_http, "provider", trainer.provider)
+
+    class Executor(EchoExecutor):
+        async def execute(self, model_id, kind, payload):
+            with backend.phase("optimizer"):
+                backend.count("spindle.padded_tokens", 16)
+                backend.count("spindle.packed_microbatch_count", 2)
+                backend.count("spindle.loss_tokens", 7, model_id=model_id)
+            return await super().execute(model_id, kind, payload)
+
+        async def persist_checkpoint(self, model_id, payload, snapshot):
+            with backend.phase("checkpoint_write"):
+                (tmp_path / "checkpoint.pt").write_bytes(b"12345")
+            with backend.phase("checkpoint_commit"):
+                pass
+            backend.checkpoint_size(str(tmp_path))
+            return await super().persist_checkpoint(model_id, payload, snapshot)
+
+    async def run():
+        client = backend_http.HttpBackendClient(
+            "http://backend",
+            transport=httpx.ASGITransport(
+                app=backend_http.create_backend_app(Executor())
+            ),
+        )
+        engine = Engine(client, observer=telemetry)
+        await engine.accept_model(
+            "model", {"base_model": "test/model", "parameterization": "full"}
+        )
+        rid = await engine.optim_step(
+            {"model_id": "model", "seq_id": 1, "adam_params": {}}
+        )
+        result = await engine.retrieve_future(rid, 1)
+        assert result.status.value == "complete"
+        assert "telemetry" not in result.result
+        save = await engine.save_weights(
+            {"model_id": "model", "seq_id": 2, "path": "snapshot"}
+        )
+        assert (await engine.retrieve_future(save, 1)).status.value == "complete"
+        await engine.close()
+        await client.close()
+
+    asyncio.run(run())
+    spans = exporter.get_finished_spans()
+    (physical,) = [s for s in spans if s.name == "spindle.trainer.optim_step"]
+    (phase,) = [s for s in spans if s.name == "spindle.backend.optimizer"]
+    (command,) = [s for s in spans if s.name == "spindle.command.optim_step"]
+    assert phase.context.trace_id == physical.context.trace_id
+    assert phase.parent.span_id == physical.context.span_id
+    assert (
+        physical.start_time <= phase.start_time <= phase.end_time <= physical.end_time
+    )
+    assert physical.attributes["spindle.padded_tokens"] == 16
+    assert physical.attributes["spindle.packed_microbatch_count"] == 2
+    assert (
+        physical.attributes["spindle.loss_tokens"]
+        == command.attributes["spindle.loss_tokens"]
+        == 7
+    )
+    assert "spindle.padded_tokens" not in command.attributes
+    assert phase.attributes["spindle.rank"] == 0
+
+    (save,) = [s for s in spans if s.name == "spindle.command.save_weights"]
+    (persist,) = [s for s in spans if s.name == "spindle.trainer.persist.save_weights"]
+    assert (
+        save.attributes["spindle.checkpoint_bytes"]
+        == persist.attributes["spindle.checkpoint_bytes"]
+        == 5
+    )
+    for name in ("checkpoint_write", "checkpoint_commit"):
+        (phase,) = [s for s in spans if s.name == "spindle.backend." + name]
+        assert phase.parent.span_id == persist.context.span_id
+    assert "spindle.loss_tokens" not in save.attributes
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_parallel_publication_state_stays_active_until_last_worker(setup, first_fails):
+    telemetry, exporter, reader = setup
+
+    async def run():
+        started = {model: asyncio.Event() for model in ("a", "b")}
+        release = {model: asyncio.Event() for model in started}
+
+        class Executor(EchoExecutor):
+            async def persist_snapshot(self, model_id, kind, payload, capture):
+                started[model_id].set()
+                await release[model_id].wait()
+                if model_id == "a" and first_fails:
+                    raise RuntimeError("publication failed")
+                return {"publish_version": 1}
+
+        def sampler_state():
+            points = (
+                reader.get_metrics_data()
+                .resource_metrics[0]
+                .scope_metrics[0]
+                .metrics[0]
+                .data.data_points
+            )
+            return {
+                p.attributes["spindle.operation"]
+                for p in points
+                if p.attributes["spindle.lane"] == "sampler" and p.value
+            }
+
+        server = Engine(
+            Executor(), observer=telemetry, sampler_persistence_concurrency=2
+        )
+        try:
+            futures = {}
+            for model in started:
+                await server.accept_model(model, {})
+                futures[model] = await server.save_weights_for_sampler(
+                    {"model_id": model, "seq_id": 1, "publish_version": 1}
+                )
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in started.values())), 1
+            )
+            assert sampler_state() == {"save_weights_for_sampler"}
+            release["a"].set()
+            first = await server.retrieve_future(futures["a"], timeout=1)
+            assert first.status.value == ("failed" if first_fails else "complete")
+            assert sampler_state() == {"save_weights_for_sampler"}
+            release["b"].set()
+            assert (
+                await server.retrieve_future(futures["b"], timeout=1)
+            ).status.value == "complete"
+            assert sampler_state() == {"idle"}
+        finally:
+            for event in release.values():
+                event.set()
+            await server.close()
+
+    asyncio.run(run())
+    spans = [
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == "spindle.trainer.persist.save_weights_for_sampler"
+    ]
+    assert len(spans) == 2
+    assert {span.attributes["spindle.model_id"] for span in spans} == {"a", "b"}
