@@ -100,6 +100,9 @@ before running a larger workload.
 
 Any Tinker-compatible script can be run out of the box against a Spindle server just by changing the base URL and API key.
 
+Supported Tinker SDK versions: `>=0.24.1,<0.26`. SDK 0.25 requires the updated
+Spindle server to be deployed because it requires protobuf training and sampling responses.
+
 First, set these two variables from above:
 
 ```bash
