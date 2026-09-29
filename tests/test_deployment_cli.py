@@ -92,6 +92,15 @@ def deployed(monkeypatch):
     return state
 
 
+def test_deploy_defaults_to_bundled_configs(tmp_path, monkeypatch, deployed):
+    bundled = config_path("qwen35-9b-lora-16k").parent.glob("[!_]*.py")
+    expected = {load(path).name for path in bundled}
+    monkeypatch.chdir(tmp_path)
+    cli.main(["deploy"])
+    assert len(expected) > 1
+    assert {row["recipe"]["name"] for row in deployed.configs} == expected
+
+
 def test_deploy_reuses_unchanged_apps(deployed):
     row = deployment()
     cli.deploy([row])

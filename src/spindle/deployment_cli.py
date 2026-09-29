@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import modal
 
@@ -142,7 +143,9 @@ def parser():
         "deploy",
         help="Deploy the complete active Python config set behind one frontend",
     )
-    apply.add_argument("files", nargs="+")
+    apply.add_argument(
+        "files", nargs="*", help="Python configs (default: all bundled configs)"
+    )
     apply.add_argument("--app")
     apply.add_argument("--env")
     apply.add_argument("--region")
@@ -181,7 +184,10 @@ def main(argv=None):
                     f"Validated {len(recipes)} deployment(s). Backend integration settings are checked when preparing trainers and pools; native options are checked at engine startup."
                 )
         elif args.command == "deploy":
-            configs = compile_configs(args.files)
+            paths = args.files or sorted(
+                Path(__file__).with_name("configs").glob("[!_]*.py")
+            )
+            configs = compile_configs(paths)
             for deployment in configs:
                 platform = deployment.recipe.platform
                 if args.app is not None:
