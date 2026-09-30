@@ -160,6 +160,8 @@ def test_checkpoint_listing_derives_sdk_records() -> None:
         assert run_a["is_lora"] is True
         assert run_a["lora_rank"] == 32
         assert run_a["last_checkpoint"]["tinker_path"] == "tinker://run-a/weights/newer"
+        sampler_run = await plane.training_run("run-a:train:0")
+        assert sampler_run["training_run_id"] == "run-a"
         runs = await plane.training_runs()
         assert [run["training_run_id"] for run in runs] == ["run-a", "run-b"]
         assert runs[1]["is_lora"] is False
