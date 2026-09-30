@@ -234,6 +234,8 @@ class MilesRuntime:
                 args = parse_args(entry="serve")
         self._args = args
 
+        # Match the megatron LoRA backend and PEFT/Tinker: kaiming-uniform A, zero B.
+        args.lora_A_init_method = "kaiming"
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
         configure_logger(args, source=MainProcessIdentity())
