@@ -78,17 +78,16 @@ replicas. `trainer_region='us'` allows broader GPU placement while the frontend
 routing region remains `us-west`. Credentials use existing deployment secrets;
 no key is stored in the repository.
 
-`experiment.py` sequentially profiles TP=1/DP=8 and TP=2/DP=4 with eight resident
-disposable adapters. Fixed batches contain 64 sequences of 2k, 8k and 16k tokens;
-there are three updates per length, the first excluded as warmup. It chooses the
-lowest total measured request latency among successful layouts. These are synthetic
-compute profiles, not proof of globally optimal end-to-end throughput. Profiling
-cost is separate from the final RL run and should be reported as tuning overhead.
+`experiment.py` deploys the fixed TP=1/DP=8 layout and runs `supervise.py`.
+There is no synthetic profiling stage in the launch path. TP=1/DP=8 is a candidate
+chosen to favor data-parallel throughput; it has not been proven fastest.
+`profile.py` remains an optional standalone diagnostic, separate from the run.
 
-The chosen layout is redeployed with fresh state. `supervise.py` launches copies
-of `client.py`, with no synchronization barrier after startup. Actual process
-launch times and per-client readiness are recorded. Fixed start offsets do not
-guarantee clients remain separated as generation lengths vary.
+The supervisor launches independent copies of `client.py`, with no synchronization
+barrier after startup. Actual process launch times and per-client readiness are
+recorded. Fixed offsets do not guarantee clients remain separated as generation
+lengths vary. The training client uses only ordinary Tinker SDK APIs and imports
+no Spindle or Modal modules.
 
 On this host:
 
@@ -101,8 +100,8 @@ export MODAL_ENVIRONMENT=lilo-deploy
   --deploy-python ~/spindle/.venv/bin/python
 ```
 
-The profiler has a one-hour limit per topology. Training has a 12-hour supervisor
-limit. Each phase stops only its explicitly owned apps on failure/completion.
+Training has a 12-hour supervisor limit. The supervisor stops only its explicitly
+owned apps on failure/completion.
 Do not run two pipelines simultaneously with these fixed deployment names.
 Create `STOP_NOW` in the training results folder to request training shutdown.
 
