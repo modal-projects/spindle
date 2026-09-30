@@ -181,7 +181,7 @@ def prepare_model_assets(definition_id: str) -> None:
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
     snapshot_download(
-        repo_id=definition.model,
+        repo_id=definition.weights_repo,
         local_dir=checkpoint,
     )
     model_assets.commit()
