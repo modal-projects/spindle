@@ -267,7 +267,7 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
     retries=2,
     secrets=[proxy_secret, modal.Secret.from_name(API_SECRET_NAME)],
 )
-@modal.concurrent(max_inputs=128)
+@modal.concurrent(max_inputs=128, target_inputs=16)
 async def execute_sample(task: dict) -> dict:
     stats: dict = {}
     with sample_trace(task, stats):
