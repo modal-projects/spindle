@@ -265,6 +265,7 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
     min_containers=0,
     timeout=60 * 60,
     retries=2,
+    nonpreemptible=True,
     secrets=[proxy_secret, modal.Secret.from_name(API_SECRET_NAME)],
 )
 @modal.concurrent(max_inputs=128, target_inputs=16)
