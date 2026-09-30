@@ -10,6 +10,8 @@ import numpy as np
 import tinker
 from tinker import types
 
+from client import create_trainer
+
 
 def main():
     p=argparse.ArgumentParser()
@@ -21,8 +23,7 @@ def main():
     service=tinker.ServiceClient(base_url=args.base_url)
     print('Creating eight disposable profiler adapters',flush=True)
     with ThreadPoolExecutor(8) as pool:
-        trainers=list(pool.map(lambda i:service.create_lora_training_client('Qwen/Qwen3.5-9B',rank=32,
-            seed=4242,train_attn=True,train_mlp=True,train_unembed=False),range(8)))
+        trainers=list(pool.map(lambda i:create_trainer(service,'Qwen/Qwen3.5-9B',32),range(8)))
     results=[]
     for length in args.lengths:
         # A fixed synthetic token batch isolates backend compute from generation.

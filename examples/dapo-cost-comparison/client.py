@@ -44,6 +44,12 @@ def datum(prompt, tokens, logprobs, advantage, denominator):
                        'advantages': [0.]*prefix+[advantage/denominator]*len(tokens)})
 
 
+def create_trainer(service, model, rank):
+    # Miles rejects per-adapter seeds. Use this same call on both endpoints.
+    return service.create_lora_training_client(model, rank=rank,
+        train_attn=True, train_mlp=True, train_unembed=False)
+
+
 def read_config(path):
     cfg = json.loads(path.read_text())
     if cfg['model'] != 'Qwen/Qwen3.5-9B':
@@ -70,12 +76,11 @@ class Client:
         self.stops = list(dict.fromkeys(self.stops))
         metadata = dict(config=cfg,config_sha256=digest(cfg),prompts_sha256=digest(self.prompts),
             dataset_sha256=hashlib.sha256((ROOT/'dapo.jsonl').read_bytes()).hexdigest(),
-            stop_token_ids=self.stops,base_url=base_url or 'Tinker SDK default',
+            initialization_seed=None,stop_token_ids=self.stops,base_url=base_url or 'Tinker SDK default',
             packages={n:importlib.metadata.version(n) for n in ['tinker','transformers','numpy']})
         (root/'manifest.json').write_text(json.dumps(metadata,indent=2))
         self.event('client_create_start')
-        self.trainer = self.service.create_lora_training_client(cfg['model'],rank=cfg['rank'],
-            seed=cfg['seed'],train_attn=True,train_mlp=True,train_unembed=False)
+        self.trainer = create_trainer(self.service,cfg['model'],cfg['rank'])
         self.event('client_created',model_id=self.trainer.model_id)
         self.next_group = 0
 

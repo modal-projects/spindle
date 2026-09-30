@@ -75,3 +75,14 @@ def test_async_loop_has_exactly_30_updates_and_at_most_one_policy_lag():
     assert published==list(range(30))
     assert all(r['policy_lag'] in (0,1) for r in logged if r['event']=='update_done')
     assert logged[-1]['event']=='completed'
+
+
+def test_shared_model_creation_omits_unsupported_seed():
+    calls=[]
+    class Service:
+        def create_lora_training_client(self, model, **kwargs):
+            calls.append((model,kwargs))
+            assert 'seed' not in kwargs
+            return 'trainer'
+    assert client.create_trainer(Service(),'Qwen/Qwen3.5-9B',32)=='trainer'
+    assert calls==[('Qwen/Qwen3.5-9B',dict(rank=32,train_attn=True,train_mlp=True,train_unembed=False))]

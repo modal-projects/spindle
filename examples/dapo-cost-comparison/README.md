@@ -26,8 +26,10 @@ python client.py --output runs/tinker-single
 ```
 
 Outputs must be new directories. No Modal dependency is imported by the single
-client. Every client uses the same dataset order and sampling/initialization seeds;
+client. Every client uses the same dataset order and sampling seeds;
 client number changes only the output directory, not the workload.
+Adapter initialization seeds are omitted on both endpoints because Miles rejects
+per-model seeds. Initial adapter tensors are not guaranteed to match.
 
 ## Matched configuration
 
