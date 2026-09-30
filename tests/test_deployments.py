@@ -11,7 +11,10 @@ import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
 from spindle.backends.megatron_config import parse_backend_config
-from spindle.backends.miles_arguments import apply_config_overrides
+from spindle.backends.miles_arguments import (
+    apply_config_overrides,
+    defer_config_overrides,
+)
 from spindle.configs.qwen35_9b_lora_16k import Config as Parent
 from spindle.configuration import BaseConfig
 from spindle.control_plane import ControlPlane, create_control_plane_app
@@ -155,6 +158,17 @@ def test_native_false_list_aliases_and_scalar_overrides():
         apply_config_overrides(parser, {"use_feature": "false"}, [])
     with pytest.raises(ValueError, match="list"):
         apply_config_overrides(parser, {"layers": "1,2"}, [])
+
+
+def test_deferred_overrides_see_arguments_added_after_hook():
+    parser = argparse.ArgumentParser()
+    argv = ["--qkv-format", "bshd"]
+    defer_config_overrides(parser, {"qkv_format": "thd", "fused": False}, argv)
+    parser.add_argument("--qkv-format")
+    parser.add_argument("--fused", action="store_true")
+    assert vars(parser.parse_args(argv)) == {"qkv_format": "thd", "fused": False}
+    assert vars(parser.parse_args(argv)) == {"qkv_format": "thd", "fused": False}
+    assert argv == ["--qkv-format", "bshd", "--qkv-format=thd"]
 
 
 def test_multiple_models_same_http_service_and_old_binding_survives_switch():
