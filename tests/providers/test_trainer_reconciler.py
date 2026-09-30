@@ -1,11 +1,11 @@
 import asyncio
 
 from spindle.control_plane import ControlPlane, FutureResolutionStatus
+from spindle.control_plane.trainer_reconciler import reconcile_trainers
 from spindle.providers.local import (
     InMemoryKeyValueStore,
     LocalEnginePlatform,
 )
-from spindle.providers.modal.trainer_reconciler import reconcile_trainers
 from tests.support import EchoExecutor
 
 DEFINITION = "qwen_full"

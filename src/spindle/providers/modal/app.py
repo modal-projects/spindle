@@ -10,15 +10,13 @@ import modal
 from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
-from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.control_plane import create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
+from spindle.control_plane.trainer_reconciler import reconcile_trainers
 from spindle.deployments import validate_frontend
 from spindle.inference.sampling import sample_task
-from spindle.providers.contracts import (
-    Parameterization,
-    SamplingTask,
-)
+from spindle.providers.contracts import SamplingTask
 from spindle.telemetry.otlp import sample_trace
 
 from .checkpoint_storage import (
@@ -32,6 +30,7 @@ from .deployment_configs import (
     configs_from_env,
     platform_from_env,
 )
+from .deployment_control import DeploymentControlPlane
 from .engines import ModalEnginePlatform
 from .fft_pool import (
     FFTPoolSpec,
@@ -68,13 +67,13 @@ from .sampling import ModalSamplingTaskPlatform
 from .trainer_reconciler import (
     complete_reconcile,
     pending_reconciliations,
-    reconcile_trainers,
     release_reconcile_call,
     request_reconcile,
 )
 
 DEFINITIONS = tuple(configs_from_env())
 validate_frontend([definition.recipe for definition in DEFINITIONS])
+DEFINITIONS_BY_ID = {definition.definition_id: definition for definition in DEFINITIONS}
 SETTINGS = DEFINITIONS[0]
 PLATFORM = platform_from_env()
 APP_NAME = PLATFORM["frontend"]
@@ -100,24 +99,6 @@ TRAINER_DEPLOYMENT_ENV = {
     "SPINDLE_APP_NAME": APP_NAME,
 }
 app = modal.App(APP_NAME)
-
-
-async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
-    return await ModalCheckpointStorage(
-        checkpoint_volume, CHECKPOINT_ROOT, lock=CHECKPOINT_READ_LOCK
-    ).read_metadata(uri)
-
-
-async def _list_checkpoints(model_id: str | None) -> list[dict[str, object]]:
-    return await ModalCheckpointStorage(
-        checkpoint_volume, CHECKPOINT_ROOT, lock=CHECKPOINT_READ_LOCK
-    ).list(model_id)
-
-
-async def _delete_checkpoint(uri: str) -> None:
-    await ModalCheckpointStorage(
-        checkpoint_volume, CHECKPOINT_ROOT, lock=CHECKPOINT_READ_LOCK
-    ).delete(uri)
 
 
 image = (
@@ -276,10 +257,10 @@ async def execute_sample(task: dict) -> dict:
 
 async def _execute_sample(task: dict, stats: dict) -> dict:
     definition_id = str(task["engine_definition_id"])
-    parameterization = parameterization_for(definition_id)
+    definition = module_for(definition_id)
+    parameterization = definition.parameterization
     if parameterization not in {"full", "lora"}:
         raise ValueError(f"unsupported sampling definition: {definition_id}")
-    definition = module_for(definition_id)
     rollout_world_size = definition.recipe.inference_gpus_per_node
     rollout_tensor_parallel_size = definition.rollout_tensor_parallel_size
     if rollout_world_size % rollout_tensor_parallel_size:
@@ -340,21 +321,18 @@ async def _model_record(kv, model_id: str):
 
 
 def module_for(definition_id: str):
-    for definition in DEFINITIONS:
-        if definition.definition_id == definition_id:
-            return definition
-    raise KeyError(definition_id)
-
-
-def parameterization_for(definition_id: str) -> Parameterization | None:
     try:
-        return module_for(definition_id).parameterization
+        return DEFINITIONS_BY_ID[definition_id]
     except KeyError:
-        return None
+        raise KeyError(f"definition is not deployed: {definition_id}") from None
 
 
-def trainer_autoscaling(definition_id: str) -> bool:
-    return parameterization_for(definition_id) is not None
+def trainer_maximum_instances(definition_id: str) -> int:
+    return module_for(definition_id).recipe.trainer_max_instances
+
+
+def trainer_models_per_instance(definition_id: str) -> int:
+    return module_for(definition_id).recipe.trainer_max_clients_per_instance
 
 
 @app.function(
@@ -370,21 +348,20 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
     call_id = modal.current_function_call_id()
 
     async def run(definition_id: str, token: str) -> None:
-        parameterization = parameterization_for(definition_id)
-        if parameterization is None or await deployment_error(definition_id):
+        definition = DEFINITIONS_BY_ID.get(definition_id)
+        if definition is None or await deployment_error(definition_id):
             await complete_reconcile(definition_id, token)
             return
-        module = module_for(definition_id)
-        maximum_instances = module.recipe.trainer_max_instances
         try:
             await reconcile_trainers(
                 shared_kv(),
                 ModalEnginePlatform(shared_kv(), _spawn_engine),
                 definition_id,
                 revision=None,
-                maximum_instances=maximum_instances,
-                models_per_instance=module.recipe.trainer_max_clients_per_instance,
-                scale_up=trainer_autoscaling(definition_id),
+                minimum_instances=0,
+                maximum_instances=trainer_maximum_instances(definition_id),
+                models_per_instance=trainer_models_per_instance(definition_id),
+                scale_up=True,
             )
         except Exception:
             logging.getLogger(__name__).exception(
@@ -407,8 +384,7 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
 
 
 async def kick_trainer_reconciler(definition_id: str) -> None:
-    if parameterization_for(definition_id) is None:
-        return
+    module_for(definition_id)
 
     async def spawn(delay_seconds: float) -> str:
         call = await trainer_reconciler.spawn.aio(delay_seconds)
@@ -451,20 +427,45 @@ async def clear_deployment_failure(definition_id: str) -> None:
     await kick_trainer_reconciler(definition_id)
 
 
-def _plane():
-    kv = shared_kv()
-    task_stores = ModalSessionKeyValueStores()
-    engines = ModalEnginePlatform(kv, _spawn_engine)
+class ModalDeploymentControlPlane(DeploymentControlPlane):
+    def __init__(self):
+        kv = shared_kv()
+        task_stores = ModalSessionKeyValueStores()
+        engines = ModalEnginePlatform(kv, _spawn_engine)
+        storage = ModalCheckpointStorage(
+            checkpoint_volume,
+            CHECKPOINT_ROOT,
+            lock=CHECKPOINT_READ_LOCK,
+        )
+        super().__init__(
+            kv,
+            engines,
+            sampling_tasks=ModalSamplingTaskPlatform(
+                task_stores,
+                self._spawn_sampling,
+            ),
+            session_idle_timeout=SESSION_IDLE_TIMEOUT,
+            ensure_sampling_pool=self._ensure_deployment_pool,
+            prepare_model=self._prepare_deployment_model,
+            creation_error=deployment_error,
+            sampling_task_stores=task_stores,
+            read_checkpoint_metadata=storage.read_metadata,
+            list_checkpoints=storage.list,
+            delete_checkpoint=storage.delete,
+            checkpoint_root=CHECKPOINT_ROOT,
+            request_trainer_reconciliation=self._request_trainer_reconciliation,
+            trainer_maximum_instances=trainer_maximum_instances,
+            trainer_models_per_instance=trainer_models_per_instance,
+        )
 
-    async def spawn_sampling(task: SamplingTask) -> str:
+    async def _spawn_sampling(self, task: SamplingTask) -> str:
         call = await execute_sample.spawn.aio(asdict(task))
         return call.object_id
 
-    async def prepare_model(model) -> None:
-        parameterization = parameterization_for(model.engine_definition_id)
-        if parameterization is None:
-            return
-        await prepare_model_assets.remote.aio(model.engine_definition_id)
+    async def _prepare_deployment_model(self, model: ModelRecord) -> None:
+        definition = module_for(model.engine_definition_id)
+        await prepare_model_assets.remote.aio(definition.definition_id)
+        parameterization = definition.parameterization
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         else:
@@ -472,9 +473,9 @@ def _plane():
                 LoraPoolSpec(model.engine_definition_id).as_dict()
             )
 
-    async def ensure_pool(session) -> None:
+    async def _ensure_deployment_pool(self, session) -> None:
         definition_id = session.engine_definition_id
-        parameterization = parameterization_for(definition_id)
+        parameterization = module_for(definition_id).parameterization
         if parameterization == "lora":
             if session.model_id is None:
                 await prepare_model_assets.remote.aio(definition_id)
@@ -500,41 +501,34 @@ def _plane():
             if session.model_id is None:
                 await prepare_model_assets.remote.aio(definition_id)
             if pool.latest:
-                pool = _latest_pool(await _model_record(kv, session.model_id))
+                pool = _latest_pool(await _model_record(self.kv, session.model_id))
             await ensure_fft_pool.remote.aio(pool.as_dict())
         else:
             await _touch_fft_pool(pool)
 
-    async def kick_trainers(definition_id: str) -> bool:
+    async def _request_trainer_reconciliation(
+        self,
+        definition_id: str,
+        *,
+        maximum_instances: int | None,
+        **_: object,
+    ) -> bool:
+        module_for(definition_id)
         await kick_trainer_reconciler(definition_id)
-        if not trainer_autoscaling(definition_id):
-            return False
-        maximum = module_for(definition_id).recipe.trainer_max_instances
         instances = [
             instance
-            for instance in await engines.list_instances()
+            for instance in await self.engines.list_instances()
             if instance.definition_id == definition_id and not instance.terminal
         ]
-        return any(
-            instance.state in {"starting", "draining"} for instance in instances
-        ) or len(instances) < int(maximum)
+        return (
+            any(instance.state in {"starting", "draining"} for instance in instances)
+            or maximum_instances is None
+            or len(instances) < maximum_instances
+        )
 
-    return ControlPlane(
-        kv,
-        engines,
-        sampling_tasks=ModalSamplingTaskPlatform(task_stores, spawn_sampling),
-        session_idle_timeout=SESSION_IDLE_TIMEOUT,
-        ensure_sampling_pool=ensure_pool,
-        prepare_model=prepare_model,
-        creation_error=deployment_error,
-        sampling_task_stores=task_stores,
-        read_checkpoint_metadata=_read_checkpoint_metadata,
-        list_checkpoints=_list_checkpoints,
-        delete_checkpoint=_delete_checkpoint,
-        checkpoint_root=CHECKPOINT_ROOT,
-        reconcile_trainers=kick_trainers,
-        trainer_autoscaling=trainer_autoscaling,
-    )
+
+def build_deployment_control_plane() -> ModalDeploymentControlPlane:
+    return ModalDeploymentControlPlane()
 
 
 @app.function(
@@ -550,7 +544,7 @@ def _plane():
 @modal.asgi_app(requires_proxy_auth=False)
 def server():
     return create_control_plane_app(
-        _plane(),
+        build_deployment_control_plane(),
         DEFINITIONS,
         api_key=os.environ["TINKER_API_KEY"],
         checkpoint_volume=CHECKPOINT_VOLUME_NAME,
@@ -562,7 +556,7 @@ async def _lose_undefined_models() -> tuple[str, ...]:
     lost = []
     for _, value in await kv.list_items("model:"):
         model = ModelRecord.model_validate(value)
-        if parameterization_for(model.engine_definition_id) is not None:
+        if model.engine_definition_id in DEFINITIONS_BY_ID:
             continue
         await kv.delete(placement_key(model.model_id))
         await kv.delete(trainer_demand_key(model.model_id))
@@ -580,7 +574,8 @@ async def _cleanup_fft_pools() -> tuple[str, ...]:
         ).app_name
         for _, value in await shared_kv().list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "full"
+        for definition in (DEFINITIONS_BY_ID.get(model.engine_definition_id),)
+        if definition is not None and definition.parameterization == "full"
     }
     stopped = []
     registry = fft_pool_kv()
@@ -624,7 +619,8 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
         LoraPoolSpec(model.engine_definition_id).app_name
         for _, value in await registry.list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "lora"
+        for definition in (DEFINITIONS_BY_ID.get(model.engine_definition_id),)
+        if definition is not None and definition.parameterization == "lora"
     }
     stopped = []
     for key, value in await registry.list_items("lora_pool:"):
@@ -648,7 +644,7 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
 @app.function(image=image, env=TRAINER_DEPLOYMENT_ENV, schedule=SWEEP_PERIOD)
 def cleaner():
     async def run() -> None:
-        plane = _plane()
+        plane = build_deployment_control_plane()
         await plane.sweep_idle_sessions(SESSION_IDLE_TIMEOUT)
         await plane.sweep_idle_models(SESSION_IDLE_TIMEOUT)
         await plane.sweep_idle_engines()

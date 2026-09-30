@@ -2,7 +2,11 @@
 
 Spindle is a Tinker SDK-compatible backend run on Modal. Trainers run `forward_backward` and `optim_step` calls, then publish updated weights to autoscaling sampling replicas managed by the [Stitch](https://github.com/modal-projects/stitch) protocol (hence the name!). Currently, Spindle supports single-tenant full-parameter training as well as multi-tenant LoRA training.
 
-# Getting Started 
+Spindle supports Python 3.11 and 3.12; use Python 3.12 for Modal deployments.
+The package is being prepared for PyPI as `modal-spindle`. Until the first release,
+install from Git using the instructions below.
+
+# Getting Started
 
 ## Full-parameter training runs
 
@@ -23,8 +27,8 @@ with spindle.run(engine=engine) as (url, api_key):
 
 Our FFT path is *not* Tinker compatible, but roughly obeys the same abstractions. 
 
-See [scoped runs](docs/scoped-runs.md) for recovery and custom engines,
-and the [Codeforces example](examples/codeforces-codegolf/README.md) for a complete
+See [scoped runs](https://github.com/modal-projects/spindle/blob/main/docs/scoped-runs.md) for recovery and custom engines,
+and the [Codeforces example](https://github.com/modal-projects/spindle/blob/main/examples/codeforces-codegolf/README.md) for a complete
 training loop with sandbox judging and checkpoints.
 
 ## LoRA training runs
@@ -48,7 +52,7 @@ training = service.create_lora_training_client(
 
 ## Shared deployment quick start
 
-Shared deployments use Python recipes inheriting from `BaseConfig`. See [Python deployment configs](docs/deployment-configs.md). Keep the active Python config list in [scripts/deploy_models.sh](scripts/deploy_models.sh); run it to deploy the complete list.
+Shared deployments use Python recipes inheriting from `BaseConfig`. See [Python deployment configs](https://github.com/modal-projects/spindle/blob/main/docs/deployment-configs.md). Keep the active Python config list in [scripts/deploy_models.sh](https://github.com/modal-projects/spindle/blob/main/scripts/deploy_models.sh); run it to deploy the complete list.
 
 Install Spindle into your own Python project, deploy it once to Modal, then call
 its API from your training scripts. The commands below work in Bash or Zsh.
@@ -137,11 +141,11 @@ uv run spindle config validate deployment.py
 uv run spindle deploy deployment.py
 ```
 
-This deploys the shared app and prints its `server` URL. Add more Python config files to the same command to serve more recipes. Always supply the complete current set. The Miles commit is pinned in `miles_image.py`; see [Python deployment configs](docs/deployment-configs.md).
+This deploys the shared app and prints its `server` URL. Add more Python config files to the same command to serve more recipes. Always supply the complete current set. The Miles commit is pinned in `miles_image.py`; see [Python deployment configs](https://github.com/modal-projects/spindle/blob/main/docs/deployment-configs.md).
 
 From a repository checkout, maintain the list in `scripts/deploy_models.sh` and run that script. `spindle deploy` supplies the current configs and frontend platform settings to Modal.
 
-Deploying the server doesn't allocate any GPUs; rather, this allocation for both the training and sampling sides are done on demand. See [cold starts and capacity configuration](docs/full-fine-tunes.md#performance-and-behavior-considerations)
+Deploying the server doesn't allocate any GPUs; rather, this allocation for both the training and sampling sides are done on demand. See [cold starts and capacity configuration](https://github.com/modal-projects/spindle/blob/main/docs/full-fine-tunes.md#performance-and-behavior-considerations)
 before running a larger workload.
 
 ### 4. Clean up
@@ -161,32 +165,37 @@ using `uv run modal app stop <app-id>`. Stopping the frontend does not stop samp
 
 Refer to the docs for design and for more advanced features when working with either the full-parameter or LoRA paths: 
 
-Read [Working with Full Fine-Tunes](docs/full-fine-tunes.md) for full training,
-or [Working with Multi-LoRA](docs/multi-lora.md) for shared Miles adapters, batch
+Read [Working with Full Fine-Tunes](https://github.com/modal-projects/spindle/blob/main/docs/full-fine-tunes.md) for full training,
+or [Working with Multi-LoRA](https://github.com/modal-projects/spindle/blob/main/docs/multi-lora.md) for shared Miles adapters, batch
 submission, scheduling, and sampling.
 
-and the [raw Tinker RL example](scripts/rl_example.py) for sampling and a toy
+and the [raw Tinker RL example](https://github.com/modal-projects/spindle/blob/main/scripts/rl_example.py) for sampling and a toy
 policy update. Copy examples you want to run into your project; repository
 `scripts/` are not installed with the package.
 
-The [W&B RL example](scripts/wandb_rl_example.py) extends it to a multi-step
+The [W&B RL example](https://github.com/modal-projects/spindle/blob/main/scripts/wandb_rl_example.py) extends it to a multi-step
 loop that logs reward, response length, and Spindle's training metrics to Weights
 & Biases from the client side; tinker-cookbook users can instead set
 `wandb_project`/`wandb_name` on the cookbook `Config`.
 
-See [Design](docs/design.md) for the control-plane, training-engine, and sampling
+See [Design](https://github.com/modal-projects/spindle/blob/main/docs/design.md) for the control-plane, training-engine, and sampling
 architecture.
 
-See [Profiling](docs/profiling.md) for how to enable the `torch.profiler` trace of
+See [Profiling](https://github.com/modal-projects/spindle/blob/main/docs/profiling.md) for how to enable the `torch.profiler` trace of
 a training step and read it in Perfetto.
 
-See [Observability](docs/observability.md) for OTLP export to Datadog or a custom
+See [Observability](https://github.com/modal-projects/spindle/blob/main/docs/observability.md) for OTLP export to Datadog or a custom
 destination, experiment labels, and the complete span/metric inventory.
 
 ## Validation
 
-See [FFT validation](docs/validation.md) and [LoRA validation](docs/lora_validation.md)
-for end-to-end training runs we've done with both parameterizations. The [Codeforces codegolf](examples/codeforces-codegolf/README.md) example provides a larger-scale e2e code-RL training run, which trains Qwen3.5-9B
+See [FFT validation](https://github.com/modal-projects/spindle/blob/main/docs/validation.md) and [LoRA validation](https://github.com/modal-projects/spindle/blob/main/docs/lora_validation.md)
+for end-to-end training runs we've done with both parameterizations. The [Codeforces codegolf](https://github.com/modal-projects/spindle/blob/main/examples/codeforces-codegolf/README.md) example provides a larger-scale e2e code-RL training run, which trains Qwen3.5-9B
 with GRPO or TailRL advantages for correctness and short solutions. It includes
 a sandboxed judge, checkpoint recovery, and commands to continue a checkpoint
 with a different reward or advantage estimator, as well as pass@k and best-of-k evaluation. 
+
+## Development and releases
+
+See [Publishing](https://github.com/modal-projects/spindle/blob/main/docs/publishing.md)
+for first-release prerequisites, package validation, and the PyPI release process.

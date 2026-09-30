@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import itertools
 import json
 import os
@@ -20,6 +19,7 @@ from spindle.providers.local import (
     LocalEnginePlatform,
     LocalSamplingTaskPlatform,
 )
+from spindle.providers.modal.checkpoint_storage import ModalCheckpointStorage
 from tests.support import TinkerStubExecutor, TinkerStubSampler, serve
 
 BASE_MODEL = "Qwen/Qwen3-8B"
@@ -338,11 +338,9 @@ class FakeVolume:
         return None
 
 
-def volume_plane(tmp_path, monkeypatch) -> tuple[ControlPlane, object, list[str]]:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
+def volume_plane(tmp_path) -> tuple[ControlPlane, object, list[str]]:
     root = tmp_path / "checkpoints"
-    monkeypatch.setattr(modal_app, "CHECKPOINT_ROOT", str(root))
-    monkeypatch.setattr(modal_app, "checkpoint_volume", FakeVolume())
+    storage = ModalCheckpointStorage(FakeVolume(), str(root))
     clock = itertools.count(1_700_000_000)
     loaded: list[str] = []
 
@@ -364,16 +362,16 @@ def volume_plane(tmp_path, monkeypatch) -> tuple[ControlPlane, object, list[str]
     plane = ControlPlane(
         InMemoryKeyValueStore(),
         LocalEnginePlatform(DEFINITION, VolumeExecutor),
-        read_checkpoint_metadata=modal_app._read_checkpoint_metadata,
-        list_checkpoints=modal_app._list_checkpoints,
-        delete_checkpoint=modal_app._delete_checkpoint,
+        read_checkpoint_metadata=storage.read_metadata,
+        list_checkpoints=storage.list,
+        delete_checkpoint=storage.delete,
         checkpoint_root=str(root),
     )
     return plane, root, loaded
 
 
-def test_real_sdk_lists_and_deletes_checkpoints(tmp_path, monkeypatch) -> None:
-    plane, root, loaded = volume_plane(tmp_path, monkeypatch)
+def test_real_sdk_lists_and_deletes_checkpoints(tmp_path) -> None:
+    plane, root, loaded = volume_plane(tmp_path)
     app = create_control_plane_app(
         plane, DEFINITIONS, api_key=API_KEY, retrieve_window=5.0
     )
@@ -445,8 +443,8 @@ def test_real_sdk_lists_and_deletes_checkpoints(tmp_path, monkeypatch) -> None:
         assert first.is_dir()
 
 
-def test_real_sdk_lost_model_fails_fast(tmp_path, monkeypatch) -> None:
-    plane, _, _ = volume_plane(tmp_path, monkeypatch)
+def test_real_sdk_lost_model_fails_fast(tmp_path) -> None:
+    plane, _, _ = volume_plane(tmp_path)
     app = create_control_plane_app(
         plane, DEFINITIONS, api_key=API_KEY, retrieve_window=5.0
     )

@@ -66,9 +66,7 @@ def test_operations_route_to_engine_and_resolve() -> None:
                 "data": [
                     {
                         "loss_fn_inputs": {},
-                        "model_input": {
-                            "chunks": [{"tokens": [1]}]
-                        },
+                        "model_input": {"chunks": [{"tokens": [1]}]},
                     }
                 ],
                 "loss_fn": "cross_entropy",
@@ -85,9 +83,7 @@ def test_gap_pends_through_control_plane_retrieve() -> None:
         later = await engine.optim_step(
             {"model_id": model_id, "seq_id": 2, "adam_params": {}}
         )
-        assert (
-            await plane.retrieve(later)
-        ).status == FutureResolutionStatus.PENDING
+        assert (await plane.retrieve(later)).status == FutureResolutionStatus.PENDING
         await engine.forward_backward(
             forward_backward_body(model_id, 1),
             "application/json",
@@ -231,10 +227,10 @@ def test_placement_failure_leaves_creation_pending() -> None:
     class FlakyPlatform(LocalEnginePlatform):
         fail = True
 
-        async def ensure_instance(self, definition):
+        async def spawn_instance(self, definition):
             if self.fail:
                 raise RuntimeError("platform outage")
-            return await super().ensure_instance(definition)
+            return await super().spawn_instance(definition)
 
     async def run() -> None:
         engines = FlakyPlatform(DEFINITION, EchoExecutor)

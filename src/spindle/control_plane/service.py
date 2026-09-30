@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
+from typing import cast
 
 from spindle.encoding import fingerprint
 from spindle.engine.api import EngineApi, FutureStatus
@@ -61,6 +62,8 @@ from .records import (
     SessionLastSeenRecord,
     SessionRecord,
 )
+from .store import typed_kv
+from .trainer_reconciler import reconcile_trainers
 
 
 def request_id_for(model_id: str, seq_id: int) -> str:
@@ -132,15 +135,13 @@ class ControlPlane:
         sampling_task_stores: SessionKeyValueStores | None = None,
         read_checkpoint_metadata: Callable[[str], Awaitable[Mapping[str, object]]]
         | None = None,
-        reconcile_trainers: Callable[[str], Awaitable[bool | None]] | None = None,
         prepare_model: Callable[[ModelRecord], Awaitable[None]] | None = None,
-        trainer_autoscaling: Callable[[str], bool] = lambda _: False,
         list_checkpoints: CheckpointListing | None = None,
         delete_checkpoint: Callable[[str], Awaitable[None]] | None = None,
         checkpoint_root: str = "/checkpoints",
         creation_error: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
-        self.kv = kv
+        self.kv = typed_kv(kv)
         self.engines = engines
         self.sampling_tasks = sampling_tasks
         self.session_idle_timeout = session_idle_timeout
@@ -149,9 +150,7 @@ class ControlPlane:
         self.ensure_sampling_pool = ensure_sampling_pool
         self.sampling_task_stores = sampling_task_stores
         self.read_checkpoint_metadata = read_checkpoint_metadata
-        self.reconcile_trainers = reconcile_trainers
         self.prepare_model = prepare_model
-        self.trainer_autoscaling = trainer_autoscaling
         self.list_checkpoints = list_checkpoints
         self.delete_checkpoint = delete_checkpoint
         self.checkpoint_root = checkpoint_root
@@ -186,7 +185,7 @@ class ControlPlane:
         return session
 
     async def heartbeat(self, session_id: str) -> SessionLastSeenRecord:
-        return await self._touch_session(session_id)
+        return await self._mark_session_active(session_id)
 
     async def close_session(
         self,
@@ -205,7 +204,7 @@ class ControlPlane:
             closed.model_dump(mode="json"),
         )
         await self._unload_session_models(session_id)
-        return SessionClosedRecord.model_validate(inserted.value)
+        return cast(SessionClosedRecord, inserted.value)
 
     async def create_model(
         self,
@@ -216,7 +215,9 @@ class ControlPlane:
         spec: dict[str, object],
         model_id: str | None = None,
     ) -> ModelCreation:
-        await self._touch_session(session_id)
+        await self._mark_session_active(session_id)
+
+        # hash request to ensure idempotency
         mark = fingerprint(
             "create_model",
             {
@@ -224,7 +225,7 @@ class ControlPlane:
                 "spec": spec,
             },
         )
-        anchor = ModelCreationRecord(
+        creation_record = ModelCreationRecord(
             session_id=session_id,
             model_seq_id=model_seq_id,
             model_id=model_id or self._model_id(session_id, model_seq_id),
@@ -233,9 +234,9 @@ class ControlPlane:
         )
         inserted = await self.kv.put_if_absent(
             model_creation_key(session_id, model_seq_id),
-            anchor.model_dump(mode="json"),
+            creation_record.model_dump(mode="json"),
         )
-        stored = ModelCreationRecord.model_validate(inserted.value)
+        stored = cast(ModelCreationRecord, inserted.value)
         if stored.fingerprint != mark:
             raise SequenceConflict(session_id, model_seq_id)
 
@@ -254,7 +255,7 @@ class ControlPlane:
             model_key(model.model_id),
             model.model_dump(mode="json"),
         )
-        model = ModelRecord.model_validate(model_insert.value)
+        model = cast(ModelRecord, model_insert.value)
         if model_insert.created:
             await self.kv.put(
                 trainer_demand_key(model.model_id),
@@ -264,8 +265,7 @@ class ControlPlane:
                     "created_at": model.created_at,
                 },
             )
-            if self.reconcile_trainers is not None:
-                await self.reconcile_trainers(definition_id)
+            await self._trainer_demand_changed(definition_id)
         return ModelCreation(
             model,
             request_id_for(model.model_id, 0),
@@ -466,14 +466,14 @@ class ControlPlane:
         ):
             raise ValueError("ttl_seconds must be a positive integer")
         model = await self.get_model(model_id)
-        await self._open_session(model.session_id)
+        await self._require_open_session(model.session_id)
         payload = {
             "path": name,
             "sampling_session_seq_id": sampling_session_seq_id,
             "ttl_seconds": ttl_seconds,
         }
         mark = fingerprint("save_weights_for_sampler", payload)
-        anchor = SamplerExportSubmissionRecord(
+        submission_record = SamplerExportSubmissionRecord(
             model_id=model_id,
             seq_id=seq_id,
             name=name,
@@ -484,9 +484,9 @@ class ControlPlane:
         )
         inserted = await self.kv.put_if_absent(
             sampler_export_submission_key(model_id, seq_id),
-            anchor.model_dump(mode="json"),
+            submission_record.model_dump(mode="json"),
         )
-        stored = SamplerExportSubmissionRecord.model_validate(inserted.value)
+        stored = cast(SamplerExportSubmissionRecord, inserted.value)
         if stored.fingerprint != mark:
             sdk_retry = (
                 stored.name is None
@@ -522,7 +522,7 @@ class ControlPlane:
         model_path: str | None = None,
         engine_definition_id: str | None = None,
     ) -> SamplingSessionRecord:
-        await self._touch_session(session_id)
+        await self._mark_session_active(session_id)
         mark = fingerprint(
             "create_sampling_session",
             {"base_model": base_model, "model_path": model_path},
@@ -530,30 +530,24 @@ class ControlPlane:
         key = sampling_session_creation_key(session_id, sampling_session_seq_id)
         value = await self.kv.get(key)
         if value is not None:
-            stored = SamplingSessionCreationRecord.model_validate(value)
-            if stored.session is not None and stored.fingerprint != mark:
+            stored = cast(SamplingSessionCreationRecord, value)
+            if stored.fingerprint != mark:
                 raise SequenceConflict(session_id, sampling_session_seq_id)
             persisted = await self.kv.get(
                 sampling_session_key(stored.sampling_session_id)
             )
-            if persisted is not None:
-                session = SamplingSessionRecord.model_validate(persisted)
-                if stored.session is None and (
-                    model_path != session.model_path
-                    or (base_model is not None and base_model != session.base_model)
-                ):
-                    raise SequenceConflict(session_id, sampling_session_seq_id)
-                await self._ensure_sampling_pool(session)
-                return session
-            if stored.session is not None:
-                session = SamplingSessionRecord.model_validate(stored.session)
-                await self._validate_sampling_session(session)
+            session = stored.session
+            await self._validate_sampling_session(session)
+            if persisted is None:
                 await self.kv.put(
-                    sampling_session_key(session.sampling_session_id),
-                    session.model_dump(mode="json"),
+                    sampling_session_key(stored.sampling_session_id),
+                    session,
                 )
-                await self._ensure_sampling_pool(session)
-                return session
+            else:
+                if cast(SamplingSessionRecord, persisted) != session:
+                    raise SequenceConflict(session_id, sampling_session_seq_id)
+            await self._ensure_sampling_pool(session)
+            return session
         model_id = None
         publish_version = None
         export_seq_id = None
@@ -567,12 +561,11 @@ class ControlPlane:
                 raise ValueError("base_model does not match model_path")
             if (
                 engine_definition_id is not None
-                and artifact.engine_definition_id is not None
                 and engine_definition_id != artifact.engine_definition_id
             ):
                 raise ValueError("engine_definition_id does not match model_path")
             base_model = artifact.base_model
-            engine_definition_id = artifact.engine_definition_id or engine_definition_id
+            engine_definition_id = artifact.engine_definition_id
             model_id = artifact.model_id
             publish_version = artifact.publish_version
             export_seq_id = artifact.export_seq_id
@@ -585,6 +578,8 @@ class ControlPlane:
                 )
         if not base_model:
             raise ValueError("base_model or model_path is required")
+        if not engine_definition_id:
+            raise ValueError("engine_definition_id is required")
         sampling_session_id = self._sampling_session_id(
             session_id,
             sampling_session_seq_id,
@@ -604,38 +599,28 @@ class ControlPlane:
             expires_at=expires_at,
             created_at=self.clock(),
         )
-        anchor = SamplingSessionCreationRecord(
+        creation_record = SamplingSessionCreationRecord(
             session_id=session_id,
             sampling_session_seq_id=sampling_session_seq_id,
             sampling_session_id=sampling_session_id,
             fingerprint=mark,
             created_at=session.created_at,
-            session=session.model_dump(mode="json"),
+            session=session,
         )
         inserted = await self.kv.put_if_absent(
             key,
-            anchor.model_dump(mode="json"),
+            creation_record.model_dump(mode="json"),
         )
-        stored = SamplingSessionCreationRecord.model_validate(inserted.value)
-        legacy_mark = fingerprint(
-            "create_sampling_session",
-            {
-                "base_model": base_model,
-                "model_path": model_path,
-                "model_id": model_id,
-                "publish_version": publish_version,
-            },
-        )
-        if stored.fingerprint not in {mark, legacy_mark}:
+        stored = cast(SamplingSessionCreationRecord, inserted.value)
+        if stored.fingerprint != mark:
             raise SequenceConflict(session_id, sampling_session_seq_id)
-        if stored.session is not None:
-            session = SamplingSessionRecord.model_validate(stored.session)
+        session = stored.session
         await self._validate_sampling_session(session)
         result = await self.kv.put_if_absent(
             sampling_session_key(session.sampling_session_id),
-            session.model_dump(mode="json"),
+            session,
         )
-        persisted = SamplingSessionRecord.model_validate(result.value)
+        persisted = cast(SamplingSessionRecord, result.value)
         if persisted != session:
             raise SequenceConflict(session_id, sampling_session_seq_id)
         await self._ensure_sampling_pool(persisted)
@@ -648,7 +633,7 @@ class ControlPlane:
         value = await self.kv.get(sampler_artifact_key(model_path))
         if value is None:
             raise RecordNotFound("sampler artifact", model_path)
-        artifact = SamplerArtifactRecord.model_validate(value)
+        artifact = cast(SamplerArtifactRecord, value)
         if artifact.model_path != model_path:
             raise RecordNotFound("sampler artifact", model_path)
         self._check_expiry("sampler artifact", model_path, artifact.expires_at)
@@ -662,7 +647,7 @@ class ControlPlane:
         self._check_expiry(
             "sampling session", session.sampling_session_id, session.expires_at
         )
-        await self._open_session(session.session_id)
+        await self._require_open_session(session.session_id)
 
     async def get_sampling_session(
         self,
@@ -671,7 +656,7 @@ class ControlPlane:
         value = await self.kv.get(sampling_session_key(sampling_session_id))
         if value is None:
             raise RecordNotFound("sampling session", sampling_session_id)
-        session = SamplingSessionRecord.model_validate(value)
+        session = cast(SamplingSessionRecord, value)
         await self._validate_sampling_session(session)
         return session
 
@@ -686,7 +671,7 @@ class ControlPlane:
         sampling_session_id = str(request["sampling_session_id"])
         seq_id = int(request["seq_id"])
         session = await self.get_sampling_session(sampling_session_id)
-        await self._touch_session(session.session_id)
+        await self._mark_session_active(session.session_id)
         mark = fingerprint("sample", request)
         request_id = request_id_for(sampling_session_id, seq_id)
         key = sample_task_key(sampling_session_id, seq_id)
@@ -702,7 +687,7 @@ class ControlPlane:
             key,
             candidate.model_dump(mode="json"),
         )
-        stored = SampleTaskRecord.model_validate(inserted.value)
+        stored = cast(SampleTaskRecord, inserted.value)
         if stored.fingerprint != mark:
             raise SequenceConflict(sampling_session_id, seq_id)
         if stored.task_id is not None:
@@ -732,7 +717,7 @@ class ControlPlane:
 
     async def engine_for(self, model_id: str) -> EngineApi:
         model = await self.get_model(model_id)
-        await self._touch_session(model.session_id)
+        await self._mark_session_active(model.session_id)
         placement = await self._placement(model_id)
         if placement is None:
             if await self._lost(model_id):
@@ -743,8 +728,7 @@ class ControlPlane:
 
     async def unload_model(self, model_id: str) -> str:
         model = await self._unload_model(model_id)
-        if self.reconcile_trainers is not None:
-            await self.reconcile_trainers(model.engine_definition_id)
+        await self._trainer_demand_changed(model.engine_definition_id)
         return f"{model.model_id}:unload"
 
     async def _unload_model(self, model_id: str) -> ModelRecord:
@@ -871,7 +855,7 @@ class ControlPlane:
         value = await self.kv.get(sampler_export_submission_key(model_id, seq_id))
         if value is None:
             return None
-        return SamplerExportSubmissionRecord.model_validate(value)
+        return cast(SamplerExportSubmissionRecord, value)
 
     async def _completed_sampler_export(
         self,
@@ -881,7 +865,7 @@ class ControlPlane:
             path = self._sampler_model_path(export.model_id, export.name)
             value = await self.kv.get(sampler_artifact_key(path))
             if value is not None:
-                artifact = SamplerArtifactRecord.model_validate(value)
+                artifact = cast(SamplerArtifactRecord, value)
                 if (
                     artifact.model_path == path
                     and artifact.model_id == export.model_id
@@ -898,7 +882,7 @@ class ControlPlane:
             )
             value = await self.kv.get(sampling_session_key(sampling_session_id))
             if value is not None:
-                session = SamplingSessionRecord.model_validate(value)
+                session = cast(SamplingSessionRecord, value)
                 if (
                     session.model_id == export.model_id
                     and session.export_seq_id == export.seq_id
@@ -913,7 +897,7 @@ class ControlPlane:
         )
         if value is None:
             return None
-        receipt = SamplerExportResultRecord.model_validate(value)
+        receipt = cast(SamplerExportResultRecord, value)
         if receipt.model_id != export.model_id or receipt.seq_id != export.seq_id:
             return None
         model = await self.get_model(export.model_id)
@@ -941,7 +925,7 @@ class ControlPlane:
             sampler_export_result_key(export.model_id, export.seq_id),
             receipt.model_dump(mode="json"),
         )
-        stored = SamplerExportResultRecord.model_validate(inserted.value)
+        stored = cast(SamplerExportResultRecord, inserted.value)
         if (
             stored.model_id != export.model_id
             or stored.seq_id != export.seq_id
@@ -989,7 +973,7 @@ class ControlPlane:
                 ),
                 expires_at,
             )
-            await self._open_session(model.session_id)
+            await self._require_open_session(model.session_id)
         latest_path = self._sampler_model_path(model.model_id, "latest")
         latest_version_path = self._latest_sampler_model_path(
             model.model_id,
@@ -1016,7 +1000,7 @@ class ControlPlane:
             sampler_artifact_key(latest_version_path),
             versioned_latest.model_dump(mode="json"),
         )
-        stored_latest = SamplerArtifactRecord.model_validate(inserted.value)
+        stored_latest = cast(SamplerArtifactRecord, inserted.value)
         if stored_latest.model_copy(
             update={"export_seq_id": export.seq_id, "created_at": completed_at}
         ).model_dump(exclude={"telemetry_tags"}) != versioned_latest.model_dump(
@@ -1040,7 +1024,7 @@ class ControlPlane:
                 sampler_artifact_key(model_path),
                 artifact.model_dump(mode="json"),
             )
-            if SamplerArtifactRecord.model_validate(inserted.value).model_dump(
+            if cast(SamplerArtifactRecord, inserted.value).model_dump(
                 exclude={"telemetry_tags"}
             ) != artifact.model_dump(exclude={"telemetry_tags"}):
                 raise SequenceConflict(model.model_id, export.seq_id)
@@ -1072,7 +1056,7 @@ class ControlPlane:
             sampling_session_key(sampling_session_id),
             session.model_dump(mode="json"),
         )
-        if SamplingSessionRecord.model_validate(inserted.value).model_dump(
+        if cast(SamplingSessionRecord, inserted.value).model_dump(
             exclude={"telemetry_tags"}
         ) != session.model_dump(exclude={"telemetry_tags"}):
             raise SequenceConflict(
@@ -1098,7 +1082,7 @@ class ControlPlane:
         )
         if value is None:
             raise RecordNotFound("future", request_id)
-        record = SampleTaskRecord.model_validate(value)
+        record = cast(SampleTaskRecord, value)
         if record.request_id != request_id:
             raise RecordNotFound("future", request_id)
         if record.task_id is None:
@@ -1133,7 +1117,7 @@ class ControlPlane:
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
         if self.sampling_task_stores is None:
             return self.kv
-        return self.sampling_task_stores.for_session(session_id)
+        return typed_kv(self.sampling_task_stores.for_session(session_id))
 
     async def _retrieve_creation(
         self,
@@ -1192,7 +1176,7 @@ class ControlPlane:
     async def _place(self, model: ModelRecord) -> PlacementRecord | None:
         value = await self.kv.get(placement_key(model.model_id))
         if value is not None:
-            return PlacementRecord.model_validate(value)
+            return cast(PlacementRecord, value)
         if await self._lost(model.model_id):
             raise ModelLost(model.model_id)
         claim_key = placement_claim_key(model.model_id)
@@ -1212,18 +1196,40 @@ class ControlPlane:
             if await self.kv.get(claim_key) == claim:
                 await self.kv.delete(claim_key)
 
+    async def _trainer_demand_changed(self, _definition_id: str) -> None:
+        return None
+
+    async def _reconcile_trainers(
+        self,
+        definition_id: str,
+    ) -> bool | None:
+        await reconcile_trainers(
+            self.kv,
+            self.engines,
+            definition_id,
+            revision=None,
+            minimum_instances=0,
+            maximum_instances=1,
+            models_per_instance=1,
+        )
+        return None
+
+    def _trainer_saturation_is_error(self, _definition_id: str) -> bool:
+        return False
+
     async def _place_claimed(self, model: ModelRecord) -> PlacementRecord | None:
         definition_id = model.engine_definition_id
         try:
             active = await self.engines.active_instances(definition_id)
             instances = [instance for instance in active if instance.state == "running"]
             if not active:
-                if self.trainer_autoscaling(definition_id):
-                    if self.reconcile_trainers is not None:
-                        await self.reconcile_trainers(definition_id)
+                await self._reconcile_trainers(definition_id)
+                active = await self.engines.active_instances(definition_id)
+                instances = [
+                    instance for instance in active if instance.state == "running"
+                ]
+                if not active:
                     return None
-                instance = await self.engines.ensure_instance(definition_id)
-                instances = [instance] if instance.state == "running" else []
             instances.sort(
                 key=lambda instance: hashlib.sha256(
                     f"{model.model_id}\0{instance.instance_id}".encode()
@@ -1257,9 +1263,9 @@ class ControlPlane:
                 accepted_instance = instance
                 break
         has_capacity = None
-        if accepted_instance is None and self.reconcile_trainers is not None:
-            has_capacity = await self.reconcile_trainers(definition_id)
-            if self.trainer_autoscaling(definition_id) and has_capacity:
+        if accepted_instance is None:
+            has_capacity = await self._reconcile_trainers(definition_id)
+            if has_capacity:
                 return None
         if accepted_instance is None and self.session_idle_timeout is not None:
             for instance in instances:
@@ -1287,7 +1293,7 @@ class ControlPlane:
                     break
         if accepted_instance is None:
             if (
-                self.trainer_autoscaling(definition_id)
+                self._trainer_saturation_is_error(definition_id)
                 and has_capacity is False
                 and all_instances_full
             ):
@@ -1304,7 +1310,7 @@ class ControlPlane:
             placement_key(model.model_id),
             record.model_dump(mode="json"),
         )
-        placement = PlacementRecord.model_validate(inserted.value)
+        placement = cast(PlacementRecord, inserted.value)
         if placement.engine_instance_id != accepted_instance.instance_id:
             try:
                 await self.engines.client(accepted_instance.instance_id).unload_model(
@@ -1334,13 +1340,13 @@ class ControlPlane:
         for model_id in model_ids:
             value = await self.kv.get(model_key(model_id))
             if value is not None:
-                incumbent = ModelRecord.model_validate(value)
+                incumbent = cast(ModelRecord, value)
                 closed = await self.kv.get(session_closed_key(incumbent.session_id))
                 last_seen = await self.kv.get(
                     session_last_seen_key(incumbent.session_id)
                 )
                 seen_at = (
-                    SessionLastSeenRecord.model_validate(last_seen).seen_at
+                    cast(SessionLastSeenRecord, last_seen).seen_at
                     if last_seen is not None
                     else 0.0
                 )
@@ -1385,26 +1391,24 @@ class ControlPlane:
         closed_sessions: set[str] = set()
         for key, value in session_items:
             if key.startswith("session_last_seen:"):
-                record = SessionLastSeenRecord.model_validate(value)
+                record = cast(SessionLastSeenRecord, value)
                 last_seen[record.session_id] = record.seen_at
             elif key.startswith("session_closed:"):
-                closed_sessions.add(
-                    SessionClosedRecord.model_validate(value).session_id
-                )
+                closed_sessions.add(cast(SessionClosedRecord, value).session_id)
             elif key.startswith("session:"):
-                sessions.append(SessionRecord.model_validate(value).session_id)
+                sessions.append(cast(SessionRecord, value).session_id)
 
         models_by_session: dict[str, list[ModelRecord]] = defaultdict(list)
         creations_by_session: dict[str, list[str]] = defaultdict(list)
         placed: set[str] = set()
         for key, value in model_items:
             if key.startswith("model_creation:"):
-                creation = ModelCreationRecord.model_validate(value)
+                creation = cast(ModelCreationRecord, value)
                 creations_by_session[creation.session_id].append(key)
             elif key.startswith("placement:"):
-                placed.add(PlacementRecord.model_validate(value).model_id)
+                placed.add(cast(PlacementRecord, value).model_id)
             elif key.startswith("model:"):
-                model = ModelRecord.model_validate(value)
+                model = cast(ModelRecord, value)
                 models_by_session[model.session_id].append(model)
 
         closed: list[str] = []
@@ -1465,7 +1469,7 @@ class ControlPlane:
     async def sweep_idle_engines(self) -> tuple[str, ...]:
         items = await self.kv.list_items("trainer_demand:", "placement:")
         placed = {
-            PlacementRecord.model_validate(value).model_id
+            cast(PlacementRecord, value).model_id
             for key, value in items
             if key.startswith("placement:")
         }
@@ -1502,13 +1506,12 @@ class ControlPlane:
     async def _unload_session_models(self, session_id: str) -> None:
         definitions = set()
         for _, value in await self.kv.list_items("model:"):
-            model = ModelRecord.model_validate(value)
+            model = cast(ModelRecord, value)
             if model.session_id == session_id:
                 definitions.add(model.engine_definition_id)
                 await self._unload_quietly(model.model_id)
         for definition_id in definitions:
-            if self.reconcile_trainers is not None:
-                await self.reconcile_trainers(definition_id)
+            await self._trainer_demand_changed(definition_id)
 
     async def _unload_quietly(self, model_id: str) -> None:
         try:
@@ -1516,8 +1519,8 @@ class ControlPlane:
         except Exception:
             logging.getLogger(__name__).exception("unload %s", model_id)
 
-    async def _touch_session(self, session_id: str) -> SessionLastSeenRecord:
-        await self._open_session(session_id)
+    async def _mark_session_active(self, session_id: str) -> SessionLastSeenRecord:
+        await self._require_open_session(session_id)
         last_seen = SessionLastSeenRecord(
             session_id=session_id,
             seen_at=self.clock(),
@@ -1528,25 +1531,25 @@ class ControlPlane:
         )
         return last_seen
 
-    async def _open_session(self, session_id: str) -> SessionRecord:
+    async def _require_open_session(self, session_id: str) -> SessionRecord:
         if await self.kv.get(session_closed_key(session_id)) is not None:
             raise RecordUnavailable("session", session_id, "closed")
         value = await self.kv.get(session_key(session_id))
         if value is None:
             raise RecordNotFound("session", session_id)
-        return SessionRecord.model_validate(value)
+        return cast(SessionRecord, value)
 
     async def get_model(self, model_id: str) -> ModelRecord:
         value = await self.kv.get(model_key(model_id))
         if value is None:
             raise RecordNotFound("model", model_id)
-        return ModelRecord.model_validate(value)
+        return cast(ModelRecord, value)
 
     async def _placement(self, model_id: str) -> PlacementRecord | None:
         value = await self.kv.get(placement_key(model_id))
         if value is None:
             return None
-        return PlacementRecord.model_validate(value)
+        return cast(PlacementRecord, value)
 
     async def _live_instance(self, placement: PlacementRecord) -> EngineInstance:
         instance = await self.engines.get_instance(placement.engine_instance_id)

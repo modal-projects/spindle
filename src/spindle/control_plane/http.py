@@ -28,7 +28,6 @@ from spindle.request_timing import enabled as request_timing_enabled
 from spindle.request_timing import mark
 from spindle.telemetry.trainer import CommandMiddleware
 
-from .deployments import DeploymentRoutes
 from .service import ControlPlane, FutureResolutionStatus
 
 ERROR_STATUSES: tuple[tuple[type[Exception], int, str], ...] = (
@@ -163,17 +162,15 @@ def create_control_plane_app(
     checkpoint_volume: str = "spindle-checkpoints",
 ) -> FastAPI:
     definitions = tuple(definitions)
-
-    routes = DeploymentRoutes(definitions)
-
-    def definition_for(model_name, parameterization):
-        selected = routes.select(model_name, parameterization)
-        return selected.definition_id if selected else None
+    definitions_by_name = {
+        definition.definition_id: definition for definition in definitions
+    }
+    for definition in definitions:
+        definitions_by_name.setdefault(definition.model, definition)
+    models = tuple(dict.fromkeys(definition.model for definition in definitions))
 
     def supports_model(model_name: str) -> bool:
-        return any(definition.model == model_name for definition in definitions) or any(
-            definition.definition_id == model_name for definition in definitions
-        )
+        return model_name in definitions_by_name
 
     async def authorize(request: Request) -> None:
         if api_key is not None and request.headers.get("x-api-key") != api_key:
@@ -262,7 +259,15 @@ def create_control_plane_app(
 
     @app.get("/api/v1/get_server_capabilities")
     async def get_server_capabilities() -> dict[str, object]:
-        return {"supported_models": routes.capabilities()}
+        return {
+            "supported_models": [
+                {
+                    "model_name": model,
+                    "max_context_length": definitions_by_name[model].max_context_length,
+                }
+                for model in models
+            ]
+        }
 
     @app.get("/api/v1/spindle/deployments")
     async def list_deployments():
@@ -336,8 +341,8 @@ def create_control_plane_app(
             raise ValueError("lora parameterization is configured through lora_config")
         if body.rollout is not None and parameterization != "full":
             raise ValueError("rollout is only configurable for full parameterization")
-        definition_id = definition_for(body.base_model, parameterization)
-        if definition_id is None:
+        definition = definitions_by_name.get(body.base_model)
+        if definition is None:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -345,14 +350,21 @@ def create_control_plane_app(
                     f"{body.base_model}"
                 ),
             )
+        if definition.parameterization != parameterization:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{definition.definition_id} uses "
+                    f"{definition.parameterization} parameterization, not "
+                    f"{parameterization}"
+                ),
+            )
         creation = await control_plane.create_model(
             session_id=body.session_id,
             model_seq_id=body.model_seq_id,
-            definition_id=definition_id,
+            definition_id=definition.definition_id,
             spec={
-                "base_model": next(
-                    d.model for d in definitions if d.definition_id == definition_id
-                ),
+                "base_model": definition.model,
                 "lora_config": body.lora_config,
                 "parameterization": {"type": parameterization},
                 "rollout": body.rollout and body.rollout.model_dump(exclude_none=True),
@@ -373,9 +385,8 @@ def create_control_plane_app(
                 status_code=400,
                 detail="base_model or model_path is required",
             )
-        selected = routes.select(body.base_model) if body.base_model else None
-        definition_id = selected.definition_id if selected else None
-        if body.model_path is None and definition_id is None:
+        selected = definitions_by_name.get(body.base_model) if body.base_model else None
+        if body.model_path is None and selected is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
@@ -383,13 +394,9 @@ def create_control_plane_app(
         session = await control_plane.create_sampling_session(
             session_id=body.session_id,
             sampling_session_seq_id=body.sampling_session_seq_id,
-            base_model=(
-                next(d.model for d in definitions if d.definition_id == definition_id)
-                if definition_id
-                else body.base_model
-            ),
+            base_model=selected.model if selected else body.base_model,
             model_path=body.model_path,
-            engine_definition_id=definition_id,
+            engine_definition_id=selected.definition_id if selected else None,
         )
         if not supports_model(session.base_model):
             raise HTTPException(

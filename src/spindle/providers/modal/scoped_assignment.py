@@ -41,6 +41,4 @@ async def claim_model(registry, kv, engines, definition_id, model_id):
         await registry.put.aio("model:" + model_id, route)
         # This single assignment is the sampling admission fence and store selector.
         await registry.put.aio("slot:0", model_id)
-    if not active:
-        await engines.spawn_instance(definition_id)
     return await registry.get.aio("model:" + model_id)

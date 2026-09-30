@@ -11,7 +11,7 @@ class SamplingTask:
     session_id: str
     sampling_session_id: str
     base_model: str
-    engine_definition_id: str | None
+    engine_definition_id: str
     model_path: str | None
     model_id: str | None
     publish_version: int | None

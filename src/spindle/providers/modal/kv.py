@@ -7,6 +7,9 @@ from collections.abc import Awaitable, Callable
 
 import modal
 from grpclib.exceptions import StreamTerminatedError
+from pydantic import BaseModel
+
+from spindle.control_plane.store import RECORD_TYPES
 
 from ..contracts import InsertResult
 
@@ -69,20 +72,43 @@ def app_store_name(name: str, app_id: str) -> str:
 
 
 class ModalKeyValueStore:
-    def __init__(self, dictionary: modal.Dict) -> None:
+    def __init__(
+        self,
+        dictionary: modal.Dict,
+        record_types: dict[str, type[BaseModel]] = RECORD_TYPES,
+    ) -> None:
         self.dictionary = dictionary
+        self.record_types = record_types
+
+    def _record_type(self, key: str) -> type[BaseModel] | None:
+        return self.record_types.get(key.partition(":")[0])
+
+    def _decode(self, key: str, value: object) -> object:
+        record_type = self._record_type(key)
+        return record_type.model_validate(value) if record_type is not None else value
+
+    def _encode(self, key: str, value: object) -> object:
+        record_type = self._record_type(key)
+        if record_type is None:
+            return (
+                value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+            )
+        return record_type.model_validate(value).model_dump(mode="json")
 
     async def get(self, key: str) -> object | None:
-        return await self.dictionary.get.aio(key)
+        value = await self.dictionary.get.aio(key)
+        return None if value is None else self._decode(key, value)
 
     async def put(self, key: str, value: object) -> None:
-        await self.dictionary.put.aio(key, value)
+        await self.dictionary.put.aio(key, self._encode(key, value))
 
     async def put_if_absent(self, key: str, value: object) -> InsertResult:
-        created = await self.dictionary.put.aio(key, value, skip_if_exists=True)
+        stored = self._encode(key, value)
+        created = await self.dictionary.put.aio(key, stored, skip_if_exists=True)
         if created:
-            return InsertResult(True, value)
-        return InsertResult(False, await self.dictionary.get.aio(key))
+            return InsertResult(True, self._decode(key, stored))
+        existing = await self.dictionary.get.aio(key)
+        return InsertResult(False, self._decode(key, existing))
 
     async def delete(self, key: str) -> None:
         await self.dictionary.pop.aio(key, None)
@@ -98,7 +124,7 @@ class ModalKeyValueStore:
             try:
                 async with asyncio.timeout(LIST_ITEMS_TIMEOUT_SECONDS):
                     items = [
-                        (key, value)
+                        (key, self._decode(key, value))
                         async for key, value in self.dictionary.items.aio()
                         if any(key.startswith(prefix) for prefix in prefixes)
                     ]

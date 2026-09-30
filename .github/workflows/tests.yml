@@ -1,10 +1,13 @@
 name: Core CPU tests
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main]
 permissions:
   contents: read
+env:
+  UV_DEFAULT_INDEX: https://pypi.org/simple
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,4 +22,3 @@ jobs:
       # so the loss, gradient, and FP32-head regressions also run in CI.
       - run: uv pip install --python .venv/bin/python torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
       - run: uv run --no-sync pytest -q
-      - run: uv build

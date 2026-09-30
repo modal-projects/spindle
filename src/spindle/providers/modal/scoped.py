@@ -422,6 +422,8 @@ def build_app(
     @modal.concurrent(max_inputs=128)
     @modal.asgi_app(requires_proxy_auth=False)
     def api():
+        engines = ModalEnginePlatform(shared_kv(), spawn_engine)
+
         async def prepare_model(model):
             if model.spec.get("rollout"):
                 raise ValueError(
@@ -440,7 +442,7 @@ def build_app(
         storage = ModalCheckpointStorage(checkpoints)
         plane = ScopedControlPlane(
             shared_kv(),
-            ModalEnginePlatform(shared_kv(), spawn_engine),
+            engines,
             session_idle_timeout=None,
             prepare_model=prepare_model,
             ensure_sampling_pool=ensure_pool,

@@ -2,7 +2,6 @@ import asyncio
 
 import pytest
 
-from tests.support import TinkerStubExecutor
 from spindle.control_plane import ControlPlane, FutureResolutionStatus
 from spindle.control_plane.keys import (
     sampler_artifact_key,
@@ -16,6 +15,7 @@ from spindle.providers.local import (
     InMemoryKeyValueStore,
     LocalEnginePlatform,
 )
+from tests.support import TinkerStubExecutor
 
 BASE_MODEL = "Qwen/Qwen3-8B"
 DEFINITION = "qwen3_8b"
@@ -100,9 +100,6 @@ def test_named_export_is_idempotent_and_resolves_exact_artifact() -> None:
         assert latest.model_path == f"{latest_path}/000007"
         assert latest.latest
         assert latest.publish_version == 7
-        legacy = sampling.model_dump(mode="json")
-        legacy.pop("engine_definition_id")
-        assert type(sampling).model_validate(legacy).engine_definition_id is None
         assert await plane.submit_sampler_export(request) == request_id
         assert (await plane.retrieve(request_id)).result == resolution.result
 
@@ -232,8 +229,13 @@ def test_ttl_starts_at_completion_and_propagates_to_session() -> None:
                 sampling_session_seq_id=0,
                 model_path=result.result["path"],
             )
-        assert await plane.kv.get(sampler_artifact_key(result.result["path"])) is not None
-        assert await plane.kv.get(sampling_session_key(session.sampling_session_id)) is not None
+        assert (
+            await plane.kv.get(sampler_artifact_key(result.result["path"])) is not None
+        )
+        assert (
+            await plane.kv.get(sampling_session_key(session.sampling_session_id))
+            is not None
+        )
 
     asyncio.run(run())
 
@@ -243,13 +245,15 @@ def test_expired_creation_retry_never_ensures_pool(missing_record) -> None:
     async def run() -> None:
         now = 100.0
         plane, session_id, model_id = await plane_with_model(lambda: now)
-        request_id = await plane.submit_sampler_export(export_request(model_id, ttl_seconds=10))
-        result = await plane.retrieve(request_id, timeout=1.0)
-        kwargs = dict(
-            session_id=session_id,
-            sampling_session_seq_id=0,
-            model_path=result.result["path"],
+        request_id = await plane.submit_sampler_export(
+            export_request(model_id, ttl_seconds=10)
         )
+        result = await plane.retrieve(request_id, timeout=1.0)
+        kwargs = {
+            "session_id": session_id,
+            "sampling_session_seq_id": 0,
+            "model_path": result.result["path"],
+        }
         session = await plane.create_sampling_session(**kwargs)
         if missing_record:
             await plane.kv.delete(sampling_session_key(session.sampling_session_id))
@@ -262,7 +266,10 @@ def test_expired_creation_retry_never_ensures_pool(missing_record) -> None:
         with pytest.raises(RecordUnavailable, match="expired"):
             await plane.create_sampling_session(**kwargs)
         if missing_record:
-            assert await plane.kv.get(sampling_session_key(session.sampling_session_id)) is None
+            assert (
+                await plane.kv.get(sampling_session_key(session.sampling_session_id))
+                is None
+            )
 
     asyncio.run(run())
 
@@ -283,7 +290,8 @@ def test_expired_export_retry_never_ensures_pool(named, missing_record) -> None:
         result = await plane.retrieve(request_id, timeout=1.0)
         key = (
             sampler_artifact_key(result.result["path"])
-            if named else sampling_session_key(result.result["sampling_session_id"])
+            if named
+            else sampling_session_key(result.result["sampling_session_id"])
         )
         if missing_record:
             await plane.kv.delete(key)
@@ -330,7 +338,9 @@ def test_expired_named_artifact_remains_reserved() -> None:
     async def run() -> None:
         now = 100.0
         plane, _, model_id = await plane_with_model(lambda: now)
-        request_id = await plane.submit_sampler_export(export_request(model_id, ttl_seconds=10))
+        request_id = await plane.submit_sampler_export(
+            export_request(model_id, ttl_seconds=10)
+        )
         result = await plane.retrieve(request_id, timeout=1.0)
         key = sampler_artifact_key(result.result["path"])
         original = await plane.kv.get(key)

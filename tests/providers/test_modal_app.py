@@ -40,11 +40,10 @@ def test_definitions_come_only_from_the_configured_records() -> None:
     }
 
 
-def test_trainer_autoscaling_supports_full_and_lora_definitions() -> None:
+def test_definition_lookup_rejects_missing_definition() -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    assert modal_app.trainer_autoscaling(FULL_DEFINITION)
-    assert modal_app.trainer_autoscaling(LORA_DEFINITION)
-    assert not modal_app.trainer_autoscaling("missing-definition")
+    with pytest.raises(KeyError, match="definition is not deployed"):
+        modal_app.module_for("missing-definition")
 
 
 @pytest.mark.parametrize(
@@ -74,8 +73,8 @@ def test_transitional_trainer_at_cap_keeps_capacity_pending(
     monkeypatch.setattr(modal_app, "kick_trainer_reconciler", kick)
     modal_app.module_for(LORA_DEFINITION).recipe.trainer_max_instances = 1
 
-    plane = modal_app._plane()
-    assert asyncio.run(plane.reconcile_trainers(LORA_DEFINITION)) is available
+    plane = modal_app.build_deployment_control_plane()
+    assert asyncio.run(plane._reconcile_trainers(LORA_DEFINITION)) is available
 
 
 def test_ensure_pool_deploys_pinned_base_pool(monkeypatch) -> None:
@@ -113,7 +112,7 @@ def test_ensure_pool_deploys_pinned_base_pool(monkeypatch) -> None:
     )
 
     async def run() -> None:
-        plane = modal_app._plane()
+        plane = modal_app.build_deployment_control_plane()
         await plane.ensure_sampling_pool(session)
         await plane.ensure_sampling_pool(session)
 
@@ -159,7 +158,7 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
         )
 
     async def run() -> None:
-        plane = modal_app._plane()
+        plane = modal_app.build_deployment_control_plane()
         await plane.prepare_model(
             model(
                 FULL_DEFINITION, {"rollout": {"min_containers": 8, "max_containers": 8}}
@@ -244,7 +243,7 @@ def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) ->
 
     async def run() -> None:
         await kv.put(model_key(model_id), model.model_dump(mode="json"))
-        plane = modal_app._plane()
+        plane = modal_app.build_deployment_control_plane()
         await plane.ensure_sampling_pool(session(True, 0))
         await plane.ensure_sampling_pool(session(True, 0))
         await plane.ensure_sampling_pool(session(False, 3))
@@ -403,10 +402,11 @@ def test_checkpoint_metadata_reader_reloads_existing_volume(
     monkeypatch.setattr(modal_app, "checkpoint_volume", Volume())
 
     checkpoint_uri = root / "model" / "weights" / "checkpoint"
-    assert (
-        asyncio.run(modal_app._read_checkpoint_metadata(str(checkpoint_uri)))
-        == metadata
+    storage = modal_app.ModalCheckpointStorage(
+        modal_app.checkpoint_volume,
+        str(root),
     )
+    assert asyncio.run(storage.read_metadata(str(checkpoint_uri))) == metadata
     assert reloads == [True]
 
 
@@ -554,7 +554,8 @@ def test_cleaner_loses_models_on_removed_definitions(monkeypatch) -> None:
 
     asyncio.run(run())
     assert stopped == [pools["orphan"].app_name]
-    assert modal_app.parameterization_for("removed_definition") is None
+    with pytest.raises(KeyError, match="definition is not deployed"):
+        modal_app.module_for("removed_definition")
 
 
 def test_checkpoint_volume_listing_and_delete(tmp_path, monkeypatch) -> None:
@@ -574,6 +575,10 @@ def test_checkpoint_volume_listing_and_delete(tmp_path, monkeypatch) -> None:
     checkpoints = tmp_path / "checkpoints"
     monkeypatch.setattr(modal_app, "CHECKPOINT_ROOT", str(checkpoints))
     monkeypatch.setattr(modal_app, "checkpoint_volume", Volume("ckpt"))
+    storage = modal_app.ModalCheckpointStorage(
+        modal_app.checkpoint_volume,
+        str(checkpoints),
+    )
 
     lora = checkpoints / "step-1" / "model-a"
     lora.mkdir(parents=True)
@@ -588,7 +593,7 @@ def test_checkpoint_volume_listing_and_delete(tmp_path, monkeypatch) -> None:
     (checkpoints / "step-1" / "stray.txt").write_text("x")
     (checkpoints / "step-1" / "incomplete").mkdir()
 
-    entries = asyncio.run(modal_app._list_checkpoints(None))
+    entries = asyncio.run(storage.list(None))
     assert sorted(
         (entry["model_id"], entry["name"], entry["size_bytes"], entry["metadata"])
         for entry in entries
@@ -602,20 +607,20 @@ def test_checkpoint_volume_listing_and_delete(tmp_path, monkeypatch) -> None:
         ("model-b", "latest", 12, {}),
     ]
     assert {entry["path"] for entry in entries} == {str(lora), str(fft)}
-    assert [
-        entry["name"] for entry in asyncio.run(modal_app._list_checkpoints("model-b"))
-    ] == ["latest"]
-    assert asyncio.run(modal_app._list_checkpoints("model-c")) == []
+    assert [entry["name"] for entry in asyncio.run(storage.list("model-b"))] == [
+        "latest"
+    ]
+    assert asyncio.run(storage.list("model-c")) == []
     assert events == ["reload:ckpt"] * 3
 
     events.clear()
-    asyncio.run(modal_app._delete_checkpoint(str(lora)))
+    asyncio.run(storage.delete(str(lora)))
     assert not lora.exists()
     assert events == ["reload:ckpt", "commit:ckpt"]
     with pytest.raises(RecordNotFound):
-        asyncio.run(modal_app._delete_checkpoint(str(lora)))
+        asyncio.run(storage.delete(str(lora)))
     with pytest.raises(ValueError):
-        asyncio.run(modal_app._delete_checkpoint(str(tmp_path / "elsewhere")))
+        asyncio.run(storage.delete(str(tmp_path / "elsewhere")))
 
 
 def test_pool_cleanup_continues_after_failure_and_retries_entry(monkeypatch, caplog):
@@ -833,7 +838,7 @@ def test_sampling_session_readiness_reuses_cached_pool(monkeypatch):
     )
 
     async def run():
-        plane = modal_app._plane()
+        plane = modal_app.build_deployment_control_plane()
         await asyncio.gather(*(plane.ensure_sampling_pool(session) for _ in range(6)))
         await modal_app._ready_lora_pool(LoraPoolSpec(LORA_DEFINITION))
 
