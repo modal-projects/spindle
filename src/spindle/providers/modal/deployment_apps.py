@@ -116,7 +116,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         serialized=True,
         image=image if image is not None else image_for(recipe.backend),
         gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
-        region=platform["modal"]["region"],
+        region=recipe.trainer_region or platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
         timeout=recipe.trainer_timeout_s,

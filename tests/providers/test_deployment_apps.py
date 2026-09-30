@@ -475,3 +475,13 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_trainer_region_can_broaden_without_changing_frontend_region(builders):
+    row = deployment()
+    original = row.trainer_identity()
+    row.recipe.trainer_region = 'us'
+    app, _ = deployment_apps.build_trainer_app(row, image='test')
+    assert app.functions['trainer'][0]['region'] == 'us'
+    assert row.recipe.platform['modal']['region'] == 'us-west'
+    assert row.trainer_identity() != original

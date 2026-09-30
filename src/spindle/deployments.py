@@ -100,6 +100,7 @@ class DeploymentConfig(BaseModel):
             recipe.miles_cfg,
             recipe.megatron_cfg,
             recipe.sampler_persistence_concurrency,
+            recipe.trainer_region,
             recipe.trainer_gpu,
             recipe.trainer_gpus_per_node,
             recipe.trainer_nodes,
