@@ -49,3 +49,23 @@ def apply_config_overrides(parser, options, argv):
             if isinstance(value, (dict, list, bool)):
                 raise ValueError(f"backend option {name} requires a scalar")
             argv.append(f"{flag}={value}")
+
+
+def defer_config_overrides(parser, options, argv):
+    """Apply overrides at parse time, after every argument group is registered.
+
+    Miles invokes custom argument hooks before adding its own groups, so
+    options such as ``qkv_format`` do not exist yet when the hook runs.
+    """
+    parse_known_args = parser.parse_known_args
+    applied = False
+
+    def parse_with_overrides(*args, **kwargs):
+        nonlocal applied
+        if not applied:
+            apply_config_overrides(parser, options, argv)
+            applied = True
+        return parse_known_args(*args, **kwargs)
+
+    parser.parse_known_args = parse_with_overrides
+    return parser
