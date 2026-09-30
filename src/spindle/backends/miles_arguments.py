@@ -52,10 +52,13 @@ def apply_config_overrides(parser, options, argv):
 
 
 def defer_config_overrides(parser, options, argv):
-    """Apply overrides at parse time, after every argument group is registered.
+    """Apply overrides on the parser's first ``parse_known_args`` call.
 
     Miles invokes custom argument hooks before adding its own groups, so
-    options such as ``qkv_format`` do not exist yet when the hook runs.
+    options such as ``qkv_format`` do not exist yet when the hook runs. The
+    first parse happens in Miles' probe for user-function arguments, after all
+    built-in groups are registered, so options contributed by user functions
+    cannot be overridden.
     """
     parse_known_args = parser.parse_known_args
     applied = False
