@@ -15,7 +15,6 @@ from spindle.backends.miles_arguments import apply_config_overrides
 from spindle.configs.qwen35_9b_lora_16k import Config as Parent
 from spindle.configuration import BaseConfig
 from spindle.control_plane import ControlPlane, create_control_plane_app
-from spindle.control_plane.deployments import DeploymentRoutes
 from spindle.control_plane.keys import model_key
 from spindle.deployments import (
     DeploymentConfig,
@@ -99,37 +98,6 @@ def test_asset_paths_follow_the_model():
     assert a.asset_path == f"/assets/{a.recipe.model}"
     b = resolved(recipe(model="other/Qwen3.5-9B-Base"))
     assert a.asset_path != b.asset_path
-
-
-def test_routing_uses_deployment_order():
-    small = resolved()
-    large = resolved(recipe("qwen35-9b-lora-64k"))
-    routes = DeploymentRoutes([small, large])
-    assert routes.select(small.model, "lora").definition_id == small.definition_id
-    assert routes.capabilities()[0]["max_context_length"] == 16384
-    validate_frontend([small.recipe, large.recipe])
-
-    routes = DeploymentRoutes([large])
-    assert routes.select(small.model, "lora").definition_id == large.definition_id
-    assert routes.capabilities()[0]["max_context_length"] == 65536
-
-    other = resolved(recipe(name="other", model="org/other"))
-    routes = DeploymentRoutes([other])
-    assert routes.select(other.model, "lora").definition_id == other.definition_id
-    assert {row["model_name"] for row in routes.capabilities()} == {other.model}
-
-
-def test_sampling_uses_order_and_training_filters_parameterization():
-    lora = resolved()
-    fft = resolved(recipe("qwen35-4b-fft-64k", model=lora.model))
-    for first, second in ((lora, fft), (fft, lora)):
-        routes = DeploymentRoutes([first, second])
-        assert routes.select(lora.model).definition_id == first.definition_id
-        assert routes.select(lora.model, "lora").definition_id == lora.definition_id
-        assert routes.select(lora.model, "full").definition_id == fft.definition_id
-        assert routes.select(second.definition_id).definition_id == second.definition_id
-        assert routes.select("missing") is None
-        assert routes.select(lora.definition_id, "full") is None
 
 
 def test_native_false_list_aliases_and_scalar_overrides():

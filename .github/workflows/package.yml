@@ -1,0 +1,71 @@
+name: Package
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+env:
+  UV_DEFAULT_INDEX: https://pypi.org/simple
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.9.26
+      # uv builds the wheel from the sdist, checking that source releases rebuild.
+      - run: uv build
+      - run: uvx --from twine twine check --strict dist/*
+      - run: uv run --no-project --with packaging python scripts/check_distribution.py
+      - name: Check PyPI release prerequisites
+        if: inputs.release
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: uv run --no-project --with packaging python scripts/check_distribution.py --for-pypi --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+  install:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12']
+        distribution: [wheel, sdist]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Install in a clean environment
+        env:
+          DISTRIBUTION: ${{ matrix.distribution }}
+        run: |
+          python -m venv "$RUNNER_TEMP/spindle-install"
+          echo "$RUNNER_TEMP/spindle-install/bin" >> "$GITHUB_PATH"
+          if [ "$DISTRIBUTION" = wheel ]; then
+            "$RUNNER_TEMP/spindle-install/bin/python" -m pip install --index-url https://pypi.org/simple dist/*.whl
+          else
+            "$RUNNER_TEMP/spindle-install/bin/python" -m pip install --index-url https://pypi.org/simple dist/*.tar.gz
+          fi
+      - name: Check installed API, CLI, and packaged presets
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m pip check
+          python -c "import spindle; from importlib.metadata import version; assert spindle.__version__ == version('modal-spindle'); from spindle.engines import qwen3_5_4b_full_64k; qwen3_5_4b_full_64k()"
+          spindle --help
+          spindle config init --preset qwen35-9b-lora-16k > deployment.py
+          spindle config validate deployment.py

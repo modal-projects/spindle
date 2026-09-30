@@ -9,9 +9,10 @@ cd "$(dirname "$0")/.."
 deployment_files=(
   src/spindle/configs/qwen35_9b_lora_16k.py
   src/spindle/configs/qwen35_9b_lora_64k.py
+  src/spindle/configs/qwen35_9b_lora_128k.py
   src/spindle/configs/qwen35_4b_fft_64k.py
   src/spindle/configs/gpt_oss_20b_lora_64k.py
   src/spindle/configs/qwen36_35b_a3b_lora_32k.py
 )
 
-spindle deploy "${deployment_files[@]}" "$@"
+uv run --python 3.12 spindle deploy "${deployment_files[@]}" "$@"

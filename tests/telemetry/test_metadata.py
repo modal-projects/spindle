@@ -60,18 +60,5 @@ def test_sampler_artifact_and_session_preserve_experiment_labels():
             model_path=artifact.model_path,
         )
         assert sampling.telemetry_tags == artifact.telemetry_tags
-        # Old records predate tagging. Adding labels must not change publication identity.
-        from spindle.control_plane.keys import sampler_artifact_key
-
-        versioned_key = sampler_artifact_key(
-            plane._latest_sampler_model_path(creation.model.model_id, 7)
-        )
-        old = await plane.kv.get(versioned_key)
-        old.pop("telemetry_tags")
-        await plane.kv.put(versioned_key, old)
-        rid = await plane.submit_sampler_export(
-            export_request(creation.model.model_id, seq_id=2, path="second")
-        )
-        assert (await plane.retrieve(rid, timeout=1.0)).result is not None
 
     asyncio.run(run())

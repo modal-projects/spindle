@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from spindle.control_plane.records import SessionRecord
 from spindle.providers.local.kv import InMemoryKeyValueStore
 from spindle.providers.modal import kv
 
@@ -26,6 +27,34 @@ def test_independent_trainer_uses_frontend_registry(monkeypatch, explicit, expec
 
 class RetryableStreamError(Exception):
     pass
+
+
+def test_modal_store_validates_typed_records() -> None:
+    async def run() -> None:
+        values = {}
+
+        async def get(key):
+            return values.get(key)
+
+        async def put(key, value, skip_if_exists=False):
+            if skip_if_exists and key in values:
+                return False
+            values[key] = value
+            return True
+
+        store = kv.ModalKeyValueStore(
+            SimpleNamespace(
+                get=SimpleNamespace(aio=get),
+                put=SimpleNamespace(aio=put),
+            )
+        )
+        session = SessionRecord(session_id="session", created_at=1.0)
+        await store.put("session:session", session)
+
+        assert values["session:session"] == session.model_dump(mode="json")
+        assert await store.get("session:session") == session
+
+    asyncio.run(run())
 
 
 class StreamingItems:
@@ -75,7 +104,7 @@ class HangingItems:
 def test_list_items_retries_terminated_stream(monkeypatch) -> None:
     async def run() -> None:
         items = StreamingItems(failures=2)
-        store = kv.ModalKeyValueStore(SimpleNamespace(items=items))
+        store = kv.ModalKeyValueStore(SimpleNamespace(items=items), record_types={})
         sleep = AsyncMock()
         monkeypatch.setattr(kv, "StreamTerminatedError", RetryableStreamError)
         monkeypatch.setattr(kv.asyncio, "sleep", sleep)
@@ -92,7 +121,7 @@ def test_list_items_retries_terminated_stream(monkeypatch) -> None:
 def test_list_items_discards_partial_retry(monkeypatch) -> None:
     async def run() -> None:
         items = PartiallyTerminatedItems()
-        store = kv.ModalKeyValueStore(SimpleNamespace(items=items))
+        store = kv.ModalKeyValueStore(SimpleNamespace(items=items), record_types={})
         monkeypatch.setattr(kv, "StreamTerminatedError", RetryableStreamError)
         monkeypatch.setattr(kv.asyncio, "sleep", AsyncMock())
 
@@ -108,7 +137,7 @@ def test_list_items_discards_partial_retry(monkeypatch) -> None:
 def test_list_items_retries_stalled_stream(monkeypatch) -> None:
     async def run() -> None:
         items = HangingItems()
-        store = kv.ModalKeyValueStore(SimpleNamespace(items=items))
+        store = kv.ModalKeyValueStore(SimpleNamespace(items=items), record_types={})
         monkeypatch.setattr(kv, "LIST_ITEMS_TIMEOUT_SECONDS", 0.01)
         monkeypatch.setattr(kv.asyncio, "sleep", AsyncMock())
 
@@ -122,7 +151,7 @@ def test_list_items_retries_stalled_stream(monkeypatch) -> None:
 def test_list_items_does_not_retry_other_errors(monkeypatch) -> None:
     async def run() -> None:
         items = StreamingItems(failures=1)
-        store = kv.ModalKeyValueStore(SimpleNamespace(items=items))
+        store = kv.ModalKeyValueStore(SimpleNamespace(items=items), record_types={})
         monkeypatch.setattr(kv, "StreamTerminatedError", ValueError)
         sleep = AsyncMock()
         monkeypatch.setattr(kv.asyncio, "sleep", sleep)
@@ -138,7 +167,7 @@ def test_list_items_does_not_retry_other_errors(monkeypatch) -> None:
 def test_list_items_reraises_after_retry_limit(monkeypatch) -> None:
     async def run() -> None:
         items = StreamingItems(failures=3)
-        store = kv.ModalKeyValueStore(SimpleNamespace(items=items))
+        store = kv.ModalKeyValueStore(SimpleNamespace(items=items), record_types={})
         monkeypatch.setattr(kv, "StreamTerminatedError", RetryableStreamError)
         monkeypatch.setattr(kv.asyncio, "sleep", AsyncMock())
 

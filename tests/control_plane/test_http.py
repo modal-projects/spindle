@@ -359,7 +359,7 @@ def test_full_model_info_is_not_lora() -> None:
             json={
                 "session_id": session.json()["session_id"],
                 "model_seq_id": 0,
-                "base_model": BASE_MODEL,
+                "base_model": f"{DEFINITION}_full",
                 "parameterization": {"type": "full"},
             },
         )
@@ -433,31 +433,42 @@ def test_rollout_pool_config_is_full_only_and_validated() -> None:
         client = http_client()
         session_id, _ = await created_model(client)
 
-        def create(seq: int, **body):
+        def create(seq: int, base_model: str = BASE_MODEL, **body):
             return client.post(
                 "/api/v1/create_model",
                 json={
                     "session_id": session_id,
                     "model_seq_id": seq,
-                    "base_model": BASE_MODEL,
+                    "base_model": base_model,
                     **body,
                 },
             )
 
         full = {"parameterization": {"type": "full"}}
         accepted = await create(
-            1, **full, rollout={"min_containers": 2, "max_containers": 4}
+            1,
+            base_model=f"{DEFINITION}_full",
+            **full,
+            rollout={"min_containers": 2, "max_containers": 4},
         )
         assert accepted.status_code == 200
         lora = await create(2, lora_config={"rank": 8}, rollout={"max_containers": 4})
         assert lora.status_code == 400
         assert "only configurable for full" in lora.json()["message"]
         inverted = await create(
-            3, **full, rollout={"min_containers": 4, "max_containers": 2}
+            3,
+            base_model=f"{DEFINITION}_full",
+            **full,
+            rollout={"min_containers": 4, "max_containers": 2},
         )
         assert inverted.status_code == 400
         assert inverted.json()["error"] == "invalid_request"
-        unknown = await create(4, **full, rollout={"target_concurrency": 8})
+        unknown = await create(
+            4,
+            base_model=f"{DEFINITION}_full",
+            **full,
+            rollout={"target_concurrency": 8},
+        )
         assert unknown.status_code == 400
         assert unknown.json()["error"] == "invalid_request"
         await client.aclose()

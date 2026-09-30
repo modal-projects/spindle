@@ -37,14 +37,24 @@ class LocalEnginePlatform:
         if definition_id != self.definition_id:
             raise RecordNotFound("engine definition", definition_id)
         async with self._lock:
-            current = (
-                self._instances.get(self._current) if self._current else None
-            )
+            current = self._instances.get(self._current) if self._current else None
             if (
                 current is not None
                 and current.state in {"starting", "running"}
                 and current.revision == self.revision
             ):
+                return current
+            current = next(
+                (
+                    instance
+                    for instance in self._instances.values()
+                    if instance.state in {"starting", "running"}
+                    and instance.revision == self.revision
+                ),
+                None,
+            )
+            if current is not None:
+                self._current = current.instance_id
                 return current
             instance = self._spawn_instance()
             self._current = instance.instance_id

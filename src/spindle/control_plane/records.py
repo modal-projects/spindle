@@ -62,22 +62,13 @@ class PlacementRecord(DurableRecord):
     engine_boot_id: str = ""
 
 
-class SamplingSessionCreationRecord(DurableRecord):
-    session_id: Identifier
-    sampling_session_seq_id: int = Field(ge=0)
-    sampling_session_id: Identifier
-    fingerprint: NonEmptyString
-    created_at: Timestamp
-    session: dict | None = None
-
-
 class SamplingSessionRecord(DurableRecord):
     telemetry_tags: dict[str, str] = Field(default_factory=dict)
     sampling_session_id: Identifier
     session_id: Identifier
     sampling_session_seq_id: int = Field(ge=0)
     base_model: NonEmptyString
-    engine_definition_id: Identifier | None = None
+    engine_definition_id: Identifier
     model_path: str | None = None
     model_id: ModelIdentifier | None = None
     publish_version: PublishVersion | None = None
@@ -85,6 +76,15 @@ class SamplingSessionRecord(DurableRecord):
     export_seq_id: int | None = Field(default=None, gt=0)
     expires_at: Timestamp | None = None
     created_at: Timestamp
+
+
+class SamplingSessionCreationRecord(DurableRecord):
+    session_id: Identifier
+    sampling_session_seq_id: int = Field(ge=0)
+    sampling_session_id: Identifier
+    fingerprint: NonEmptyString
+    created_at: Timestamp
+    session: SamplingSessionRecord
 
 
 class SamplerExportSubmissionRecord(DurableRecord):
@@ -110,7 +110,7 @@ class SamplerArtifactRecord(DurableRecord):
     model_id: ModelIdentifier
     export_seq_id: int = Field(gt=0)
     base_model: NonEmptyString
-    engine_definition_id: Identifier | None = None
+    engine_definition_id: Identifier
     publish_version: PublishVersion
     created_at: Timestamp
     expires_at: Timestamp | None = None

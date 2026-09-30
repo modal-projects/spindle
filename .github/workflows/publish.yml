@@ -1,0 +1,30 @@
+name: Publish to PyPI
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+concurrency:
+  group: pypi-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+  package:
+    uses: ./.github/workflows/package.yml
+    with:
+      release: true
+  publish:
+    needs: [tests, package]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/modal-spindle
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

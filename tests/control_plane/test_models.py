@@ -2,7 +2,6 @@ import asyncio
 
 import pytest
 
-from tests.support import EchoExecutor
 from spindle.control_plane import ControlPlane, FutureResolutionStatus
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.engine import OperationKind
@@ -15,6 +14,8 @@ from spindle.providers.local import (
     InMemoryKeyValueStore,
     LocalEnginePlatform,
 )
+from spindle.providers.modal.deployment_control import DeploymentControlPlane
+from tests.support import EchoExecutor
 
 DEFINITION = "qwen3_4b_lora32_16k"
 
@@ -441,16 +442,19 @@ def test_prepare_model_failure_leaves_no_runnable_model() -> None:
         if attempts == 1:
             raise RuntimeError("asset download failed")
 
-    async def reconcile(definition_id: str) -> None:
+    async def reconcile(definition_id: str, **_: object) -> None:
         reconciled.append(definition_id)
+
+    class DemandControlPlane(ControlPlane):
+        async def _trainer_demand_changed(self, definition_id: str) -> None:
+            await reconcile(definition_id)
 
     async def run() -> None:
         kv = InMemoryKeyValueStore()
-        plane = ControlPlane(
+        plane = DemandControlPlane(
             kv,
             LocalEnginePlatform(DEFINITION, EchoExecutor),
             prepare_model=prepare,
-            reconcile_trainers=reconcile,
         )
         session = await plane.create_session()
         request = {
@@ -475,18 +479,19 @@ def test_prepare_model_failure_leaves_no_runnable_model() -> None:
 
 
 def test_model_creation_reports_saturation_at_trainer_cap() -> None:
-    async def no_capacity(definition_id: str) -> bool:
+    async def no_capacity(_definition_id: str, **_: object) -> bool:
         return False
 
     async def run() -> None:
         kv = InMemoryKeyValueStore()
         engines = LocalEnginePlatform(DEFINITION, EchoExecutor, max_models=1)
         await engines.spawn_instance(DEFINITION)
-        plane = ControlPlane(
+        plane = DeploymentControlPlane(
             kv,
             engines,
-            reconcile_trainers=no_capacity,
-            trainer_autoscaling=lambda _: True,
+            request_trainer_reconciliation=no_capacity,
+            trainer_maximum_instances=lambda _: 1,
+            trainer_models_per_instance=lambda _: 1,
             session_idle_timeout=300,
         )
         session = await plane.create_session()
@@ -515,18 +520,19 @@ def test_model_creation_reports_saturation_at_trainer_cap() -> None:
 
 
 def test_model_creation_reuses_released_slot_at_trainer_cap() -> None:
-    async def no_capacity(definition_id: str) -> bool:
+    async def no_capacity(_definition_id: str, **_: object) -> bool:
         return False
 
     async def run() -> None:
         kv = InMemoryKeyValueStore()
         engines = LocalEnginePlatform(DEFINITION, EchoExecutor, max_models=2)
         instance = await engines.spawn_instance(DEFINITION)
-        plane = ControlPlane(
+        plane = DeploymentControlPlane(
             kv,
             engines,
-            reconcile_trainers=no_capacity,
-            trainer_autoscaling=lambda _: True,
+            request_trainer_reconciliation=no_capacity,
+            trainer_maximum_instances=lambda _: 1,
+            trainer_models_per_instance=lambda _: 2,
         )
         session = await plane.create_session()
         creations = [

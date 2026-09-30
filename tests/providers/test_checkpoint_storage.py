@@ -10,6 +10,7 @@ from spindle.backends.deployment import backend_config
 from spindle.providers.modal.app import DEFINITIONS, PLATFORM
 from spindle.providers.modal.checkpoint_storage import (
     CHECKPOINT_ROOT,
+    ModalCheckpointStorage,
     _scan_checkpoints,
 )
 from spindle.providers.modal.deployment_apps import volumes_for
@@ -77,6 +78,7 @@ def test_same_checkpoint_name_isolated_by_model(tmp_path, monkeypatch) -> None:
         patch.object(app.checkpoint_volume, "reload"),
         patch.object(app.checkpoint_volume, "commit"),
     ):
-        asyncio.run(app._delete_checkpoint(str(tmp_path / "final/run-a")))
+        storage = ModalCheckpointStorage(app.checkpoint_volume, str(tmp_path))
+        asyncio.run(storage.delete(str(tmp_path / "final/run-a")))
     assert scan("run-a") == []
     assert len(scan("run-b")) == 1
