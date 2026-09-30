@@ -82,6 +82,12 @@ def secrets_for(platform, *, training=False):
     return result
 
 
+def server_placement(region):
+    if region is None:
+        return {}
+    return {"routing_region": region, "compute_region": region}
+
+
 def deployment_env(values):
     """Keep user environment overrides separate from Spindle's deployment wiring."""
     if any(key.startswith("SPINDLE_") for key in values):
@@ -224,8 +230,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         startup_timeout=recipe.inference_startup_timeout_s,
         exit_grace_period=300,
         port=8000,
-        routing_region=platform["modal"]["region"],
-        compute_region=platform["modal"]["region"],
+        **server_placement(platform["modal"]["region"]),
     )
     class Server:
         @modal.enter()

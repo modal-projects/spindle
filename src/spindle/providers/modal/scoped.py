@@ -93,7 +93,6 @@ def register_sampler(
         startup_timeout=1800,
         exit_grace_period=120,
         port=8000,
-        routing_region="us-west",
     )
     class Sampler:
         sidecar = None
@@ -417,7 +416,6 @@ def build_app(
         timeout=1200,
         secrets=[*telemetry_secrets, api_secret],
         volumes={"/checkpoints": checkpoints},
-        routing_region="us-west",
     )
     @modal.concurrent(max_inputs=128)
     @modal.asgi_app(requires_proxy_auth=False)

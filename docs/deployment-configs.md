@@ -110,12 +110,12 @@ Validation loads the recipes and checks that they can share one frontend. Backen
 The checked-in [deploy_models.sh](../scripts/deploy_models.sh) lists the complete active config set. Add a config path there, then run it. The deployment command owns frontend selection and trainer/inference updates:
 
 ~~~bash
-./scripts/deploy_models.sh --app my-spindle --env dev --region us-west
+./scripts/deploy_models.sh --app my-spindle --env dev
 ./scripts/deploy_models.sh --refresh-trainer qwen35-9b-lora-16k
 ./scripts/deploy_models.sh --refresh-inference qwen35-9b-lora-16k
 ~~~
 
-Frontend, region, environment, secret names, and volume names default in `BaseConfig.platform`. Set them in the same Python config using dotted overrides:
+Frontend, region, environment, secret names, and volume names default in `BaseConfig.platform`. `platform.modal.region` defaults to `None`, which leaves GPU placement unpinned (Modal schedules trainers and inference pools in any region); set it only to restrict placement. Set them in the same Python config using dotted overrides:
 
 ```python
 from spindle.configs.gpt_oss_20b_lora_64k import Config as Parent
