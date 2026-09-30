@@ -104,6 +104,16 @@ def test_asset_paths_follow_the_model():
     assert a.asset_path != b.asset_path
 
 
+def test_model_weights_override_assets_but_not_the_served_model():
+    row = resolved(recipe(model_weights="org/model-bf16"))
+    assert row.model == row.recipe.model
+    assert row.weights_repo == "org/model-bf16"
+    assert row.asset_path == "/assets/org/model-bf16"
+    assert row.trainer_settings["miles"]["hf_checkpoint"] == row.asset_path
+    assert row.trainer_identity() != resolved().trainer_identity()
+    assert row.inference_identity() != resolved().inference_identity()
+
+
 def test_routing_uses_deployment_order():
     small = resolved()
     large = resolved(recipe("qwen35-9b-lora-64k"))
