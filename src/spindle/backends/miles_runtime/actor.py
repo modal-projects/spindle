@@ -30,6 +30,7 @@ from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
+from . import expert_lora_compat
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
@@ -436,10 +437,27 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
     def forward_only(self, *args, **kwargs):
         return self._profiled("forward_only", *args, **kwargs)
 
-    def load_slot(self, *args, **kwargs):
-        if kwargs.get("ckpt_path") or len(args) > 3:
+    def load_slot(
+        self,
+        slot: int,
+        rank: int,
+        alpha: float,
+        ckpt_path: str | None = None,
+        load_optimizer: bool = True,
+    ):
+        if ckpt_path:
             _sync_checkpoint_volume("reload")
-        return super().load_slot(*args, **kwargs)
+        result = super().load_slot(
+            slot, rank, alpha, ckpt_path=ckpt_path, load_optimizer=load_optimizer
+        )
+        if ckpt_path and expert_lora_compat.enabled():
+            expert_lora_compat.restore_factory_weights(
+                self.model,
+                self.slot_optimizers[slot],
+                ckpt_path,
+                load_optimizer=load_optimizer,
+            )
+        return result
 
     def save_slot(self, *args, **kwargs):
         result = super().save_slot(*args, **kwargs)
@@ -447,7 +465,13 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         return result
 
     def export_slot(self, *args, **kwargs):
-        result = super().export_slot(*args, **kwargs)
+        if expert_lora_compat.enabled():
+            with expert_lora_compat.publishing_all_experts(
+                self.snapshot_publisher, self.model
+            ):
+                result = super().export_slot(*args, **kwargs)
+        else:
+            result = super().export_slot(*args, **kwargs)
         _sync_checkpoint_volume("commit")
         return result
 
