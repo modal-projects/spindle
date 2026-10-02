@@ -15,7 +15,7 @@ deployment and prints the last step next to the README's Tinker numbers.
 
     export TINKER_BASE_URL=https://your-modal-server-url
     export TINKER_API_KEY=...
-    uv run scripts/e2e_dpo_qwen3_5_9b_lora.py --steps 50
+    uv run scripts/e2e_dpo_qwen3_5_9b_lora.py
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-model", default="Qwen/Qwen3.5-9B-Base")
     parser.add_argument("--dataset", default="hhh")
-    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--dpo-beta", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=256)
