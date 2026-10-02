@@ -179,6 +179,9 @@ def _load_actor(monkeypatch):
     _module(
         monkeypatch, "spindle.backends.miles_runtime.qwen3_vl_cp"
     ).install_qwen3_vl_cp_position_ids = lambda **kwargs: None
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.expert_lora_compat"
+    ).enabled = lambda: False
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(
