@@ -58,7 +58,9 @@ def _log(action: str, **fields) -> None:
 
 
 @torch.no_grad()
-def restore_factory_weights(model, slot_optimizer, path: str, *, load_optimizer: bool) -> None:
+def restore_factory_weights(
+    model, slot_optimizer, path: str, *, load_optimizer: bool
+) -> None:
     """Copy factory-merged checkpoint tensors into the slot's model params.
 
     Collective: every rank must call it after Miles ``load_slot``.
@@ -66,7 +68,9 @@ def restore_factory_weights(model, slot_optimizer, path: str, *, load_optimizer:
     slot = slot_optimizer.slot
     weights = checkpoint._slot_weights_sharded_state_dict(model, slot)
     factories = {
-        key: value for key, value in weights.items() if isinstance(value, ShardedTensorFactory)
+        key: value
+        for key, value in weights.items()
+        if isinstance(value, ShardedTensorFactory)
     }
     if not factories:
         return
@@ -129,7 +133,8 @@ def _rewrite_expert_tensors(model, adapter, path: Path) -> None:
     if dist.get_rank() != 0:
         return
     gathered = {
-        key: slice_lora_to_rank(key[2], tensor, adapter.rank) for key, tensor in gathered.items()
+        key: slice_lora_to_rank(key[2], tensor, adapter.rank)
+        for key, tensor in gathered.items()
     }
     file = path / _ADAPTER_FILE
     published = safetensors.torch.load_file(file)
@@ -195,16 +200,26 @@ def full_expert_tensors(
         key = (int(match.group(1)), match.group(2), match.group(3))
         seen.add(key)
         full = gathered[key].to(tensor.dtype)
-        local = tensor[0] if tensor.ndim == full.ndim + 1 and tensor.shape[0] == 1 else tensor
+        local = (
+            tensor[0]
+            if tensor.ndim == full.ndim + 1 and tensor.shape[0] == 1
+            else tensor
+        )
         if local.ndim != full.ndim or local.shape[1:] != full.shape[1:]:
-            raise ValueError(f"{name}: published {tuple(tensor.shape)} vs experts {tuple(full.shape)}")
+            raise ValueError(
+                f"{name}: published {tuple(tensor.shape)} vs experts {tuple(full.shape)}"
+            )
         if not torch.equal(local, full[: local.shape[0]]):
-            raise ValueError(f"{name}: published experts do not match the trainer's first experts")
+            raise ValueError(
+                f"{name}: published experts do not match the trainer's first experts"
+            )
         if tensor.shape == full.shape:
             continue
         fixed[name] = full.contiguous()
         replaced += 1
     missing = set(gathered) - seen
     if missing:
-        raise ValueError(f"export is missing expert LoRA tensors: {sorted(missing)[:4]}")
+        raise ValueError(
+            f"export is missing expert LoRA tensors: {sorted(missing)[:4]}"
+        )
     return fixed, replaced
