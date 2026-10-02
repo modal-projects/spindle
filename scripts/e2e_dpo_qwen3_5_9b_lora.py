@@ -2,6 +2,7 @@
 # requires-python = ">=3.11,<3.13"
 # dependencies = [
 #   "tinker>=0.24,<0.25",
+#   "wandb",
 #   "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@c8ed9c764b59161391156f980102d82f05014765",
 # ]
 # ///
