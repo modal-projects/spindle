@@ -16,6 +16,11 @@ tweak compute parameters for optimal price and performance, or even control the 
 
 Below, we detail how to setup your own Spindle server. See [here](https://modal.com/docs/examples/swe_gym) for a complete example.
 
+## Supported training modes
+
+- **Multi-tenant LoRA training.** Several LoRA adapters share a base model on a Miles/Megatron backend, each with its own gradients and optimizer state. This path works with the Tinker SDK out of the box via `create_lora_training_client`. See [Working with Multi-LoRA](docs/multi-lora.md).
+- **Single-tenant full-parameter training (FFT).** Each run gets dedicated training containers in your Modal workspace. Tinker (v0.25) doesn't natively support FFT, so clients are created with a Spindle helper, but the rest follows the same abstractions. See [Working with Full Fine-Tunes](docs/full-fine-tunes.md).
+
 ## Install Spindle
 
 Install the library:
