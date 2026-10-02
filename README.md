@@ -1,31 +1,8 @@
 # Spindle
 
-Spindle is a Tinker SDK-compatible backend run on Modal. Trainers run `forward_backward` and `optim_step` calls, then publish updated weights to autoscaling sampling replicas managed by the [Stitch](https://github.com/modal-projects/stitch) protocol (hence the name!). Currently, Spindle supports single-tenant full-parameter training as well as multi-tenant LoRA training.
+Spindle is a Tinker SDK-compatible backend run on Modal. Trainers run `forward_backward` and `optim_step` calls, then publish updated weights to autoscaling sampling replicas managed by the [Stitch](https://github.com/modal-projects/stitch) protocol. Currently, Spindle supports single-tenant full-parameter training as well as multi-tenant LoRA training.
 
 # Getting Started 
-
-## Full-parameter training runs
-
-For a dedicated full-parameter fine-tuning (FFT) run, use Python 3.12 and configure your Modal
-credentials and `spindle-proxy` secret as described below. Then:
-
-```python
-import spindle
-import tinker
-from spindle.engines import qwen3_5_4b_full_64k
-
-engine = qwen3_5_4b_full_64k()
-with spindle.run(engine=engine) as (url, api_key):
-    service = tinker.ServiceClient(base_url=url, api_key=api_key)
-    training = spindle.create_full_training_client(service, engine.model)
-    # Train and sample through the Tinker SDK here.
-```
-
-Our FFT path is *not* Tinker compatible, but roughly obeys the same abstractions. 
-
-See [scoped runs](docs/scoped-runs.md) for recovery and custom engines,
-and the [Codeforces example](examples/codeforces-codegolf/README.md) for a complete
-training loop with sandbox judging and checkpoints.
 
 ## LoRA training runs
 
@@ -45,6 +22,29 @@ training = service.create_lora_training_client(
 )
 # Train and sample through the Tinker SDK here.
 ```
+
+## Full-parameter training runs
+
+For a dedicated full-parameter fine-tuning (FFT) run, use Python 3.12 and configure your Modal
+credentials and `spindle-proxy` secret as described below. Then:
+
+```python
+import spindle
+import tinker
+from spindle.engines import qwen3_5_4b_full_64k
+
+engine = qwen3_5_4b_full_64k()
+with spindle.run(engine=engine) as (url, api_key):
+    service = tinker.ServiceClient(base_url=url, api_key=api_key)
+    training = spindle.create_full_training_client(service, engine.model)
+    # Train and sample through the Tinker SDK here.
+```
+
+Our FFT path is *not* Tinker compatible, since Tinker (v0.25) doesn't natively support FFT, but roughly obeys the same abstractions. 
+
+See [scoped runs](docs/scoped-runs.md) for recovery and custom engines,
+and the [Codeforces example](examples/codeforces-codegolf/README.md) for a complete
+training loop with sandbox judging and checkpoints.
 
 ## Shared deployment quick start
 
