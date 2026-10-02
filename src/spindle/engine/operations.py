@@ -199,10 +199,14 @@ def parse_model_spec(value: object) -> ModelSpec:
         lora = None
     else:
         raise ValueError("lora_config must be an object")
+    user_metadata = value.get("user_metadata")
+    if user_metadata is not None and not isinstance(user_metadata, Mapping):
+        raise ValueError("user_metadata must be an object")
     return ModelSpec(
         base_model=base_model,
         parameterization=parameterization,
         lora_config=lora,
+        user_metadata=dict(user_metadata) if user_metadata is not None else None,
     )
 
 

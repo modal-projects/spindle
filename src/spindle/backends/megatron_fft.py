@@ -70,6 +70,7 @@ class FFTMegatronBackend(Backend):
         initialize_megatron(config)
 
         self.model_id: str | None = None
+        self.user_metadata: dict[str, str] | None = None
         self.accumulating = False
         self.optimizer_step = 0
         self._reset_before_accept = False
@@ -107,6 +108,7 @@ class FFTMegatronBackend(Backend):
         if self._reset_before_accept:
             self._reset_model()
         self.model_id = model_id
+        self.user_metadata = spec.user_metadata
         self.accumulating = False
         self.optimizer_step = 0
         self._delta_writer = None
@@ -116,6 +118,7 @@ class FFTMegatronBackend(Backend):
     def _delete_model(self) -> None:
         self._zero_grad()
         self.model_id = None
+        self.user_metadata = None
         self.accumulating = False
         self.optimizer_step = 0
         self._reset_before_accept = True
@@ -299,6 +302,7 @@ class FFTMegatronBackend(Backend):
                 "engine_definition_id": os.environ["SPINDLE_DEFINITION_ID"],
                 "parameterization": {"type": "full"},
                 "lora_config": None,
+                "user_metadata": self.user_metadata,
             },
         }
         self._checkpoint_captures[snapshot_id] = capture
