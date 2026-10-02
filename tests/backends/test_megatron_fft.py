@@ -52,6 +52,7 @@ def backend_state(model_id: str | None = None) -> FFTMegatronBackend:
     backend = FFTMegatronBackend.__new__(FFTMegatronBackend)
     backend.base_model = BASE_MODEL
     backend.model_id = model_id
+    backend.user_metadata = None
     backend.world_size = 1
     backend.persistence_group = "persistence"
     backend.accumulating = False
@@ -333,6 +334,7 @@ def test_fft_backend_captures_and_persists_checkpoint(tmp_path, monkeypatch) -> 
             "engine_definition_id": DEFINITION_ID,
             "parameterization": {"type": "full"},
             "lora_config": None,
+            "user_metadata": None,
         },
         "persistence_group": "persistence",
     }

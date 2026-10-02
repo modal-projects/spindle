@@ -32,6 +32,7 @@ class ModelSpec:
     base_model: str
     parameterization: Literal["lora", "full"]
     lora_config: LoraConfig | None = None
+    user_metadata: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.parameterization == "lora" and self.lora_config is None:

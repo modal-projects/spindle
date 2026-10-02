@@ -44,6 +44,7 @@ class MilesJobState:
     train_attn: bool
     train_mlp: bool
     train_unembed: bool
+    user_metadata: dict[str, str] | None = None
     accumulating: bool = False
     optimizer_step: int = 0
 
@@ -115,6 +116,7 @@ class MilesCommandBackend(Backend):
             train_attn=bool(lora.train_attn),
             train_mlp=bool(lora.train_mlp),
             train_unembed=bool(lora.train_unembed),
+            user_metadata=spec.user_metadata,
         )
         self._validate_job(state)
         if model_id in self.jobs:
@@ -311,6 +313,7 @@ class MilesCommandBackend(Backend):
                 "train_mlp": state.train_mlp,
                 "train_unembed": state.train_unembed,
             },
+            "user_metadata": state.user_metadata,
             "optimizer_step": state.optimizer_step,
             "has_optimizer": include_optimizer,
             "topology": {
