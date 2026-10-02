@@ -1,16 +1,82 @@
 # Spindle
 
-Spindle is a Tinker SDK-compatible backend run on Modal. Trainers run `forward_backward` and `optim_step` calls, then publish updated weights to autoscaling sampling replicas managed by the [Stitch](https://github.com/modal-projects/stitch) protocol. Currently, Spindle supports single-tenant full-parameter training as well as multi-tenant LoRA training.
+> This README mirrors the [Spindle guide](https://modal.com/docs/guide/spindle) in the Modal docs.
 
-# Getting Started 
+Spindle is an open-source Tinker-compatible API with support for
+[multi-tenant LoRA training](docs/multi-lora.md) and
+[single-tenant full-parameter training](docs/full-fine-tunes.md).
 
-## LoRA training runs
+Why use Spindle?
 
-The traditional Tinker path uses LoRA training, which is implemented via a multi-tenant Miles/Megatron backend in our system. Our LoRA path *is* Tinker-compatible out of the box on any of our supported models: 
+[Owning](https://modal.com/blog/introducing-auto-endpoints) your training stack is incredibly valuable, especially if
+you don't have to manage the underlying infrastructure.
+
+Out of the box, we provide defaults that work for the vast majority of use cases. But when you need to incorporate custom forks into the backend/trainer layer,
+tweak compute parameters for optimal price and performance, or even control the entire training/scheduling runtime, you have the power to do so.
+
+Below, we detail how to setup your own Spindle server. See [here](https://modal.com/docs/examples/swe_gym) for a complete example.
+
+## Install Spindle
+
+Install the library:
+
+```bash
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
+```
+
+## Set up the server
+
+Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
+
+```bash
+export TINKER_API_KEY="$(openssl rand -hex 32)"
+modal secret create spindle-api TINKER_API_KEY="$TINKER_API_KEY"
+```
+
+The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth):
+
+```bash
+modal workspace proxy-tokens create
+modal workspace proxy-tokens allow <token-id> "$MODAL_ENVIRONMENT"
+```
+
+Store this token under the `spindle-proxy` secret in the same environment:
+
+```bash
+modal secret create spindle-proxy \
+  MODAL_PROXY_TOKEN_ID="$MODAL_PROXY_TOKEN_ID" \
+  MODAL_PROXY_TOKEN_SECRET="$MODAL_PROXY_TOKEN_SECRET"
+```
+
+To deploy the Spindle server, simply run:
+
+```bash
+spindle deploy
+```
+
+You'll want to save the `server` URL from the above deployment output.
+
+A single deployment can serve multiple concurrent independent training jobs across different base models, training parameterizations, and experiment scales.
+GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times.
+
+## Run a Tinker script
+
+Any Tinker-compatible script can be run out of the box against a Spindle server just by changing the base URL and API key.
+
+First, set these two variables from above:
+
+```bash
+export TINKER_BASE_URL='https://your-server-url.modal.run'
+export TINKER_API_KEY='your-spindle-api-key'
+```
+
+As an example, the following script implements a single step RL update, which exercises the full generation/training/sampler publication path.
 
 ```python
 import os
+
 import tinker
+from tinker import types
 
 service = tinker.ServiceClient(
     base_url=os.environ["TINKER_BASE_URL"],
@@ -20,142 +86,127 @@ training = service.create_lora_training_client(
     base_model="Qwen/Qwen3.5-9B-Base",
     rank=16,
 )
-# Train and sample through the Tinker SDK here.
+tokenizer = training.get_tokenizer()
+prompt_tokens = tokenizer.encode(
+    "What is 2 + 2? Answer with only the number.",
+    add_special_tokens=True,
+)
+prompt = types.ModelInput.from_ints(prompt_tokens)
+params = types.SamplingParams(max_tokens=16, temperature=1.0)
+
+sampling = training.save_weights_and_get_sampling_client()
+response = (
+    sampling.sample(
+        prompt=prompt,
+        num_samples=1,
+        sampling_params=params,
+    )
+    .result(timeout=3600)
+    .sequences[0]
+)
+
+answer_tokens = list(response.tokens)
+logprobs = list(response.logprobs or [])
+assert answer_tokens and len(logprobs) == len(answer_tokens)
+answer = tokenizer.decode(answer_tokens).strip()
+reward = 1.0 if answer == "4" else -1.0
+
+prompt_targets = len(prompt_tokens) - 1
+datum = types.Datum(
+    model_input=types.ModelInput.from_ints(prompt_tokens + answer_tokens[:-1]),
+    loss_fn_inputs={
+        "target_tokens": prompt_tokens[1:] + answer_tokens,
+        "logprobs": [0.0] * prompt_targets + logprobs,
+        "advantages": [0.0] * prompt_targets + [reward] * len(answer_tokens),
+    },
+)
+
+forward = training.forward_backward([datum], loss_fn="importance_sampling")
+optimizer = training.optim_step(types.AdamParams(learning_rate=1e-5))
+
+print(f"Answer: {answer!r}, reward: {reward}")
+print("Training metrics:", forward.result(timeout=3600).metrics)
+print("Optimizer metrics:", optimizer.result(timeout=3600).metrics)
+
+updated_sampling = training.save_weights_and_get_sampling_client()
+updated = (
+    updated_sampling.sample(
+        prompt=prompt,
+        num_samples=1,
+        sampling_params=params,
+    )
+    .result(timeout=3600)
+    .sequences[0]
+)
+print("After update:", tokenizer.decode(updated.tokens))
 ```
 
-## Full-parameter training runs
+## Customize the Spindle server
 
-For a dedicated full-parameter fine-tuning (FFT) run, use Python 3.12 and configure your Modal
-credentials and `spindle-proxy` secret as described below. Then:
+Since the server is just a [Modal App](https://modal.com/docs/guide/apps), everything from the compute allocation, training backend details, and inference settings is fully customizable.
+
+For example, this Qwen3.5-9B config demonstrates some settings you might change based on your training workload.
 
 ```python
-import spindle
-import tinker
-from spindle.engines import qwen3_5_4b_full_64k
+# config.py
 
-engine = qwen3_5_4b_full_64k()
-with spindle.run(engine=engine) as (url, api_key):
-    service = tinker.ServiceClient(base_url=url, api_key=api_key)
-    training = spindle.create_full_training_client(service, engine.model)
-    # Train and sample through the Tinker SDK here.
+from spindle.configuration import BaseConfig
+
+class Config(BaseConfig):
+    model = "Qwen/Qwen3.5-9B"
+    name = "qwen35-9b-lora-16k"
+    max_context_length = 16_384
+    backend = "miles"
+
+
+    trainer_gpu = "H100"
+    trainer_gpus_per_node = 4
+    trainer_cpu = 16
+    trainer_memory_mib = 65_536
+    trainer_max_clients_per_instance = 6
+
+    miles_cfg = {
+        "model_type": "qwen3.5-9B",
+        "tensor_model_parallel_size": 4,
+        "max_lora_slots": 6,
+        "max_lora_rank": 32,
+        "default_lora_alpha": 32,
+        "target_modules": [
+            "linear_qkv",
+            "linear_proj",
+            "linear_fc1",
+            "linear_fc2",
+            "output_layer",
+        ],
+        "max_tokens_per_gpu": 16_384,
+        "cli_options": {
+            "recompute_granularity": "full",
+            "recompute_method": "uniform",
+            "recompute_num_layers": 1,
+        },
+    }
+
+    inference_gpu = "H200"
+    inference_min_replicas = 2
+    inference_max_replicas = 8
+    sglang_cfg = {
+        "tp_size": 1,
+        "mem_fraction_static": 0.8,
+        "max_running_requests": 32,
+        "max_queued_requests": 8,
+        "max_loaded_loras": 64,
+        "max_loras_per_batch": 8,
+    }
+
+
+config = Config()
 ```
 
-Our FFT path is *not* Tinker compatible, since Tinker (v0.25) doesn't natively support FFT, but roughly obeys the same abstractions. 
-
-See [scoped runs](docs/scoped-runs.md) for recovery and custom engines,
-and the [Codeforces example](examples/codeforces-codegolf/README.md) for a complete
-training loop with sandbox judging and checkpoints.
-
-## Shared deployment quick start
-
-Shared deployments use Python recipes inheriting from `BaseConfig`. See [Python deployment configs](docs/deployment-configs.md). Keep the active Python config list in [scripts/deploy_models.sh](scripts/deploy_models.sh); run it to deploy the complete list.
-
-Install Spindle into your own Python project, deploy it once to Modal, then call
-its API from your training scripts. The commands below work in Bash or Zsh.
-
-If someone has already deployed Spindle for you, install the package in step 1,
-then skip to step 4 with the server URL and Spindle API key they provide. API
-clients do not need Modal deployment credentials or sampler proxy tokens.
-
-### 1. Install into your project
-
-With [uv](https://docs.astral.sh/uv/) installed:
+To deploy the above config, it's just:
 
 ```bash
-uv init --python 3.12 my-spindle-project
-cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
+spindle deploy config.py
 ```
-
-### 2. Configure Modal and secrets once
-
-Use a [Modal account](https://modal.com/docs/guide/workspaces) with permission to
-deploy apps and create secrets in your chosen environment. Authenticate if you
-have not already configured credentials for that workspace:
-
-```bash
-uv run modal token new
-export MODAL_ENVIRONMENT=your-environment
-uv run modal environment list
-```
-
-Set `your-environment` to an existing environment **before** creating secrets
-so the secrets and deployment use the same environment.
-For automation, existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials can
-be supplied instead of the interactive login.
-
-There are three separate credentials:
-
-| Credential | Purpose | Who needs it |
-| --- | --- | --- |
-| Modal API token / local profile | Manage Modal resources | Deployer |
-| `TINKER_API_KEY` in the `spindle-api` secret | Authenticate calls to the Spindle API | Deployer and API clients |
-| Proxy token in the `spindle-proxy` secret | Let Spindle reach protected sampler pools | Deployed control plane and trainers |
-
-For a new deployment, generate a Spindle API key and store it as a Modal secret in the existing environment: 
-
-```bash
-export TINKER_API_KEY="your api key here"
-uv run modal secret create spindle-api \
-  TINKER_API_KEY="$TINKER_API_KEY"
-```
-
-
-Sampler pools use [Modal proxy authentication](https://modal.com/docs/guide/webhook-proxy-auth).
-Create a proxy token and allow it in the deployment environment. If you deploy
-with service-user credentials or lack permission to create workspace proxy
-tokens, have a workspace owner or manager provision an allowed token first;
-set `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET` to that pair and skip
-the token-creation block below.
-
-```bash
-read -r MODAL_PROXY_TOKEN_ID MODAL_PROXY_TOKEN_SECRET < <(uv run python -c '
-import os
-import modal
-tokens = modal.Workspace.from_context().proxy_tokens
-token = tokens.create()
-tokens.allow(token.token_id, os.environ["MODAL_ENVIRONMENT"])
-print(token.token_id, token.token_secret)
-')
-```
-
-Store the token in the same environment under the secret `spindle-proxy`:
-
-```bash
-uv run modal secret create spindle-proxy \
-  MODAL_PROXY_TOKEN_ID="$MODAL_PROXY_TOKEN_ID" \
-  MODAL_PROXY_TOKEN_SECRET="$MODAL_PROXY_TOKEN_SECRET"
-```
-
-### 3. Deploy the installed package
-
-Create a configuration from a preset, validate it, and deploy it with Python 3.12:
-
-```bash
-uv run spindle config init --preset qwen35-9b-lora-16k > deployment.py
-uv run spindle config validate deployment.py
-uv run spindle deploy deployment.py
-```
-
-This deploys the shared app and prints its `server` URL. Add more Python config files to the same command to serve more recipes. Always supply the complete current set. The Miles commit is pinned in `miles_image.py`; see [Python deployment configs](docs/deployment-configs.md).
-
-From a repository checkout, maintain the list in `scripts/deploy_models.sh` and run that script. `spindle deploy` supplies the current configs and frontend platform settings to Modal.
-
-Deploying the server doesn't allocate any GPUs; rather, this allocation for both the training and sampling sides are done on demand. See [cold starts and capacity configuration](docs/full-fine-tunes.md#performance-and-behavior-considerations)
-before running a larger workload.
-
-### 4. Clean up
-
-After the script exits, session heartbeats stop and Spindle's periodic cleaner
-reclaims idle training models and their latest sampler pools. Check that cleanup
-has finished in the Modal dashboard or list apps with:
-
-```bash
-uv run modal app list
-```
-
-To tear down the deployment, stop its `spindle-fft-...` sampler apps, then the frontend selected with `--app` (`spindle` by default),
-using `uv run modal app stop <app-id>`. Stopping the frontend does not stop sampler apps.
 
 ## Next steps
 
@@ -163,9 +214,10 @@ Refer to the docs for design and for more advanced features when working with ei
 
 Read [Working with Full Fine-Tunes](docs/full-fine-tunes.md) for full training,
 or [Working with Multi-LoRA](docs/multi-lora.md) for shared Miles adapters, batch
-submission, scheduling, and sampling.
+submission, scheduling, and sampling. See [scoped runs](docs/scoped-runs.md) for
+recovery and custom engines on the full-parameter path.
 
-and the [raw Tinker RL example](scripts/rl_example.py) for sampling and a toy
+See the [raw Tinker RL example](scripts/rl_example.py) for sampling and a toy
 policy update. Copy examples you want to run into your project; repository
 `scripts/` are not installed with the package.
 
