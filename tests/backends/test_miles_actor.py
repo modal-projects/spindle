@@ -174,6 +174,9 @@ def _load_actor(monkeypatch):
     _module(monkeypatch, "spindle.backends.miles_runtime.replay").install_replay_hooks = (
         lambda **kwargs: None
     )
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.expert_lora_compat"
+    ).enabled = lambda: False
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(
