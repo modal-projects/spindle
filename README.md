@@ -3,6 +3,8 @@
 Spindle is an open-source Tinker-compatible API with support for
 [multi-tenant LoRA training](docs/multi-lora.md) and
 [single-tenant full-parameter training](docs/full-fine-tunes.md).
+Trainers run `forward_backward` and `optim_step` calls, then publish updated weights to autoscaling
+sampling replicas managed by the [Stitch](https://github.com/modal-projects/stitch) protocol.
 
 ## Why use Spindle?
 
@@ -21,13 +23,40 @@ Below, we detail how to setup your own Spindle server. See [here](https://modal.
 
 ## Install Spindle
 
-Install the library:
+Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a project and install the library:
 
 ```bash
+uv init --python 3.12 my-spindle-project
+cd my-spindle-project
 uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
 ```
 
+The commands below assume the project's virtual environment is active; otherwise prefix them with `uv run`.
+
+If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)
+with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
+
 ## Set up the server
+
+Authenticate with a [Modal account](https://modal.com/docs/guide/workspaces) that can deploy apps and create
+secrets, and select the environment to deploy into **before** creating secrets, so the secrets and the
+deployment end up in the same environment:
+
+```bash
+modal token new
+export MODAL_ENVIRONMENT=your-environment
+modal environment list
+```
+
+For automation, supply existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials instead of the interactive login.
+
+Spindle uses three separate credentials:
+
+| Credential | Purpose | Who needs it |
+| --- | --- | --- |
+| Modal API token / local profile | Manage Modal resources | Deployer |
+| `TINKER_API_KEY` in the `spindle-api` secret | Authenticate calls to the Spindle API | Deployer and API clients |
+| Proxy token in the `spindle-proxy` secret | Let Spindle reach protected sampler pools | Deployed control plane and trainers |
 
 Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
 
@@ -36,12 +65,18 @@ export TINKER_API_KEY="$(openssl rand -hex 32)"
 modal secret create spindle-api TINKER_API_KEY="$TINKER_API_KEY"
 ```
 
-The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth):
+The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth).
+Create one, export the printed `Modal-Key` and `Modal-Secret`, and allow it in your environment:
 
 ```bash
-modal workspace proxy-tokens create
-modal workspace proxy-tokens allow <token-id> "$MODAL_ENVIRONMENT"
+modal workspace proxy-tokens create --name spindle
+export MODAL_PROXY_TOKEN_ID='<Modal-Key>'
+export MODAL_PROXY_TOKEN_SECRET='<Modal-Secret>'
+modal workspace proxy-tokens allow "$MODAL_PROXY_TOKEN_ID" "$MODAL_ENVIRONMENT"
 ```
+
+If you deploy with service-user credentials or lack permission to create workspace proxy tokens, have a
+workspace owner or manager provision an allowed token and export that pair instead.
 
 Store this token under the `spindle-proxy` secret in the same environment:
 
@@ -60,7 +95,9 @@ spindle deploy
 You'll want to save the `server` URL from the above deployment output.
 
 A single deployment can serve multiple concurrent independent training jobs across different base models, training parameterizations, and experiment scales.
-GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times.
+GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times. See
+[cold starts and capacity configuration](docs/full-fine-tunes.md#performance-and-behavior-considerations)
+before running a larger workload.
 
 ## Run a Tinker script
 
@@ -144,6 +181,25 @@ updated = (
 print("After update:", tokenizer.decode(updated.tokens))
 ```
 
+## Full-parameter training
+
+For a dedicated full-parameter fine-tuning (FFT) run, use a scoped run, which brings up a single-tenant
+server for the duration of the `with` block:
+
+```python
+import spindle
+import tinker
+from spindle.engines import qwen3_5_4b_full_64k
+
+engine = qwen3_5_4b_full_64k()
+with spindle.run(engine=engine) as (url, api_key):
+    service = tinker.ServiceClient(base_url=url, api_key=api_key)
+    training = spindle.create_full_training_client(service, engine.model)
+    # Train and sample through the Tinker SDK here.
+```
+
+See [scoped runs](docs/scoped-runs.md) for recovery and custom engines.
+
 ## Customize the Spindle server
 
 Since the server is just a [Modal App](https://modal.com/docs/guide/apps), everything from the compute allocation, training backend details, and inference settings is fully customizable.
@@ -210,6 +266,32 @@ To deploy the above config, it's just:
 ```bash
 spindle deploy config.py
 ```
+
+Configs inherit from `BaseConfig`; see [Python deployment configs](docs/deployment-configs.md) for every option.
+You can also start from a bundled preset and validate it before deploying:
+
+```bash
+spindle config init --preset qwen35-9b-lora-16k > config.py
+spindle config validate config.py
+```
+
+Pass several config files to `spindle deploy` to serve more recipes from one deployment. Always supply the
+complete current set, since configs left out are no longer served. From a repository checkout, keep that list
+in [scripts/deploy_models.sh](scripts/deploy_models.sh) and run the script. The Miles commit is pinned in
+`miles_image.py`.
+
+## Clean up
+
+After a training script exits, session heartbeats stop and Spindle's periodic cleaner reclaims idle training
+models and their latest sampler pools. Check that cleanup has finished in the Modal dashboard or with:
+
+```bash
+modal app list
+```
+
+To tear down the deployment, stop its `spindle-fft-...` sampler apps first, then the frontend app (`spindle`
+by default, or whatever you passed to `--app`) with `modal app stop <app-id>`. Stopping the frontend does not
+stop sampler apps.
 
 ## Next steps
 
