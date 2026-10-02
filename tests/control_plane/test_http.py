@@ -19,6 +19,7 @@ DEFINITIONS = (
         definition_id=DEFINITION,
         name=DEFINITION,
         model=BASE_MODEL,
+        weights_repo=BASE_MODEL,
         parameterization="lora",
         max_context_length=16_384,
     ),
@@ -26,6 +27,7 @@ DEFINITIONS = (
         definition_id=f"{DEFINITION}_full",
         name=f"{DEFINITION}_full",
         model=BASE_MODEL,
+        weights_repo=BASE_MODEL,
         parameterization="full",
         max_context_length=65_536,
     ),
@@ -471,6 +473,7 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
             definition_id="isolated",
             name="isolated",
             model=BASE_MODEL,
+            weights_repo=f"{BASE_MODEL}-bf16",
             parameterization="lora",
             max_context_length=16384,
         )
@@ -489,6 +492,8 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
             assert [row["definition_id"] for row in listed] == [
                 d.definition_id for d in (*DEFINITIONS, explicit)
             ]
+            assert listed[-1]["base_model"] == BASE_MODEL
+            assert listed[-1]["weights_repo"] == f"{BASE_MODEL}-bf16"
             session = (
                 await client.post(
                     "/api/v1/create_session", json={"tags": [], "sdk_version": "0.5.0"}

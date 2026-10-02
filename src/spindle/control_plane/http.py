@@ -273,6 +273,7 @@ def create_control_plane_app(
                     "name": d.name,
                     "definition_id": d.definition_id,
                     "base_model": d.model,
+                    "weights_repo": d.weights_repo,
                     "parameterization": d.parameterization,
                     "max_context_length": d.max_context_length,
                 }
