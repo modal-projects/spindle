@@ -31,10 +31,7 @@ cd my-spindle-project
 uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
 ```
 
-The commands below assume the project's virtual environment is active; otherwise prefix them with `uv run`.
-
-If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)
-with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
+**If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
 
 ## Set up the server
 
@@ -266,19 +263,6 @@ To deploy the above config, it's just:
 ```bash
 spindle deploy config.py
 ```
-
-Configs inherit from `BaseConfig`; see [Python deployment configs](docs/deployment-configs.md) for every option.
-You can also start from a bundled preset and validate it before deploying:
-
-```bash
-spindle config init --preset qwen35-9b-lora-16k > config.py
-spindle config validate config.py
-```
-
-Pass several config files to `spindle deploy` to serve more recipes from one deployment. Always supply the
-complete current set, since configs left out are no longer served. From a repository checkout, keep that list
-in [scripts/deploy_models.sh](scripts/deploy_models.sh) and run the script. The Miles commit is pinned in
-`miles_image.py`.
 
 ## Clean up
 
