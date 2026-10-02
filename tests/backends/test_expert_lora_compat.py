@@ -110,7 +110,9 @@ def test_export_that_disagrees_with_the_trainer_is_rejected(compat) -> None:
 
 def test_export_missing_an_expert_tensor_is_rejected(compat) -> None:
     gathered = _gathered()
-    published = {_name("gate_up_proj", "lora_A"): gathered[(0, "gate_up_proj", "lora_A")]}
+    published = {
+        _name("gate_up_proj", "lora_A"): gathered[(0, "gate_up_proj", "lora_A")]
+    }
 
     with pytest.raises(ValueError, match="missing"):
         compat.full_expert_tensors(published, gathered)
@@ -147,17 +149,23 @@ def test_factory_tensors_are_copied_into_the_params(compat, monkeypatch) -> None
     param = torch.zeros(4, 12, 4, dtype=torch.bfloat16)
     loaded = _experts(5, (4, 12, 4))
 
-    events = _restore(compat, monkeypatch, param=param, loaded=loaded, load_optimizer=True)
+    events = _restore(
+        compat, monkeypatch, param=param, loaded=loaded, load_optimizer=True
+    )
 
     assert torch.equal(param, loaded)
     assert events == [("load", ["fc1"], "/ckpt/state")]
 
 
-def test_weights_only_load_refreshes_masters_after_the_copy(compat, monkeypatch) -> None:
+def test_weights_only_load_refreshes_masters_after_the_copy(
+    compat, monkeypatch
+) -> None:
     param = torch.zeros(4, 12, 4, dtype=torch.bfloat16)
     loaded = _experts(6, (4, 12, 4))
 
-    events = _restore(compat, monkeypatch, param=param, loaded=loaded, load_optimizer=False)
+    events = _restore(
+        compat, monkeypatch, param=param, loaded=loaded, load_optimizer=False
+    )
 
     assert torch.equal(param, loaded)
     assert events[-1] == "reload_masters"
