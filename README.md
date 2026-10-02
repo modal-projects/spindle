@@ -1,7 +1,5 @@
 # Spindle
 
-> This README mirrors the [Spindle guide](https://modal.com/docs/guide/spindle) in the Modal docs.
-
 Spindle is an open-source Tinker-compatible API with support for
 [multi-tenant LoRA training](docs/multi-lora.md) and
 [single-tenant full-parameter training](docs/full-fine-tunes.md).
@@ -19,7 +17,7 @@ Below, we detail how to setup your own Spindle server. See [here](https://modal.
 ## Supported training modes
 
 - **Multi-tenant LoRA training.** Several LoRA adapters share a base model on a Miles/Megatron backend, each with its own gradients and optimizer state. This path works with the Tinker SDK out of the box via `create_lora_training_client`. See [Working with Multi-LoRA](docs/multi-lora.md).
-- **Single-tenant full-parameter training (FFT).** Each run gets dedicated training containers in your Modal workspace. Tinker (v0.25) doesn't natively support FFT, so clients are created with a Spindle helper, but the rest follows the same abstractions. See [Working with Full Fine-Tunes](docs/full-fine-tunes.md).
+- **Single-tenant full-parameter training (FFT).** Each run gets dedicated training containers in your Modal workspace. Tinker (v0.25) doesn't natively support FFT, so we added support ourselves using a few Spindle helpers. See [Working with Full Fine-Tunes](docs/full-fine-tunes.md) for more.
 
 ## Install Spindle
 
