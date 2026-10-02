@@ -4,7 +4,7 @@ Spindle is an open-source Tinker-compatible API with support for
 [multi-tenant LoRA training](docs/multi-lora.md) and
 [single-tenant full-parameter training](docs/full-fine-tunes.md).
 
-Why use Spindle?
+## Why use Spindle?
 
 [Owning](https://modal.com/blog/introducing-auto-endpoints) your training stack is incredibly valuable, especially if
 you don't have to manage the underlying infrastructure.
