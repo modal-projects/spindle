@@ -180,11 +180,22 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
+    # config.json can remain from an interrupted download that never fetched
+    # the weight shards, so use an explicit completion marker.
+    ready = os.path.join(checkpoint, ".spindle-assets-ready")
+    if os.path.isfile(ready):
+        return
     snapshot_download(
         repo_id=definition.model,
         local_dir=checkpoint,
     )
-    model_assets.commit()
+    with open(ready, "w", encoding="utf-8") as marker:
+        marker.write("ready\n")
+    try:
+        model_assets.commit()
+    except Exception:
+        os.remove(ready)
+        raise
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
@@ -455,6 +466,19 @@ def _plane():
     kv = shared_kv()
     task_stores = ModalSessionKeyValueStores()
     engines = ModalEnginePlatform(kv, _spawn_engine)
+    base_assets_ready: set[str] = set()
+    base_asset_locks: dict[str, asyncio.Lock] = {}
+
+    async def require_base_assets(definition_id: str) -> None:
+        base_model = module_for(definition_id).model
+        if base_model in base_assets_ready:
+            return
+        lock = base_asset_locks.setdefault(base_model, asyncio.Lock())
+        async with lock:
+            if base_model in base_assets_ready:
+                return
+            await prepare_model_assets.remote.aio(definition_id)
+            base_assets_ready.add(base_model)
 
     async def spawn_sampling(task: SamplingTask) -> str:
         call = await execute_sample.spawn.aio(asdict(task))
@@ -464,7 +488,7 @@ def _plane():
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
-        await prepare_model_assets.remote.aio(model.engine_definition_id)
+        await require_base_assets(model.engine_definition_id)
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         else:
@@ -475,12 +499,11 @@ def _plane():
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
         parameterization = parameterization_for(definition_id)
-        if parameterization == "lora":
-            if session.model_id is None:
-                await prepare_model_assets.remote.aio(definition_id)
-            await _ready_lora_pool(LoraPoolSpec(definition_id))
+        if parameterization not in {"lora", "full"}:
             return
-        if parameterization != "full":
+        await require_base_assets(definition_id)
+        if parameterization == "lora":
+            await _ready_lora_pool(LoraPoolSpec(definition_id))
             return
         if session.model_id is None:
             pool = FFTPoolSpec.base(definition_id)
@@ -497,8 +520,6 @@ def _plane():
         key = f"fft_pool:{pool.app_name}"
         record = await registry.get(key)
         if record is None:
-            if session.model_id is None:
-                await prepare_model_assets.remote.aio(definition_id)
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
             await ensure_fft_pool.remote.aio(pool.as_dict())
