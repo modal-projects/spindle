@@ -94,3 +94,30 @@ samples, lr 1e-4, PPO clip 0.8/1.28, no KL. Both runs use an 8×H200 trainer and
 
 The Spindle curve covers the steps completed at the time of writing; the native
 Miles curve is the full run.
+
+## DPO on HHH: Qwen3.5-9B-Base (2026-10-02)
+
+DPO runs on the stock `qwen35-9b-lora-16k` deployment with no extra config. The
+tinker-cookbook DPO recipe uses `forward_backward_custom` (a `forward` followed by
+`cross_entropy` with per-token weights) and gets reference logprobs from
+`compute_logprobs` on a sampler published from the step-0 weights. Both runs use
+the cookbook README settings (HHH, rank 32, β 0.1, batch 256 pairs, linear LR
+decay) for 10 steps; the 1e-4 run raises the learning rate to make learning
+visible in 10 steps. Reproduce with
+[e2e_dpo_qwen3_5_9b_lora.py](../scripts/e2e_dpo_qwen3_5_9b_lora.py).
+
+| Metric | lr 1e-5, step 0 → 9 | lr 1e-4, step 0 → 9 | Tinker lr 1e-5, step 49 |
+| --- | --- | --- | --- |
+| dpo_loss | 0.6943 → 0.6930 | 0.6939 → 0.6795 | 0.6907 |
+| accuracy | 0.468 → 0.518 | 0.480 → 0.557 | 0.516 |
+| margin | −0.0020 → 0.0010 | −0.0011 → 0.0502 | 0.0057 |
+| warm step time | ~20 s + 13–17 s reference | ~21 s + 9–14 s reference | 5.3 s + 2.1 s reference |
+
+- At lr 1e-5 the metrics after 10 steps sit in the same range as Tinker's after 50,
+  but the change is too small to separate from noise. At lr 1e-4 the margin grows
+  to 0.05 and accuracy to 0.56 by step 9.
+- Reference logprobs go through the SGLang sampler pool, which is most of the gap
+  to Tinker's step time. A built-in `dpo` loss that takes reference logprobs from
+  the trainer with the adapter disabled would remove that pool round trip.
+- W&B: [lr 1e-5](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/jhdhr6mr),
+  [lr 1e-4](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/0z0obns5).
