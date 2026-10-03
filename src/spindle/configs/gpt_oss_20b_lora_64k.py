@@ -42,7 +42,7 @@ class Config(BaseConfig):
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
-        # Expert-LoRA export/load workaround; see miles_runtime/expert_lora_compat.py.
+        # Expert-LoRA checkpoint-load workaround; see miles_runtime/expert_lora_compat.py.
         "EXPERT_LORA_COMPAT": "1",
     }
     inference_gpu = "H200"

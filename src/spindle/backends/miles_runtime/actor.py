@@ -458,13 +458,7 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         return result
 
     def export_slot(self, *args, **kwargs):
-        if expert_lora_compat.enabled():
-            with expert_lora_compat.publishing_all_experts(
-                self.snapshot_publisher, self.model
-            ):
-                result = super().export_slot(*args, **kwargs)
-        else:
-            result = super().export_slot(*args, **kwargs)
+        result = super().export_slot(*args, **kwargs)
         _sync_checkpoint_volume("commit")
         return result
 

@@ -17,7 +17,7 @@ MEGATRON_REPOSITORY = "https://github.com/radixark/Megatron-LM.git"
 MEGATRON_REVISION = "8c1e05747eb612b382df2632783df5c83a853646"
 MEGATRON_PATH = "/root/Megatron-LM"
 BRIDGE_REPOSITORY = "https://github.com/radixark/Megatron-Bridge.git"
-BRIDGE_REVISION = "582783a05442245647239e4c5e7d733d7f0e00ea"
+BRIDGE_REVISION = "2e09c234a3272285140224d0d698593418b55ba5"
 BRIDGE_PATH = "/root/Megatron-Bridge"
 
 image = (
