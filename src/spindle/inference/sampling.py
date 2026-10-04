@@ -19,7 +19,7 @@ RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 5.0
 TCP_KEEPALIVE_OPTIONS = (
     (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-    # macOS names TCP_KEEPIDLE TCP_KEEPALIVE; deploys import this module locally.
+    # TCP configs validated on MacOS and Linux.
     (
         socket.IPPROTO_TCP,
         getattr(socket, "TCP_KEEPIDLE", None) or socket.TCP_KEEPALIVE,
