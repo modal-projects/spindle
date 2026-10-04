@@ -119,7 +119,6 @@ uv run scripts/e2e_dpo_qwen3_5_9b_lora.py --steps 10 --learning-rate 1e-4 \
 
 - Margin and accuracy rise over the run, with chosen rewards pulling away from
   rejected ones.
-- A warm step takes about 21 s plus 9–14 s for reference logprobs. Reference
-  logprobs go through the SGLang sampler pool; a built-in `dpo` loss that takes
-  them from the trainer with the adapter disabled would remove that round trip.
+- A warm step takes about 21 s, plus 9–14 s to compute reference logprobs on
+  the sampler pool.
 - [W&B run](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/0z0obns5).
