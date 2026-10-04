@@ -107,6 +107,7 @@ pointed at a Spindle server, with lr 1e-4 for 10 steps:
 ```bash
 export TINKER_BASE_URL=https://your-modal-server-url
 export TINKER_API_KEY=...
+# dataset=hhh: https://huggingface.co/datasets/Anthropic/hh-rlhf
 python -m tinker_cookbook.recipes.preference.dpo.train \
   base_url=$TINKER_BASE_URL model_name=Qwen/Qwen3.5-9B-Base dataset=hhh \
   renderer_name=role_colon learning_rate=1e-4 dpo_beta=0.1 max_steps=10 \
