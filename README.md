@@ -58,7 +58,7 @@ Spindle uses three separate credentials:
 Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
 
 ```bash
-export TINKER_API_KEY="$(openssl rand -hex 32)"
+export TINKER_API_KEY="tml-$(openssl rand -hex 32)"
 modal secret create spindle-api TINKER_API_KEY="$TINKER_API_KEY"
 ```
 

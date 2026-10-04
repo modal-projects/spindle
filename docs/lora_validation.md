@@ -94,3 +94,36 @@ samples, lr 1e-4, PPO clip 0.8/1.28, no KL. Both runs use an 8×H200 trainer and
 
 The Spindle curve covers the steps completed at the time of writing; the native
 Miles curve is the full run.
+
+## DPO on HHH: Qwen3.5-9B-Base (2026-10-02)
+
+DPO runs on the stock `qwen35-9b-lora-16k` deployment with no extra config. The
+tinker-cookbook DPO recipe uses `forward_backward_custom` (a `forward` followed by
+`cross_entropy` with per-token weights) and gets reference logprobs from
+`compute_logprobs` on a sampler published from the step-0 weights. The run is the
+[cookbook DPO recipe](https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/recipes/preference/dpo/README.md)
+pointed at a Spindle server, with lr 1e-4 for 10 steps:
+
+```bash
+export TINKER_BASE_URL=https://your-modal-server-url
+export TINKER_API_KEY=...
+# dataset=hhh: https://huggingface.co/datasets/Anthropic/hh-rlhf
+python -m tinker_cookbook.recipes.preference.dpo.train \
+  base_url=$TINKER_BASE_URL model_name=Qwen/Qwen3.5-9B-Base dataset=hhh \
+  renderer_name=role_colon learning_rate=1e-4 dpo_beta=0.1 max_steps=10 \
+  log_path=/tmp/dpo-hhh-experiment
+```
+
+| Metric | Step 0 | Step 9 |
+| --- | --- | --- |
+| dpo_loss | 0.6939 | 0.6795 |
+| accuracy | 0.480 | 0.557 |
+| margin | −0.0011 | 0.0502 |
+| chosen reward | −0.0001 | 0.0855 |
+| rejected reward | 0.0011 | 0.0353 |
+
+- Margin and accuracy rise over the run, with chosen rewards pulling away from
+  rejected ones.
+- A warm step takes about 21 s, plus 9–14 s to compute reference logprobs on
+  the sampler pool.
+- [W&B run](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/0z0obns5).
