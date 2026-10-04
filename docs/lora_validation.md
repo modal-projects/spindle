@@ -122,12 +122,12 @@ python -m tinker_cookbook.recipes.preference.dpo.train \
 | chosen reward | −0.0001 | 0.0855 |
 | rejected reward | 0.0011 | 0.0353 |
 
-![DPO loss and chosen/rejected rewards on Spindle and Tinker](assets/lora-validation/qwen3-5-9b-dpo-hhh.png)
+![DPO loss per step on Spindle and Tinker](assets/lora-validation/qwen3-5-9b-dpo-hhh.png)
 
 - Margin and accuracy rise over the run, with chosen rewards pulling away from
   rejected ones.
 - The same command on Tinker sees identical batches and follows the same loss
-  trajectory (step 9: dpo_loss 0.6837, accuracy 0.577, margin 0.025).
+  trajectory (step 9 dpo_loss: 0.6795 on Spindle, 0.6837 on Tinker).
 - A warm step takes about 21 s, plus 9–14 s to compute reference logprobs on
   the sampler pool.
 - W&B: [Spindle](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/0z0obns5),
