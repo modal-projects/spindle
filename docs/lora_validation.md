@@ -101,15 +101,13 @@ DPO runs on the stock `qwen35-9b-lora-16k` deployment with no extra config. The
 tinker-cookbook DPO recipe uses `forward_backward_custom` (a `forward` followed by
 `cross_entropy` with per-token weights) and gets reference logprobs from
 `compute_logprobs` on a sampler published from the step-0 weights. The run is the
-[cookbook DPO recipe](https://github.com/thinking-machines-lab/tinker-cookbook/blob/c8ed9c764b59161391156f980102d82f05014765/tinker_cookbook/recipes/preference/dpo/README.md)
+[cookbook DPO recipe](https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/recipes/preference/dpo/README.md)
 pointed at a Spindle server, with lr 1e-4 for 10 steps:
 
 ```bash
 export TINKER_BASE_URL=https://your-modal-server-url
 export TINKER_API_KEY=...
-uv run --python 3.12 --with "tinker>=0.24,<0.25" \
-  --with "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git@c8ed9c764b59161391156f980102d82f05014765" \
-  python -m tinker_cookbook.recipes.preference.dpo.train \
+python -m tinker_cookbook.recipes.preference.dpo.train \
   base_url=$TINKER_BASE_URL model_name=Qwen/Qwen3.5-9B-Base dataset=hhh \
   renderer_name=role_colon learning_rate=1e-4 dpo_beta=0.1 max_steps=10 \
   log_path=/tmp/dpo-hhh-experiment
