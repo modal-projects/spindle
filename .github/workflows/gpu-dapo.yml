@@ -1,0 +1,72 @@
+name: DAPO GPU validation
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'correctness: 3 overlapping updates; performance: 30 staggered updates'
+        type: choice
+        options: [correctness, performance]
+        default: correctness
+permissions:
+  contents: read
+concurrency:
+  group: spindle-dapo-gpu-ci
+  cancel-in-progress: false
+jobs:
+  gpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 190
+    environment: gpu-ci
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      TINKER_API_KEY: ${{ secrets.SPINDLE_API_KEY }}
+      MODAL_ENVIRONMENT: spindle-ci
+      PYTHONPATH: src:.
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      RESULTS: scripts/results/gpu-ci
+    steps:
+      # Run the selected workflow branch/commit, never an unchecked PR ref
+      # supplied to pull_request_target. This workflow is maintainer-triggered.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.9.26
+      - run: uv sync --locked --python 3.12
+      - run: uv pip install --python .venv/bin/python -r scripts/gpu_ci/requirements.txt
+      - name: Record configuration and resource ownership
+        env:
+          MODE: ${{ inputs.mode }}
+        run: .venv/bin/python -m scripts.gpu_ci.run prepare --output "$RESULTS" --mode "$MODE"
+      - name: Run GPU validation
+        run: .venv/bin/python -u -m scripts.gpu_ci.run run --output "$RESULTS"
+      - name: Stop this run's apps
+        if: always()
+        run: |
+          if [ -x .venv/bin/python ]; then
+            .venv/bin/python -m scripts.gpu_ci.run cleanup --output "$RESULTS"
+          fi
+      - name: Plot completed updates
+        if: always()
+        run: |
+          if [ -f "$RESULTS/plan.json" ]; then
+            .venv/bin/python -m scripts.gpu_ci.plot "$RESULTS"
+          fi
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f "$RESULTS/failure.json" ]; then
+            cat "$RESULTS/failure.json" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f "$RESULTS/summary.md" ]; then
+            cat "$RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dapo-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            scripts/results/gpu-ci/**
+            !scripts/results/gpu-ci/**/group-*.json.gz
+          if-no-files-found: warn
+          retention-days: 14
