@@ -13,7 +13,7 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
-from spindle.backends.miles_arguments import apply_config_overrides
+from spindle.backends.miles_arguments import configure_parser
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.errors import BackendFailed
 
@@ -225,8 +225,7 @@ class MilesRuntime:
             if self.config.cli_options:
 
                 def configure(parser):
-                    apply_config_overrides(parser, self.config.cli_options, sys.argv)
-                    return parser
+                    return configure_parser(parser, self.config.cli_options)
 
                 args = parse_args(add_custom_arguments=configure, entry="serve")
             else:

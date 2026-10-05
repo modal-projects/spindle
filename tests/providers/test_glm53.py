@@ -1,9 +1,12 @@
+import argparse
+
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
 from spindle.backends.miles_config import lora_target_flags
+from spindle.backends.miles_arguments import configure_parser
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal import deployment_apps
 
@@ -73,3 +76,22 @@ def test_mla_and_kda_targets_report_attention_training(target):
         False,
         False,
     )
+
+
+def test_miles_overrides_wait_for_late_registered_arguments():
+    parser = argparse.ArgumentParser()
+    configure_parser(parser, {"dsa_attention_backend": "tilelang", "feature": False})
+    # Miles calls add_custom_arguments before registering these native options.
+    parser.add_argument("--dsa-attention-backend", choices=["megatron", "tilelang"])
+    parser.add_argument("--feature", action="store_true", default=True)
+    args = parser.parse_args(["--dsa-attention-backend", "megatron", "--feature"])
+    assert args.dsa_attention_backend == "tilelang"
+    assert args.feature is False
+
+
+def test_miles_deferred_overrides_preserve_native_validation():
+    parser = argparse.ArgumentParser()
+    configure_parser(parser, {"backend": "invalid"})
+    parser.add_argument("--backend", choices=["valid"])
+    with pytest.raises(SystemExit):
+        parser.parse_args([])

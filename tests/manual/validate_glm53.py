@@ -54,17 +54,56 @@ print(json.dumps({"layers": provider.num_layers, "kda_layers": len(provider.kda_
     return "Trainer check passed"
 
 
-@app.function(image=inference_image, gpu="H200", timeout=900)
-def inference(settings: dict):
-    program = """
+@app.function(
+    image=inference_image,
+    gpu="H200",
+    cpu=16,
+    memory=131072,
+    timeout=1800,
+    volumes={"/validation": artifacts},
+)
+def inference(settings: dict, program: str = ""):
+    program = (
+        program
+        or """
 import json, sys
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.models.glm5_next import Glm5NextForConditionalGeneration
 from sglang.srt.lora.lora_manager import LoRAManager
 from spindle.inference.sglang import main
+import asyncio
+from sglang.srt.lora.lora_registry import LoRARef, LoRARegistry
+
+async def check_registry():
+    registry = LoRARegistry()
+    ref = LoRARef(lora_name="test", lora_path="/adapter", pinned=False)
+    await registry.register(ref)
+    counter = registry._counters[ref.lora_id]
+    increment = counter.increment
+    entered, resume = asyncio.Event(), asyncio.Event()
+    async def delayed_increment(**kwargs):
+        entered.set()
+        await resume.wait()
+        await increment(**kwargs)
+    counter.increment = delayed_increment
+    acquire = asyncio.create_task(registry.acquire(["test", "test"]))
+    await entered.wait()
+    unregister = asyncio.create_task(registry.unregister("test"))
+    await asyncio.sleep(0)
+    assert not unregister.done(), "Eviction raced an unpinned acquisition"
+    resume.set()
+    ids = await acquire
+    await unregister
+    assert counter.value() == 2
+    await registry.release(ids)
+    await registry.wait_for_unload(ref.lora_id)
+    print("PASS: atomic adapter acquisition and balanced release")
+
+asyncio.run(asyncio.wait_for(check_registry(), timeout=10))
 args = ServerArgs(model_path="zai-org/GLM-5.3-Flash", **json.loads(sys.argv[1]))
 print(json.dumps({"model": args.model_path, "context": args.context_length, "lora": args.enable_lora, "tp": args.tp_size}))
 """
+    )
     result = subprocess.run(
         [sys.executable, "-c", program, json.dumps(settings)],
         capture_output=True,
@@ -76,7 +115,7 @@ print(json.dumps({"model": args.model_path, "context": args.context_length, "lor
 
 
 @app.local_entrypoint()
-def main(train: bool = False):
+def main(train: bool = False, sample: bool = False):
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     program = Path(__file__).with_name("glm53_training.py").read_text() if train else ""
     calls = [
@@ -87,3 +126,7 @@ def main(train: bool = False):
         print(call.object_id, flush=True)
     for call in calls:
         print(call.get(), flush=True)
+
+    if sample:
+        program = Path(__file__).with_name("glm53_sampling.py").read_text()
+        print(inference.spawn(config.inference_settings, program).get(), flush=True)

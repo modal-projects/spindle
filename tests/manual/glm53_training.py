@@ -6,6 +6,7 @@ counts. This is an integration test; the full 45-layer checkpoint is not loaded.
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import modal
@@ -44,6 +45,7 @@ def main():
         global_batch_size=2,
         micro_batch_size=1,
     )
+    output = Path(tempfile.mkdtemp(prefix="check-", dir="/validation"))
     runtime = MilesRuntime(MilesBackendConfig(**settings))
     try:
         for slot in (0, 1):
@@ -90,9 +92,9 @@ def main():
             print("UPDATE", step, metrics, flush=True)
         after = forward()
         assert any(a["logprobs"] != b["logprobs"] for a, b in zip(before, after))
-        runtime.save_slot(0, "/tmp/glm53-test-checkpoint")
+        runtime.save_slot(0, str(output / "checkpoint"))
         runtime.unload_slot(0)
-        runtime.load_slot(0, 8, 8, checkpoint="/tmp/glm53-test-checkpoint")
+        runtime.load_slot(0, 8, 8, checkpoint=str(output / "checkpoint"))
         restored = forward()
         torch.testing.assert_close(
             torch.tensor(after[0]["logprobs"]),
@@ -102,14 +104,22 @@ def main():
         )
         runtime.export_slot_peft(
             slot=0,
-            path="/tmp/glm53-test-adapter",
+            path=str(output / "adapter"),
             rank=8,
             alpha=8,
             base_model=str(path),
             target_modules=tuple(settings["target_modules"]),
             lora_dropout=0,
         )
-        assert Path("/tmp/glm53-test-adapter/adapter_model.safetensors").is_file()
+        assert (output / "adapter/adapter_model.safetensors").is_file()
+        report = {
+            "model_path": str(path),
+            "adapter_path": str(output / "adapter"),
+            "tokens": rows[0][1]["tokens"],
+            "logprobs": after[0]["logprobs"],
+        }
+        Path("/validation/latest.json").write_text(json.dumps(report))
+        modal.Volume.from_name("spindle-glm53-pr26-validation").commit()
         print(
             "PASS: two-slot forward/backward, two updates, checkpoint restore, PEFT export",
             flush=True,

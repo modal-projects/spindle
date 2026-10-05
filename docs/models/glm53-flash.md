@@ -33,8 +33,8 @@ TileLang sparse attention on H200s.
 
 This recipe selects its own `trainer_image` and `inference_image`, written as
 `module:attribute` references to Modal images. Changing either reference redeploys
-the corresponding app. The GLM images retain Spindle's Miles revision, update Bridge for Transformers
-5.16 support, and add the model packages from
+the corresponding app. The GLM images retain Spindle's Miles revision, update
+Bridge for Transformers 5.16 support, and add the model packages from
 [Megatron-Bridge PR 35](https://github.com/radixark/Megatron-Bridge/pull/35), which
 is still under review. Exact dependency revisions are in
 [glm53_image.py](../../src/spindle/providers/modal/glm53_image.py).
@@ -47,5 +47,7 @@ PYTHONPATH=src modal run tests/manual/validate_glm53.py
 
 Add `--train` to run two optimizer updates with two adapter slots on the published
 48.7 GB four-layer checkpoint. This checks checkpoint restore and PEFT export on
-one H200. The weights are cached in the `spindle-glm53-pr26-validation` volume.
+one H200. Add `--sample` to load the exported adapter in a normal SGLang server
+and compare its logprobs with training. The weights are cached in the
+`spindle-glm53-pr26-validation` volume.
 These checks do not load the full checkpoint or demonstrate training convergence.
