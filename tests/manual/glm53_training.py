@@ -1,15 +1,16 @@
-"""Reduced GLM architecture check: two slots, updates, restore and PEFT export.
+"""Four-layer GLM checkpoint check: two slots, updates, restore and PEFT export.
 
-Invoked by validate_glm53.py --train. Uses random weights; this is a correctness
-check for the integration, not a test of the public checkpoint's quality.
+Invoked by validate_glm53.py --train. Uses the upstream validation slice, preserving full layer widths and expert
+counts. This is an integration test; the full 45-layer checkpoint is not loaded.
 """
 
 import json
 import sys
 from pathlib import Path
 
+import modal
 import torch
-from transformers import AutoConfig, AutoModelForImageTextToText
+from huggingface_hub import snapshot_download
 
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.backends.miles_runtime.runtime import MilesRuntime
@@ -17,43 +18,14 @@ from spindle.backends.miles_runtime.runtime import MilesRuntime
 
 def main():
     torch.manual_seed(42)
-    path = Path("/tmp/glm53-test-model")
-    config = AutoConfig.from_pretrained("zai-org/GLM-5.3-Flash")
-    config.quantization_config = None
-    text = config.text_config
-    text.num_hidden_layers = 4
-    text.hidden_size = 256
-    text.intermediate_size = 512
-    text.moe_intermediate_size = 256
-    text.n_routed_experts = 8
-    text.num_experts_per_tok = 2
-    text.num_attention_heads = text.num_key_value_heads = 8
-    text.q_lora_rank = 64
-    text.vocab_size = 1024
-    text.pad_token_id = 0
-    text.eos_token_id = [1]
-    text.num_nextn_predict_layers = 0
-    text.layer_types = ["linear_attention"] * 3 + ["deepseek_sparse_attention"]
-    text.mlp_layer_types = ["dense"] * 3 + ["sparse"]
-    text.indexer_types = ["full"] * 4
-    text.index_n_heads = 8
-    text.index_topk = 16
-    text.linear_attn_config = dict(text.linear_attn_config)
-    text.linear_attn_config.update(
-        num_heads=8, kda_layers=[0, 1, 2], full_attn_layers=[3]
+    path = Path(
+        snapshot_download(
+            "CharyZeng/GLM-5.3-Flash-4layer", local_dir="/validation/model"
+        )
     )
-    config.vision_config.depth = 1
-    config.vision_config.hidden_size = 64
-    config.vision_config.num_heads = 4
-    config.vision_config.intermediate_size = 128
-    config.vision_config.out_hidden_size = 256
-    config.vision_config.projection_intermediate_size = 128
-    model = AutoModelForImageTextToText.from_config(config, dtype=torch.bfloat16)
-    model.save_pretrained(path)
-    del model
-    print("Saved reduced random GLM checkpoint", flush=True)
-
-    settings = json.loads(sys.argv[1])
+    modal.Volume.from_name("spindle-glm53-pr26-validation").commit()
+    print("Downloaded four-layer GLM checkpoint", flush=True)
+    settings = json.loads(Path(sys.argv[1]).read_text())
     settings.update(
         hf_checkpoint=str(path),
         actor_num_nodes=1,
@@ -68,15 +40,6 @@ def main():
     )
     settings["cli_options"].update(
         num_layers=4,
-        hidden_size=256,
-        ffn_hidden_size=512,
-        num_attention_heads=8,
-        q_lora_rank=64,
-        num_experts=8,
-        moe_router_topk=2,
-        moe_ffn_hidden_size=256,
-        moe_shared_expert_intermediate_size=256,
-        vocab_size=1024,
         moe_layer_freq="[0]*3+[1]",
         global_batch_size=2,
         micro_batch_size=1,

@@ -45,4 +45,7 @@ Run the image import and configuration checks with:
 PYTHONPATH=src modal run tests/manual/validate_glm53.py
 ```
 
+Add `--train` to run two optimizer updates with two adapter slots on the published
+48.7 GB four-layer checkpoint. This checks checkpoint restore and PEFT export on
+one H200. The weights are cached in the `spindle-glm53-pr26-validation` volume.
 These checks do not load the full checkpoint or demonstrate training convergence.

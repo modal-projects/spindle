@@ -4,20 +4,33 @@ PYTHONPATH=src modal run tests/manual/validate_glm53.py
 """
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import modal
 
+from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal.glm53_image import inference_image, trainer_image
 
 app = modal.App("spindle-glm53-validation")
+artifacts = modal.Volume.from_name(
+    "spindle-glm53-pr26-validation", create_if_missing=True
+)
 
 
-@app.function(image=trainer_image, gpu="H200", timeout=1800)
+@app.function(
+    image=trainer_image,
+    gpu="H200",
+    cpu=16,
+    memory=131072,
+    timeout=1800,
+    volumes={"/validation": artifacts},
+)
 def trainer(program: str = "", settings: dict | None = None):
-    program = """
+    program = (
+        program
+        or """
 import json
 from transformers import AutoConfig
 from megatron.bridge import AutoBridge
@@ -32,9 +45,12 @@ assert provider.num_moe_experts == 288
 assert provider.qk_pos_emb_head_dim == 0
 print(json.dumps({"layers": provider.num_layers, "kda_layers": len(provider.kda_layers), "experts": provider.num_moe_experts}))
 """
-    subprocess.run(
-        [sys.executable, "-u", "-c", program, json.dumps(settings)], check=True
     )
+    script = Path("/tmp/glm53-validation.py")
+    script.write_text(program)
+    settings_path = Path("/tmp/glm53-settings.json")
+    settings_path.write_text(json.dumps(settings))
+    subprocess.run([sys.executable, "-u", str(script), str(settings_path)], check=True)
     return "Trainer check passed"
 
 
@@ -61,8 +77,6 @@ print(json.dumps({"model": args.model_path, "context": args.context_length, "lor
 
 @app.local_entrypoint()
 def main(train: bool = False):
-    from spindle.deployments import DeploymentConfig, config_path, load
-
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     program = Path(__file__).with_name("glm53_training.py").read_text() if train else ""
     calls = [
