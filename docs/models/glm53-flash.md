@@ -10,8 +10,8 @@ spindle config validate glm53.py
 spindle deploy glm53.py
 ```
 
-The proposed allocation is two trainer nodes with eight H200s each, plus eight
-H200s per sampling replica. The trainer uses TP8, EP16 and CP1. Up to four clients
+The proposed allocation is four trainer nodes with eight H200s each, plus eight
+H200s per sampling replica. The trainer uses TP8, EP32 and CP1. Up to four clients
 share it, with adapter ranks up to 32. The sampler initially allows one replica;
 raise `inference_max_replicas` to add serving capacity. Full-model memory use and
 multi-node execution are still being validated.
@@ -59,3 +59,24 @@ The four-layer test passed two updates, checkpoint restore, adapter export and
 eight-token generation through SGLang. The mean trainer/sampler logprob difference
 was 0.049 over 32 scored tokens. Full-model startup, multi-node execution, FP8
 serving and 16K memory use remain unvalidated.
+
+For the full model on four trainer nodes, run:
+
+```bash
+PYTHONPATH=src modal run --detach tests/manual/glm53_multinode.py
+```
+
+This downloads the checkpoint on CPU before allocating 32 H200s. It runs two
+256-token updates and one 16K update across four rank-32 adapters, checks
+checkpoint restore, and records adapter export and publication times. The test
+uses Spindle's Ray cluster startup and Miles runtime; it does not exercise the
+HTTP API or launch inference. The cluster stops when the test finishes.
+Artifacts are stored in `spindle-glm53-pr26-full-validation`.
+
+With the configured targets, one rank-32 adapter contains approximately 7.23B
+parameters, or 14.47 GB in BF16. Routed expert MLPs account for 98.6% of this.
+Each published version writes the complete adapter. The current SGLang loader
+also normalizes expert weights on every worker before selecting local experts
+for GPU transfer. Its CPU cache capacity and registration latency need validation
+before sustained multi-client serving; the configured 32-version limit should
+not be treated as a tested capacity for this model.

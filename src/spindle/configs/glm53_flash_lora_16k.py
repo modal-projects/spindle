@@ -9,7 +9,7 @@ class Config(BaseConfig):
     inference_image = "spindle.providers.modal.glm53_image:inference_image"
     trainer_gpu = "H200"
     trainer_gpus_per_node = 8
-    trainer_nodes = 2
+    trainer_nodes = 4
     trainer_cpu = 32
     trainer_memory_mib = 262144
     trainer_max_clients_per_instance = 4
@@ -17,7 +17,7 @@ class Config(BaseConfig):
     miles_cfg = {
         "model_type": "",
         "tensor_model_parallel_size": 8,
-        "expert_model_parallel_size": 16,
+        "expert_model_parallel_size": 32,
         "expert_tensor_parallel_size": 1,
         "max_tokens_per_gpu": 16384,
         "max_lora_slots": 4,
