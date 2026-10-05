@@ -10,6 +10,7 @@ import modal
 import torch
 import torch.distributed as dist
 from megatron.bridge import AutoBridge
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
 from megatron.core import dist_checkpointing
 from miles.backends.fsdp_utils import actor as fsdp_actor
 from miles.backends.megatron_utils import actor as megatron_actor
@@ -27,8 +28,10 @@ from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.replay_data import fill_replay_data
 from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
+from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
 from .profiling import RankProfiler, TorchProfileConfig
+from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
 
 
@@ -180,6 +183,10 @@ install_replay_hooks(
     tinker_losses=tinker_losses,
     fill_replay_data=fill_replay_data,
     manager=routing_replay_manager,
+)
+
+install_qwen3_vl_cp_position_ids(
+    bridge_model=qwen3_vl_model, miles_qwen3_vl=miles_qwen3_vl
 )
 
 
