@@ -13,6 +13,8 @@ from .miles_image import MILES_COMMIT
 from .rollout_image import SGLANG_LORA_LIFETIME_PATCH
 
 BASE_IMAGE = "radixark/miles:dev-202610021926"
+# Official nightly-dev-cu13-20261005-f70e8c68: PyTorch 2.14.1 / sglang-kernel 0.4.9.
+INFERENCE_BASE_IMAGE = "lmsysorg/sglang@sha256:f08b3c7f14bdf2581ea776829a4a2d714825b385c189c0ae53590704676918ff"
 MEGATRON_REVISION = "fd15ee20a4f03b03680529baf4b8f7eeed64df1d"
 BRIDGE_REVISION = "8cd3466d14d2337c8492827b3712482c2b3e4866"
 GLM_BRIDGE_REVISION = "6527b18e8bb0db994a267e6dfd4db7dafc669df9"
@@ -55,6 +57,7 @@ trainer_image = (
         STITCH_PACKAGE,
         "transformers==5.16.0",
         "opentelemetry-exporter-otlp==1.43.0",
+        "tilelang==0.1.12",
     )
     .env(
         {
@@ -67,7 +70,7 @@ trainer_image = (
 )
 
 inference_image = (
-    modal.Image.from_registry(BASE_IMAGE)
+    modal.Image.from_registry(INFERENCE_BASE_IMAGE)
     .entrypoint([])
     .apt_install("git")
     .run_commands(
@@ -81,7 +84,7 @@ inference_image = (
         + SGLANG_REGISTRY_PATCH
         + "PATCH\n",
     )
-    .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE, "transformers==5.16.0")
+    .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .env({"HF_XET_HIGH_PERFORMANCE": "1", "SGLANG_DISABLE_CUDNN_CHECK": "1"})
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )

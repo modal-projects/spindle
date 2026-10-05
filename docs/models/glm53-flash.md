@@ -14,7 +14,7 @@ The proposed allocation is two trainer nodes with eight H200s each, plus eight
 H200s per sampling replica. The trainer uses TP8, EP16 and CP1. Up to four clients
 share it, with adapter ranks up to 32. The sampler initially allows one replica;
 raise `inference_max_replicas` to add serving capacity. Full-model memory use and
-end-to-end training are still being validated.
+multi-node execution are still being validated.
 
 Use an ordinary Tinker LoRA client with `base_model="zai-org/GLM-5.3-Flash"` and
 `train_unembed=False`. Publishing an adapter loads it into the same model's sampling
@@ -47,7 +47,10 @@ PYTHONPATH=src modal run tests/manual/validate_glm53.py
 
 Add `--train` to run two optimizer updates with two adapter slots on the published
 48.7 GB four-layer checkpoint. This checks checkpoint restore and PEFT export on
-one H200. Add `--sample` to load the exported adapter in a normal SGLang server
+one H200. Checkpoint restore compares all exported adapter tensors exactly;
+repeated training forwards can produce different logprobs even with unchanged
+weights. Add `--sample` to load the exported adapter in a normal SGLang server
 and compare its logprobs with training. The weights are cached in the
-`spindle-glm53-pr26-validation` volume.
+`spindle-glm53-pr26-validation` volume. Running `--sample` alone reuses the latest
+export without retraining.
 These checks do not load the full checkpoint or demonstrate training convergence.

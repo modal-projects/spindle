@@ -13,6 +13,7 @@ from pathlib import Path
 import modal
 import torch
 from huggingface_hub import snapshot_download
+from safetensors.torch import load_file
 
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.backends.miles_runtime.runtime import MilesRuntime
@@ -96,31 +97,54 @@ def main():
             print("UPDATE", step, metrics, flush=True)
         after = forward()
         assert any(a["logprobs"] != b["logprobs"] for a, b in zip(before, after))
-        runtime.save_slot(0, str(output / "checkpoint"))
-        runtime.unload_slot(0)
-        runtime.load_slot(0, 8, 8, checkpoint=str(output / "checkpoint"))
-        restored = forward()
-        torch.testing.assert_close(
-            torch.tensor(after[0]["logprobs"]),
-            torch.tensor(restored[0]["logprobs"]),
-            rtol=0,
-            atol=1e-5,
-        )
-        runtime.export_slot_peft(
+        repeats = [forward() for _ in range(3)]
+        export_args = dict(
             slot=0,
-            path=str(output / "adapter"),
             rank=8,
             alpha=8,
             base_model=str(path),
             target_modules=tuple(settings["target_modules"]),
             lora_dropout=0,
         )
-        assert (output / "adapter/adapter_model.safetensors").is_file()
+        runtime.export_slot_peft(path=str(output / "adapter"), **export_args)
+        runtime.save_slot(0, str(output / "checkpoint"))
+        runtime.unload_slot(0)
+        runtime.load_slot(0, 8, 8, checkpoint=str(output / "checkpoint"))
+        restored = forward()
+        runtime.export_slot_peft(path=str(output / "restored"), **export_args)
+        original_weights = load_file(str(output / "adapter/adapter_model.safetensors"))
+        restored_weights = load_file(str(output / "restored/adapter_model.safetensors"))
+        assert original_weights.keys() == restored_weights.keys()
+        for key, value in original_weights.items():
+            torch.testing.assert_close(
+                value, restored_weights[key], rtol=0, atol=0, msg=key
+            )
+        reference = torch.tensor(after[0]["logprobs"])
+        repeat_diff = max(
+            (reference - torch.tensor(result[0]["logprobs"])).abs().max().item()
+            for result in repeats
+        )
+        restore_diff = (
+            (reference - torch.tensor(restored[0]["logprobs"])).abs().max().item()
+        )
+        print(
+            "RESTORE",
+            json.dumps(
+                {
+                    "adapter_tensors_exact": len(original_weights),
+                    "repeated_forward_max_diff": repeat_diff,
+                    "restored_forward_max_diff": restore_diff,
+                }
+            ),
+            flush=True,
+        )
         report = {
             "model_path": str(path),
             "adapter_path": str(output / "adapter"),
             "tokens": rows[0][1]["tokens"][:-1],
             "logprobs": after[0]["logprobs"],
+            "repeat_logprobs": [r[0]["logprobs"] for r in repeats],
+            "restored_logprobs": restored[0]["logprobs"],
         }
         Path("/validation/latest.json").write_text(json.dumps(report))
         modal.Volume.from_name("spindle-glm53-pr26-validation").commit()

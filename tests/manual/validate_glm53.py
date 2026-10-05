@@ -104,19 +104,21 @@ args = ServerArgs(model_path="zai-org/GLM-5.3-Flash", **json.loads(sys.argv[1]))
 print(json.dumps({"model": args.model_path, "context": args.context_length, "lora": args.enable_lora, "tp": args.tp_size}))
 """
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program, json.dumps(settings)],
-        capture_output=True,
-        text=True,
+    script = Path("/tmp/glm53-inference-validation.py")
+    script.write_text(program)
+    subprocess.run(
+        [sys.executable, "-u", str(script), json.dumps(settings)], check=True
     )
-    print(result.stdout, result.stderr, flush=True)
-    result.check_returncode()
-    return result.stdout
+    return "Inference check passed"
 
 
 @app.local_entrypoint()
 def main(train: bool = False, sample: bool = False):
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
+    if sample and not train:
+        program = Path(__file__).with_name("glm53_sampling.py").read_text()
+        print(inference.spawn(config.inference_settings, program).get(), flush=True)
+        return
     program = Path(__file__).with_name("glm53_training.py").read_text() if train else ""
     calls = [
         trainer.spawn(program, config.trainer_settings["miles"]),
