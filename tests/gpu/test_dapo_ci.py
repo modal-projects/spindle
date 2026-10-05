@@ -16,7 +16,12 @@ from scripts.gpu_ci import run as runner
 from scripts.gpu_ci.cleanup import owned_apps, should_stop
 from scripts.gpu_ci.diagnostics import analyze
 from scripts.gpu_ci.run import prepare
-from scripts.gpu_ci.validate import validate_client, validate_topology, report
+from scripts.gpu_ci.validate import (
+    validate_client,
+    validate_topology,
+    report,
+    compare_performance,
+)
 from scripts.gpu_ci.client import answer, datum
 from spindle.deployment_cli import compile_configs
 
@@ -186,7 +191,7 @@ def test_cleanup_only_owns_exact_ci_names_and_expiry():
 def test_prepare_keeps_workload_and_resolves_recipe(tmp_path):
     for mode in ["correctness", "performance"]:
         output = tmp_path / mode
-        prepare(output, mode, "ci-test")
+        prepare(output, mode, "ci-test", record_reference=(mode == "performance"))
         plan = json.loads((output / "plan.json").read_text())
         spec = importlib.util.spec_from_file_location(
             "ci_recipe", output / "deployment.py"
@@ -324,3 +329,116 @@ def test_deployment_failure_still_cleans_up_and_records_failure(
     assert cleaned == [output]
     assert json.loads((output / "status.json").read_text())["state"] == "failed"
     assert "CalledProcessError" in (output / "failure.json").read_text()
+    assert not (output / "reference.json").exists()
+
+
+def reference_fixture(value=100):
+    return dict(
+        schema=1,
+        metric="end_to_end_output_tps",
+        value=value,
+        commit="known-good",
+        run_name="reference-run",
+        identity=dict(run={"config": "fixed"}, client={"prompts": "fixed"}),
+    )
+
+
+@pytest.mark.parametrize(
+    "value,status", [(100, "passed"), (85, "passed"), (84.99, "failed")]
+)
+def test_throughput_regression_boundary(value, status):
+    reference = reference_fixture()
+    result = compare_performance(value, reference["identity"], reference)
+    assert result["status"] == status
+    assert result["minimum_value"] == 85
+
+
+def test_reference_rejects_incomparable_runs():
+    reference = reference_fixture()
+    identity = copy.deepcopy(reference["identity"])
+    identity["run"]["config"] = "different"
+    with pytest.raises(ValueError, match="workload/topology"):
+        compare_performance(100, identity, reference)
+    identity = copy.deepcopy(reference["identity"])
+    identity["client"]["prompts"] = "different"
+    with pytest.raises(ValueError, match="prompts/packages"):
+        compare_performance(100, identity, reference)
+    reference["value"] = float("nan")
+    with pytest.raises(ValueError, match="Invalid reference"):
+        compare_performance(100, identity, reference)
+
+
+def test_performance_requires_reference_before_deploy(tmp_path):
+    with pytest.raises(ValueError, match="Missing performance reference"):
+        prepare(
+            tmp_path / "run",
+            "performance",
+            "ci-test",
+            reference=tmp_path / "missing.json",
+        )
+    assert not (tmp_path / "run/plan.json").exists()
+    with pytest.raises(ValueError, match="full performance"):
+        prepare(tmp_path / "short", "correctness", "ci-test", record_reference=True)
+
+
+def test_performance_report_records_candidate_and_fails_regression(tmp_path):
+    prepare(tmp_path / "run", "performance", "ci-test", record_reference=True)
+    root = tmp_path / "run"
+    cfg = json.loads((root / "config.json").read_text())
+    (root / "topology.json").write_text(json.dumps(topology()))
+    plan = json.loads((root / "plan.json").read_text())
+    for i in range(8):
+        rows, manifest, _ = fixture(f"adapter-{i}")
+        # Expand the synthetic trace to all 30 updates.
+        for u in range(4, 31):
+            for event in (
+                "rollout_done",
+                "train_start",
+                "train_done",
+                "update_done",
+                "publish",
+            ):
+                row = copy.deepcopy(
+                    next(r for r in rows if r["event"] == event and r["update"] == 3)
+                )
+                row["update"] = u
+                if event == "publish":
+                    row["path"] = f"tinker://adapter-{i}:train:0/sampler_weights/{u}"
+                if "time" in row:
+                    row["time"] = u + 3
+                rows.append(row)
+        next(r for r in rows if r["event"] == "completed")["updates"] = 30
+        rows.append(dict(event="training_finished", time=40))
+        manifest["config"] = cfg
+        manifest["dataset_sha256"] = plan["dataset_sha256"]
+        p = root / f"client-{i:02d}"
+        p.mkdir()
+        (p / "manifest.json").write_text(json.dumps(manifest))
+        (p / "events.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary = report(root)
+    assert summary["performance"]["status"] == "reference_candidate"
+    assert summary["end_to_end_output_tps"] == 8 * 30 * 128 / 38
+    reference = reference_fixture(summary["end_to_end_output_tps"] * 2)
+    reference["identity"] = summary["benchmark_identity"]
+    (root / "baseline.json").write_text(json.dumps(reference))
+    prepare(
+        tmp_path / "comparison",
+        "performance",
+        "ci-test",
+        reference=root / "baseline.json",
+    )
+    reference["identity"]["run"]["stagger_seconds"] = 0
+    (root / "incompatible.json").write_text(json.dumps(reference))
+    with pytest.raises(ValueError, match="workload/topology"):
+        prepare(
+            tmp_path / "incompatible",
+            "performance",
+            "ci-test",
+            reference=root / "incompatible.json",
+        )
+    plan["record_reference"] = False
+    (root / "plan.json").write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match="Performance regression"):
+        report(root)
+    assert json.loads((root / "summary.json").read_text())["status"] == "failed"
+    assert "**failed**" in (root / "summary.md").read_text()

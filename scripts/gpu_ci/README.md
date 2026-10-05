@@ -11,10 +11,18 @@ It is opt-in, not an automatic GPU job on every PR.
 | `performance` | 8 | 30 | Launch every 150s after client zero is ready | 3 hours |
 
 The correctness barrier intentionally exercises shared contention. The short
-run cannot establish full-run throughput. Performance mode reproduces the
-staggered workload; its timings are informational until repeated successful
-runs establish tolerances. The reference experiment averaged 191s per step and
-36.6k aggregate rollout output tokens/s, but those are not pass/fail thresholds.
+run cannot establish full-run throughput. Performance mode fails if end-to-end
+output throughput falls **more than 15% below a reviewed reference**. The gate
+uses total generated training-rollout tokens divided by wall time from the first
+client's training-loop start to the last client's training-loop finish. It includes
+sampling, training, publication, staggered ramp-up and drain, but excludes initial
+warmup and final probes. The same window is used for the reference and test run.
+Tokens/sec remains sensitive to generated lengths; inspect the reported lengths,
+truncation, and rewards when diagnosing failures.
+
+The old benchmark numbers are context, not an automatically accepted baseline:
+the new harness needs its own full reference run. Correctness mode has no
+performance threshold.
 
 ## One-time setup
 
@@ -41,6 +49,34 @@ runs establish tolerances. The reference experiment averaged 191s per step and
 
 Only one GPU validation runs at a time. No Tinker billing key is needed: the
 standard Tinker SDK client connects to this run's Spindle endpoint.
+
+## Establishing the reference
+
+1. Run a known-good commit with `mode=performance` and `record_reference=true`:
+
+   ```bash
+   gh workflow run gpu-dapo.yml --repo modal-projects/spindle \
+     --ref KNOWN_GOOD_BRANCH -f mode=performance -f record_reference=true
+   ```
+
+   Locally, add `--mode performance --record-reference` to `prepare`.
+   This still runs every correctness check. Only a successful run and cleanup
+   produce `reference.json` in the results artifact.
+2. Inspect the run's logs, topology, reward/length statistics, and timing plots.
+   Prefer repeated runs to check noise before choosing a representative reference.
+3. Commit the reviewed artifact as `scripts/gpu_ci/reference.json`. It records
+   measured throughput, the source commit/run, workload, deployment settings,
+   tokenizer/prompt identity, and client package versions. Baseline updates are
+   explicit reviewed changes; CI never overwrites this file.
+4. Run subsequent performance checks with `record_reference=false` (the default).
+   A missing or incompatible workload/topology reference fails **before GPU
+   deployment**; prompt/package incompatibility fails after collection. The floor
+   is `reference_throughput * 0.85`; exactly 85% passes. Below it, the job fails and
+   retains the comparison in `summary.json` and `summary.md`.
+
+There is intentionally no fabricated reference checked in yet. Changing workload,
+packages or topology requires a new reference. The base-weight cache is not
+independently fingerprinted; keep it consistent when establishing/comparing runs.
 
 ## Local invocation
 

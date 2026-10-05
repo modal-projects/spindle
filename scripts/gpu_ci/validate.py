@@ -1,8 +1,46 @@
-"""Fail on workload regressions; report performance without uncalibrated gates."""
+"""Validate correctness and compare performance against a reviewed reference."""
 
 import json
 import math
 import statistics
+
+MAX_THROUGHPUT_DROP = 0.15
+
+
+def validate_reference(reference, benchmark):
+    require(
+        reference["schema"] == 1 and reference["metric"] == "end_to_end_output_tps",
+        "Unsupported reference metric/schema",
+    )
+    require(
+        math.isfinite(reference["value"]) and reference["value"] > 0,
+        "Invalid reference throughput",
+    )
+    require(
+        reference["identity"]["run"] == benchmark,
+        "Reference workload/topology mismatch; record a new reference",
+    )
+
+
+def compare_performance(value, identity, reference):
+    validate_reference(reference, identity["run"])
+    require(
+        identity == reference["identity"],
+        "Reference prompts/packages mismatch; record a new reference",
+    )
+    require(math.isfinite(value) and value > 0, "Invalid measured throughput")
+    minimum = reference["value"] * (1 - MAX_THROUGHPUT_DROP)
+    return dict(
+        status="passed" if value >= minimum else "failed",
+        metric="end_to_end_output_tps",
+        reference_commit=reference["commit"],
+        reference_run=reference["run_name"],
+        reference_value=reference["value"],
+        current_value=value,
+        minimum_value=minimum,
+        change_fraction=value / reference["value"] - 1,
+        maximum_drop_fraction=MAX_THROUGHPUT_DROP,
+    )
 
 
 def events(path):
@@ -214,6 +252,33 @@ def report(root):
         truncation_fraction=sum(r["truncated"] for r in rollouts)
         / sum(len(r["output_lengths"]) for r in rollouts),
     )
+    if plan["mode"] == "performance":
+        starts = [
+            next(r["time"] for r in client if r["event"] == "training_started")
+            for client in clients
+        ]
+        finishes = [
+            next(r["time"] for r in client if r["event"] == "training_finished")
+            for client in clients
+        ]
+        require(max(finishes) > min(starts), "Invalid training measurement window")
+        summary["end_to_end_output_tps"] = tokens / (max(finishes) - min(starts))
+        summary["benchmark_identity"] = dict(
+            run=plan["benchmark"],
+            client={
+                key: manifests[0][key]
+                for key in ("prompts_sha256", "packages", "stop_token_ids")
+            },
+        )
+        if plan["record_reference"]:
+            summary["performance"] = {"status": "reference_candidate"}
+        else:
+            summary["performance"] = compare_performance(
+                summary["end_to_end_output_tps"],
+                summary["benchmark_identity"],
+                json.loads((root / "baseline.json").read_text()),
+            )
+            summary["status"] = summary["performance"]["status"]
     for event in ("update_done", "rollout_done", "train_done", "publish"):
         values = [
             r["seconds"]
@@ -229,7 +294,7 @@ def report(root):
     lines = [
         "# DAPO GPU CI",
         "",
-        f"**Passed**: {plan['mode']}, {len(clients)} clients × {cfg['updates']} updates; commit `{plan['commit']}`.",
+        f"**{summary['status'].capitalize()}**: {plan['mode']}, {len(clients)} clients × {cfg['updates']} updates; commit `{plan['commit']}`.",
         "",
         "| Metric | Result |",
         "| --- | ---: |",
@@ -244,7 +309,23 @@ def report(root):
         "",
         "Sampling overlaps training. Training latency includes queue/transport time. Warmup and final policy probes are excluded from these timing/token summaries, but consume resources.",
         "",
-        "Performance is informational until repeated successful runs establish regression thresholds.",
     ]
+    if plan["mode"] == "performance":
+        lines.append(
+            f"End-to-end output throughput: **{summary['end_to_end_output_tps']:,.0f} tok/s** (includes training, publication, client ramp-up and drain; excludes initial warmup/final probes)."
+        )
+        comparison = summary["performance"]
+        if comparison["status"] == "reference_candidate":
+            lines.append(
+                "Reference candidate: no performance comparison. Review and commit reference.json after successful cleanup; never replace the baseline automatically."
+            )
+        else:
+            lines.append(
+                f"Reference `{comparison['reference_commit']}`: {comparison['reference_value']:,.0f} tok/s. Minimum: {comparison['minimum_value']:,.0f} tok/s (85% of reference). Change: {comparison['change_fraction']:+.1%}. **{comparison['status']}**."
+            )
     (root / "summary.md").write_text("\n".join(lines) + "\n")
+    require(
+        summary["status"] == "passed",
+        "Performance regression: end-to-end throughput is more than 15% below the reference; see summary.json",
+    )
     return summary

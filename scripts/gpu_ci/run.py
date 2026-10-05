@@ -18,7 +18,8 @@ from modal_proto import api_pb2
 
 from scripts.gpu_ci.cleanup import owned_apps, stop_apps
 from scripts.gpu_ci.diagnostics import analyze
-from scripts.gpu_ci.validate import events, report
+from scripts.gpu_ci.deployment import Config
+from scripts.gpu_ci.validate import events, report, validate_reference
 from spindle.control_plane.keys import placement_key
 from spindle.providers.modal.kv import app_store_name
 
@@ -33,7 +34,9 @@ def write(path, value):
     temporary.replace(path)
 
 
-def prepare(output, mode, environment):
+def prepare(output, mode, environment, reference=None, record_reference=False):
+    if record_reference and mode != "performance":
+        raise ValueError("A reference requires the full performance workload")
     output.mkdir(parents=True, exist_ok=False)
     expected = json.loads(EXPECTED.read_text())
     cfg = json.loads((HERE / "config.json").read_text())
@@ -54,7 +57,26 @@ def prepare(output, mode, environment):
         stagger_seconds=0
         if mode == "correctness"
         else expected["performance_stagger_seconds"],
+        record_reference=record_reference,
     )
+    plan["benchmark"] = dict(
+        config=cfg,
+        expected=expected,
+        dataset_sha256=plan["dataset_sha256"],
+        stagger_seconds=plan["stagger_seconds"],
+        deployment={
+            k: v for k, v in vars(Config()).items() if k not in ("name", "platform")
+        },
+    )
+    if mode == "performance" and not record_reference:
+        reference = reference or HERE / "reference.json"
+        if not reference.exists():
+            raise ValueError(
+                "Missing performance reference. First run performance with --record-reference, then review and commit its reference.json."
+            )
+        baseline = json.loads(reference.read_text())
+        validate_reference(baseline, plan["benchmark"])
+        write(output / "baseline.json", baseline)
     write(output / "plan.json", plan)
     write(output / "config.json", cfg)
     write(output / "expected.json", expected)
@@ -362,6 +384,20 @@ def run(output):
                 ),
             )
 
+    if plan["record_reference"]:
+        summary = json.loads((output / "summary.json").read_text())
+        write(
+            output / "reference.json",
+            dict(
+                schema=1,
+                metric="end_to_end_output_tps",
+                value=summary["end_to_end_output_tps"],
+                commit=plan["commit"],
+                run_name=plan["name"],
+                identity=summary["benchmark_identity"],
+            ),
+        )
+
 
 def cleanup(output):
     if not (output / "plan.json").exists():
@@ -381,10 +417,14 @@ def main():
         "--mode", choices=["correctness", "performance"], default="correctness"
     )
     parser.add_argument("--environment", default="spindle-ci")
+    parser.add_argument("--reference", type=Path, default=HERE / "reference.json")
+    parser.add_argument("--record-reference", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()
     if args.action == "prepare":
-        prepare(output, args.mode, args.environment)
+        prepare(
+            output, args.mode, args.environment, args.reference, args.record_reference
+        )
     elif args.action == "run":
         run(output)
     elif args.action == "cleanup":

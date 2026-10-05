@@ -7,6 +7,10 @@ on:
         type: choice
         options: [correctness, performance]
         default: correctness
+      record_reference:
+        description: 'Record a reference candidate (performance mode only); does not replace the committed baseline'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -38,7 +42,11 @@ jobs:
       - name: Record configuration and resource ownership
         env:
           MODE: ${{ inputs.mode }}
-        run: .venv/bin/python -m scripts.gpu_ci.run prepare --output "$RESULTS" --mode "$MODE"
+          RECORD_REFERENCE: ${{ inputs.record_reference }}
+        run: |
+          args=()
+          if [ "$RECORD_REFERENCE" = "true" ]; then args+=(--record-reference); fi
+          .venv/bin/python -m scripts.gpu_ci.run prepare --output "$RESULTS" --mode "$MODE" "${args[@]}"
       - name: Run GPU validation
         run: .venv/bin/python -u -m scripts.gpu_ci.run run --output "$RESULTS"
       - name: Stop this run's apps
