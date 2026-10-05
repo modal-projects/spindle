@@ -104,6 +104,7 @@ class Config(BaseConfig):
         "kv_cache_dtype": "bfloat16",
         "linear_attn_backend": "triton",
         "moe_runner_backend": "triton",
+        "disable_shared_experts_fusion": True,
         "mem_fraction_static": 0.8,
         "max_running_requests": 32,
         "max_queued_requests": 32,

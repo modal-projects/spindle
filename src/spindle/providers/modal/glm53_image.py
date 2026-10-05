@@ -26,6 +26,37 @@ SGLANG_REGISTRY_PATCH = (
     + SGLANG_LORA_LIFETIME_PATCH.split(_REGISTRY_PATCH_HEADER, 1)[1]
 )
 
+# KDA and DSA have different projection widths in the same model.
+SGLANG_GLM_LORA_DIMENSIONS_PATCH = (
+    "--- a/python/sglang/srt/models/glm5_next.py\n"
+    "+++ b/python/sglang/srt/models/glm5_next.py\n"
+    "@@ -63,6 +63,7 @@\n"
+    "     VocabParallelEmbedding,\n"
+    "     get_embedding_tp_kwargs,\n"
+    " )\n"
+    "+from sglang.srt.lora.utils import get_default_hidden_dim\n"
+    " from sglang.srt.managers.mm_utils import (\n"
+    "     MultiModalityDataPaddingPatternMultimodalTokens,\n"
+    "     general_mm_embed_routine,\n"
+    "@@ -1205,6 +1206,16 @@\n"
+    "     }\n"
+    "     fall_back_to_pt_during_load = False\n"
+    " \n"
+    "+    def get_hidden_dim(self, module_name: str, layer_idx: int):\n"
+    '+        if self.config.layer_types[layer_idx] == "linear_attention":\n'
+    "+            linear = self.config.linear_attn_config\n"
+    '+            width = linear["num_heads"] * linear["head_dim"]\n'
+    '+            if module_name == "qkv_proj":\n'
+    "+                return self.config.hidden_size, 3 * width\n"
+    '+            if module_name == "o_proj":\n'
+    "+                return width, self.config.hidden_size\n"
+    "+        return get_default_hidden_dim(module_name, self.config, layer_idx)\n"
+    "+\n"
+    "     def __init__(\n"
+    "         self,\n"
+    "         config: Glm5NextConfig,\n"
+)
+
 # PR 35's model package depends on its earlier GLM5 TileLang provider. Copy only
 # those packages onto a recent Bridge revision for Transformers 5.16 support.
 # The GLM5 package supplies its TileLang attention implementation; its older
@@ -75,9 +106,11 @@ inference_image = (
     .run_commands(
         "cd /sgl-workspace/sglang && git apply --check - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
+        + SGLANG_GLM_LORA_DIMENSIONS_PATCH
         + "PATCH\n",
         "cd /sgl-workspace/sglang && git apply - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
+        + SGLANG_GLM_LORA_DIMENSIONS_PATCH
         + "PATCH\n",
     )
     .pip_install(

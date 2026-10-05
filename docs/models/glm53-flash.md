@@ -29,7 +29,9 @@ Context parallelism is currently unsupported by the upstream KDA provider.
 
 The public checkpoint stores FP8 weights. The trainer imports them as BF16 and
 keeps the base weights frozen. SGLang serves the FP8 base with BF16 KV cache and
-TileLang sparse attention on H200s.
+TileLang sparse attention on H200s. Shared experts stay separate from routed
+experts so their adapters remain addressable. The sampler image also fixes LoRA
+buffer dimensions for the model's alternating KDA and DSA layers.
 
 This recipe selects its own `trainer_image` and `inference_image`, written as
 `module:attribute` references to Modal images. Changing either reference redeploys

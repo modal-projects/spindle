@@ -12,6 +12,11 @@ import modal
 
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal.glm53_image import inference_image, trainer_image
+from spindle.providers.modal.kernel_cache import (
+    KERNEL_CACHE_ENV,
+    KERNEL_CACHE_ROOT,
+    kernel_cache_volume,
+)
 
 app = modal.App("spindle-glm53-validation")
 artifacts = modal.Volume.from_name(
@@ -25,7 +30,8 @@ artifacts = modal.Volume.from_name(
     cpu=16,
     memory=131072,
     timeout=1800,
-    volumes={"/validation": artifacts},
+    env=KERNEL_CACHE_ENV,
+    volumes={"/validation": artifacts, KERNEL_CACHE_ROOT: kernel_cache_volume},
 )
 def trainer(program: str = "", settings: dict | None = None):
     program = (
@@ -60,7 +66,8 @@ print(json.dumps({"layers": provider.num_layers, "kda_layers": len(provider.kda_
     cpu=16,
     memory=131072,
     timeout=1800,
-    volumes={"/validation": artifacts},
+    env=KERNEL_CACHE_ENV,
+    volumes={"/validation": artifacts, KERNEL_CACHE_ROOT: kernel_cache_volume},
 )
 def inference(settings: dict, program: str = ""):
     program = (
