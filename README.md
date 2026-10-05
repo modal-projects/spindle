@@ -286,14 +286,32 @@ or [Working with Multi-LoRA](docs/multi-lora.md) for shared Miles adapters, batc
 submission, scheduling, and sampling. See [scoped runs](docs/scoped-runs.md) for
 recovery and custom engines on the full-parameter path.
 
-See the [raw Tinker RL example](scripts/rl_example.py) for sampling and a toy
-policy update. Copy examples you want to run into your project; repository
-`scripts/` are not installed with the package.
+The [RL example](scripts/rl_example.py) is the shared Tinker SDK loop for toy
+updates, DAPO benchmarks, and GPU CI. W&B logging is an optional flag on the same
+script; it does not change the training workload. Repository `scripts/` are not
+installed with the package.
 
-The [W&B RL example](scripts/wandb_rl_example.py) extends it to a multi-step
-loop that logs reward, response length, and Spindle's training metrics to Weights
-& Biases from the client side; tinker-cookbook users can instead set
-`wandb_project`/`wandb_name` on the cookbook `Config`.
+```bash
+# One full-parameter toy update (Spindle).
+uv run scripts/rl_example.py
+
+# Multi-step LoRA example with client-side W&B logging.
+uv run --with wandb scripts/rl_example.py --parameterization lora \
+  --steps 5 --wandb-project spindle-examples
+
+# The fixed-group, async DAPO workload used by GPU CI (Spindle or Tinker).
+uv run scripts/rl_example.py --task dapo --output scripts/results/my-dapo
+```
+
+Set `TINKER_BASE_URL` and `TINKER_API_KEY` for Spindle; for Tinker, unset
+`TINKER_BASE_URL` and use its API key. The LoRA path uses the standard SDK; the
+full-parameter toy example uses Spindle's full-training helper. DAPO settings and
+the prompt fixture live in [`scripts/rl_configs`](scripts/rl_configs). GPU CI
+invokes this same script with `--task dapo --validate`, adding policy probes and
+CI assertions while preserving the DAPO training settings. The former
+`wandb_rl_example.py` entry point is replaced by `--wandb-project`.
+
+Tinker-cookbook users can set `wandb_project`/`wandb_name` on the cookbook `Config`.
 
 See [Design](docs/design.md) for the control-plane, training-engine, and sampling
 architecture.

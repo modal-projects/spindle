@@ -39,7 +39,7 @@ def prepare(output, mode, environment, reference=None, record_reference=False):
         raise ValueError("A reference requires the full performance workload")
     output.mkdir(parents=True, exist_ok=False)
     expected = json.loads(EXPECTED.read_text())
-    cfg = json.loads((HERE / "config.json").read_text())
+    cfg = json.loads((ROOT / "scripts/rl_configs/dapo.json").read_text())
     cfg["updates"] = expected[f"{mode}_updates"]
     seconds = 3600 if mode == "correctness" else 10800
     deadline = int(time.time()) + seconds
@@ -53,7 +53,9 @@ def prepare(output, mode, environment, reference=None, record_reference=False):
         commit=subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
-        dataset_sha256=hashlib.sha256((HERE / "dapo.jsonl").read_bytes()).hexdigest(),
+        dataset_sha256=hashlib.sha256(
+            (ROOT / "scripts/rl_configs/dapo.jsonl").read_bytes()
+        ).hexdigest(),
         stagger_seconds=0
         if mode == "correctness"
         else expected["performance_stagger_seconds"],
@@ -228,7 +230,10 @@ def run(output):
             sys.executable,
             "-u",
             "-m",
-            "scripts.gpu_ci.client",
+            "scripts.rl_example",
+            "--task",
+            "dapo",
+            "--validate",
             "--config",
             str(output / "config.json"),
             "--output",

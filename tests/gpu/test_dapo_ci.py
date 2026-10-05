@@ -22,7 +22,7 @@ from scripts.gpu_ci.validate import (
     report,
     compare_performance,
 )
-from scripts.gpu_ci.client import answer, datum
+from scripts.rl_example import answer, datum
 from spindle.deployment_cli import compile_configs
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,7 @@ EXPECTED = json.loads((ROOT / "tests/gpu/dapo_expected.json").read_text())
 
 
 def fixture(model="adapter-a"):
-    cfg = json.loads((ROOT / "scripts/gpu_ci/config.json").read_text())
+    cfg = json.loads((ROOT / "scripts/rl_configs/dapo.json").read_text())
     cfg["updates"] = 3
     rows = [
         dict(event="client_created", model_id=model),
@@ -208,7 +208,7 @@ def test_prepare_keeps_workload_and_resolves_recipe(tmp_path):
         assert recipe.inference_gpus_per_node * recipe.inference_max_replicas == 16
         assert recipe.miles_cfg["max_lora_slots"] == 8
         cfg = json.loads((output / "config.json").read_text())
-        original = json.loads((ROOT / "scripts/gpu_ci/config.json").read_text())
+        original = json.loads((ROOT / "scripts/rl_configs/dapo.json").read_text())
         assert {k: v for k, v in cfg.items() if k != "updates"} == {
             k: v for k, v in original.items() if k != "updates"
         }
