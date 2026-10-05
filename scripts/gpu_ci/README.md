@@ -3,7 +3,7 @@
 This manual GitHub Actions workflow deploys the checked-out Spindle commit on
 Modal and runs real Qwen3.5-9B multi-LoRA training. It allocates **24 H200 GPUs**:
 one eight-GPU trainer (TP1/DP8) and eight two-GPU inference replicas (TP2).
-Placement allows US regions; the region policy is part of the reference identity.
+Placement uses `us-east`; the region policy is part of the reference identity.
 It is opt-in, not an automatic GPU job on every PR.
 
 | Mode | Clients | Updates/client | Start policy | Deadline |
