@@ -98,7 +98,9 @@ def test_trainer_declaration_and_executor_configuration(
     assert args == ("store", f"spindle.backends.{backend}:build_executor")
     assert kwargs["max_models"] == clients
     assert kwargs["nproc"] == nproc
-    assert kwargs["backend_env"]["SPINDLE_CHECKPOINT_VOLUME"] == "test-custom-checkpoints"
+    assert (
+        kwargs["backend_env"]["SPINDLE_CHECKPOINT_VOLUME"] == "test-custom-checkpoints"
+    )
     assert kwargs["backend_env"]["SPINDLE_BASE_MODEL"] == row.model
     config = json.loads(kwargs["backend_env"]["SPINDLE_BACKEND_CONFIG"])
     assert config[row.recipe.backend]["hf_checkpoint"] == row.asset_path
@@ -132,19 +134,19 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     calls, commands, stops = [], [], []
     process = object()
     monkeypatch.setattr(
-        subprocess, "Popen", lambda argv, **kw: (commands.append(argv) or process)
+        subprocess, "Popen", lambda argv, **kw: commands.append(argv) or process
     )
     monkeypatch.setattr(deployment_apps, "wait_http", lambda *args: None)
     monkeypatch.setattr(deployment_apps, "supervise_children", lambda *args: None)
     monkeypatch.setattr(
         deployment_apps,
         "start_lora_sidecar",
-        lambda **kw: (calls.append(("lora", kw)) or process),
+        lambda **kw: calls.append(("lora", kw)) or process,
     )
     monkeypatch.setattr(
         deployment_apps,
         "start_fft_sidecar",
-        lambda **kw: (calls.append(("fft", kw)) or process),
+        lambda **kw: calls.append(("fft", kw)) or process,
     )
     monkeypatch.setattr(deployment_apps, "terminate", stops.append)
     replica = server()
@@ -288,7 +290,8 @@ def test_pool_launch_uses_only_generic_deployment_app(monkeypatch, kind):
     assert module.deploy_pool(spec, config=row) == "https://pool"
     command, kwargs = calls[0]
     assert (
-        command[command.index("-m") + 1] == "spindle.providers.modal.deployment_pool_app"
+        command[command.index("-m") + 1]
+        == "spindle.providers.modal.deployment_pool_app"
     )
     assert (
         json.loads(kwargs["env"][deployment_configs.POOL_CONFIG_ENV])["recipe"]["name"]
@@ -341,8 +344,9 @@ def test_provisioner_rejects_wrong_settings_and_uses_saved_config(
     monkeypatch.setattr(
         deployment_apps,
         "deploy_lora",
-        lambda pool, *, config, platform=None: calls.append((pool, config))
-        or "https://pool",
+        lambda pool, *, config, platform=None: (
+            calls.append((pool, config)) or "https://pool"
+        ),
     )
     pool = LoraPoolSpec(row.definition_id)
     assert provision(row.model_dump_json(), pool.as_dict()) == "https://pool"
@@ -475,3 +479,17 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_compute_region_can_differ_from_http_routing(builders):
+    row = deployment()
+    row.recipe.platform["modal"].update(region="us-east", compute_region="us")
+    trainer_app, _ = deployment_apps.build_trainer_app(row, image="test")
+    trainer, _ = trainer_app.functions["trainer"]
+    pool_app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    server, _ = pool_app.servers["Server"]
+    assert trainer["region"] == "us"
+    assert server["compute_region"] == "us"
+    assert server["routing_region"] == "us-east"

@@ -20,6 +20,7 @@ class Config(Parent):
     pool_idle_timeout_s = 3600
     overrides = {
         "platform.modal.region": "us-east",
+        "platform.modal.compute_region": "us",
         "trainer_env.TORCH_COMPILE_DISABLE": "1",
         "miles_cfg.tensor_model_parallel_size": 1,
         "miles_cfg.max_lora_slots": 8,
