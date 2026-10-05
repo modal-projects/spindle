@@ -304,7 +304,7 @@ def test_deployment_failure_still_cleans_up_and_records_failure(
 ):
     output = tmp_path / "run"
     prepare(output, "correctness", "ci-test")
-    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    monkeypatch.setenv("TINKER_API_KEY", "tml-test-key")
     monkeypatch.setattr(runner.signal, "signal", lambda *args: None)
     cleaned = []
 

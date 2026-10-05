@@ -16,7 +16,7 @@ import modal
 from modal.client import _Client
 from modal_proto import api_pb2
 
-from scripts.gpu_ci.cleanup import owned_apps, stop_apps
+from scripts.gpu_ci.cleanup import owned_apps, stop_apps, modal_call
 from scripts.gpu_ci.diagnostics import analyze
 from scripts.gpu_ci.deployment import Config
 from scripts.gpu_ci.validate import events, report, validate_reference
@@ -200,9 +200,9 @@ def collect_logs(plan, output):
 def run(output):
     plan = json.loads((output / "plan.json").read_text())
     expected = json.loads((output / "expected.json").read_text())
-    if not os.environ.get("TINKER_API_KEY"):
+    if not os.environ.get("TINKER_API_KEY", "").startswith("tml-"):
         raise ValueError(
-            "TINKER_API_KEY must match spindle-api in the CI Modal environment"
+            "TINKER_API_KEY must start with tml- (required by the SDK) and match spindle-api in the CI Modal environment"
         )
     env = {
         **os.environ,
@@ -341,7 +341,7 @@ def run(output):
         ]
         write(
             output / "topology.json",
-            asyncio.run(asyncio.wait_for(topology(plan, mids), timeout=120)),
+            modal_call(topology, plan, mids, timeout=120),
         )
         report(output)
     except BaseException as exc:
@@ -371,7 +371,7 @@ def run(output):
         finally:
             try:
                 collect_logs(plan, output)
-                asyncio.run(asyncio.wait_for(finalized_resources(output), timeout=60))
+                modal_call(finalized_resources, output, timeout=60)
                 analyze(output)
             except Exception as exc:
                 write(output / "diagnostics-error.json", {"error": str(exc)})
@@ -403,9 +403,7 @@ def cleanup(output):
     if not (output / "plan.json").exists():
         return
     plan = json.loads((output / "plan.json").read_text())
-    stopped = asyncio.run(
-        asyncio.wait_for(stop_apps(plan["environment"], plan["name"]), timeout=120)
-    )
+    stopped = modal_call(stop_apps, plan["environment"], plan["name"], timeout=120)
     write(output / "cleanup.json", dict(stopped=stopped, time=time.time()))
 
 

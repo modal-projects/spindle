@@ -27,7 +27,7 @@ performance threshold.
 ## One-time setup
 
 1. Create a dedicated Modal environment named `spindle-ci`. In that environment,
-   configure the standard `spindle-api` secret (`TINKER_API_KEY`),
+   configure the standard `spindle-api` secret (`TINKER_API_KEY`, starting with `tml-` as required by the SDK),
    `spindle-proxy` secret (`MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET`),
    and `huggingface-secret` (`HF_TOKEN`) using the [server setup](../../README.md#shared-deployment-quick-start).
    The runner uses the standard model-assets, checkpoint, and bulletin volumes

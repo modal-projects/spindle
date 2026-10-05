@@ -7,12 +7,19 @@ import time
 
 import modal
 from modal.client import _Client
+from modal._utils.async_utils import synchronizer
 from modal_proto import api_pb2
 
 RUN_PATTERN = re.compile(r"spindle-ci-dapo-(\d{10})-([a-f0-9]{12})")
 APP_PATTERN = re.compile(
     r"(?:spindle-(?:trainer|inference|lora)-)?(spindle-ci-dapo-\d{10}-[a-f0-9]{12})"
 )
+
+
+@synchronizer.create_blocking
+async def modal_call(function, *args, timeout):
+    """Use the SDK's event loop for its cached gRPC client."""
+    return await asyncio.wait_for(function(*args), timeout=timeout)
 
 
 def owned_apps(run_name):
@@ -69,6 +76,5 @@ image = (
 
 
 @app.function(image=image, schedule=modal.Period(minutes=10), timeout=300)
-async def reap_expired():
-    # Keep Modal's task context and client on the function's event loop.
-    print(await asyncio.wait_for(stop_apps(environment), timeout=60))
+def reap_expired():
+    print(modal_call(stop_apps, environment, timeout=60))
