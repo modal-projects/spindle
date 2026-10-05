@@ -1,8 +1,5 @@
 name: DAPO GPU validation
 on:
-  push:
-    branches: [codex/dapo-gpu-ci]
-    paths: [.github/workflows/gpu-dapo.yml]
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +18,6 @@ concurrency:
   cancel-in-progress: false
 jobs:
   gpu:
-    if: github.event_name != 'push' || github.event.head_commit.message == 'Run initial GPU CI reference'
     runs-on: ubuntu-latest
     timeout-minutes: 190
     environment: gpu-ci
@@ -45,8 +41,8 @@ jobs:
       - run: uv pip install --python .venv/bin/python -r scripts/gpu_ci/requirements.txt
       - name: Record configuration and resource ownership
         env:
-          MODE: ${{ inputs.mode || 'performance' }}
-          RECORD_REFERENCE: ${{ github.event_name == 'push' || inputs.record_reference }}
+          MODE: ${{ inputs.mode }}
+          RECORD_REFERENCE: ${{ inputs.record_reference }}
         run: |
           args=()
           if [ "$RECORD_REFERENCE" = "true" ]; then args+=(--record-reference); fi
