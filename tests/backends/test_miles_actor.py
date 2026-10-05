@@ -172,6 +172,12 @@ def _load_actor(monkeypatch):
     sys.modules["miles.backends.megatron_utils"].actor = megatron_actor
     sys.modules["miles.backends.megatron_utils"].model = megatron_model
 
+    _module(monkeypatch, "megatron.bridge.peft.multi_lora")
+    _module(monkeypatch, "megatron.bridge.peft.multi_lora_layers")
+    _module(monkeypatch, "megatron.core.parallel_state")
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.lora_init"
+    ).install_expert_lora_a_init = lambda **kwargs: None
     # Replay hook behavior is covered separately with its Miles interfaces.
     _module(
         monkeypatch, "spindle.backends.miles_runtime.replay"

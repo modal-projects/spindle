@@ -11,7 +11,8 @@ import torch
 import torch.distributed as dist
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
-from megatron.core import dist_checkpointing
+from megatron.bridge.peft import multi_lora, multi_lora_layers
+from megatron.core import dist_checkpointing, parallel_state
 from miles.backends.fsdp_utils import actor as fsdp_actor
 from miles.backends.megatron_utils import actor as megatron_actor
 from miles.backends.megatron_utils import model as megatron_model
@@ -31,6 +32,7 @@ from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
 from . import expert_lora_compat
+from .lora_init import install_expert_lora_a_init
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
@@ -176,6 +178,12 @@ def _gather_tinker_logprobs_across_cp() -> None:
 
 
 _gather_tinker_logprobs_across_cp()
+
+install_expert_lora_a_init(
+    multi_lora=multi_lora,
+    multi_lora_layers=multi_lora_layers,
+    parallel_state=parallel_state,
+)
 
 install_replay_hooks(
     megatron_model=megatron_model,
