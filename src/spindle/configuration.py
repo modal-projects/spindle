@@ -34,6 +34,9 @@ class BaseConfig:
     parameterization = "lora"
     backend = "miles"
 
+    trainer_image = None
+    inference_image = None
+
     trainer_gpu = "H100"
     trainer_gpus_per_node = 1
     trainer_nodes = 1
