@@ -82,6 +82,30 @@ In this section we detail some considerations when implementing multi-lora exper
 
 Because trainer is continuously polling for incoming forward_backward data, the best training pattern is to have async RL clients that produce a continuous stream of tokens towards the trainer, such that the latency of one clients' rollouts is hidden behind running forward_backwards for other clients. The system is much less friendly towards synchronous RL (especially if all clients do sync RL in lockstep), which will cause periodic bursts and troughs of trainer utilization as all clients switch between rollout and training phases. 
 
+### Rollout throughput by training configuration
+
+We measured the following configurations on DAPO math with `Qwen/Qwen3.5-9B`, rank-32 adapters, thinking enabled, and a 16,384-token output cap.
+Each update used eight fixed groups of eight responses, without dynamic group
+filtering. The two self-hosted configurations shared one 8×H200 trainer
+(TP=1, DP=8) across eight clients, started 150 seconds apart. Each client
+prefetched one rollout batch during training. The Tinker run used the same
+workload and sampling settings, with one client.
+
+| Training configuration | Inference replicas | Clients × updates | Avg. rollout duration | Output tok/s per client | Aggregate output tok/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 8 trainer + 8 inference H200s | 8 × TP=1 | 8 × 30 | 320s | 3,174 | 21,321 |
+| 8 trainer + 16 inference H200s | 8 × TP=2 | 8 × 30 | 189s | 5,360 | 36,584 |
+| Tinker | Provider-managed | 1 × 20 | 116s | 8,789 | 8,787 |
+
+Through the above tps values, we're able to get the following cost differentials for the above experiments versus Tinker:
+
+| Training and inference configuration | Clients × updates | Total run cost | Cost/client/update | Cost/client for 30 updates | Avg. step |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8 trainer + 8 inference H200s | 8 × 30 | $235.78 | $0.98 | $29.47 | 323s |
+| 8 trainer + 16 inference H200s | 8 × 30 | $205.81 | $0.86 | $25.73 | 191s |
+| Tinker (provider-managed) | 1 × 20 | $71.04 | $3.55 | $106.56 | 117s |
+
+
 ### Estimating token pricing vs Tinker 
 
 Tinker decomposes its token pricing into 4 categories: training tokens, uncached prompt tokens, cached prompt tokens, and generated tokens. 
