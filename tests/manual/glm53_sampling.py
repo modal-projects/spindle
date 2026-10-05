@@ -17,6 +17,7 @@ def main():
     report = json.loads(Path("/validation/latest.json").read_text())
     settings = json.loads(sys.argv[1])
     settings.update(
+        tokenizer_path="zai-org/GLM-5.3-Flash",
         tp_size=1,
         ep_size=1,
         quantization=None,

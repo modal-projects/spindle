@@ -18,7 +18,6 @@ INFERENCE_BASE_IMAGE = "lmsysorg/sglang@sha256:f08b3c7f14bdf2581ea776829a4a2d714
 MEGATRON_REVISION = "fd15ee20a4f03b03680529baf4b8f7eeed64df1d"
 BRIDGE_REVISION = "8cd3466d14d2337c8492827b3712482c2b3e4866"
 GLM_BRIDGE_REVISION = "6527b18e8bb0db994a267e6dfd4db7dafc669df9"
-SGLANG_REVISION = "efb62ce269b499123e2d1c89005ee4cea8c31098"
 
 # New SGLang owns request completion, but still needs atomic lookup + pin.
 _REGISTRY_PATCH_HEADER = "--- a/python/sglang/srt/lora/lora_registry.py\n"
@@ -74,17 +73,20 @@ inference_image = (
     .entrypoint([])
     .apt_install("git")
     .run_commands(
-        "git clone --filter=blob:none https://github.com/sgl-project/sglang.git /opt/glm-sglang"
-        f" && git -C /opt/glm-sglang checkout --detach {SGLANG_REVISION}"
-        " && pip install --no-build-isolation --no-deps -e /opt/glm-sglang/python",
-        "cd /opt/glm-sglang && git apply --check - <<'PATCH'\n"
+        "cd /sgl-workspace/sglang && git apply --check - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
         + "PATCH\n",
-        "cd /opt/glm-sglang && git apply - <<'PATCH'\n"
+        "cd /sgl-workspace/sglang && git apply - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
         + "PATCH\n",
     )
-    .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
+    .pip_install(
+        *CORE_PACKAGES,
+        STITCH_PACKAGE,
+        TINKER_PACKAGE,
+        "opentelemetry-exporter-otlp==1.43.0",
+        "opentelemetry-exporter-prometheus==0.64b0",
+    )
     .env({"HF_XET_HIGH_PERFORMANCE": "1", "SGLANG_DISABLE_CUDNN_CHECK": "1"})
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )
