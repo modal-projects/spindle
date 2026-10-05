@@ -1,3 +1,5 @@
+import shlex
+
 import modal
 
 from .image_dependencies import (
@@ -8,17 +10,41 @@ from .image_dependencies import (
     ignore_config_source,
 )
 
-BASE_IMAGE = "radixark/miles:v0.1.0"
-MILES_REPOSITORY = "https://github.com/radixark/miles.git"
-# Update this when Miles main should be picked up, then refresh the trainer app.
-MILES_COMMIT = "5510af675238be8271c0a24740f70d5116f6d32b"
+# The release tag pins Miles together with the Megatron-LM and Megatron-Bridge
+# revisions its image was built and tested with. Update all three by moving to a
+# newer release tag, digest, and commit together, then refresh the trainer app.
+MILES_RELEASE = "v0.1.1"
+BASE_IMAGE = (
+    f"radixark/miles:{MILES_RELEASE}"
+    "@sha256:6355834f16bacd35d5d40c43f142e3758376f7b2e8d678bccfe870c092bd96bf"
+)
+MILES_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
 MILES_PATH = "/root/miles"
-MEGATRON_REPOSITORY = "https://github.com/radixark/Megatron-LM.git"
-MEGATRON_REVISION = "8a5dbe5ff48ae074c864452897d35685572fca1f"
 MEGATRON_PATH = "/root/Megatron-LM"
-BRIDGE_REPOSITORY = "https://github.com/radixark/Megatron-Bridge.git"
-BRIDGE_REVISION = "2e09c234a3272285140224d0d698593418b55ba5"
-BRIDGE_PATH = "/root/Megatron-Bridge"
+RELEASE_CHECK = "; ".join(
+    [
+        "import json, re, subprocess",
+        "from importlib.metadata import distribution",
+        (
+            "head = lambda path: subprocess.check_output("
+            "['git', '-C', path, 'rev-parse', 'HEAD'], text=True).strip()"
+        ),
+        f"assert head('{MILES_PATH}') == '{MILES_COMMIT}', 'Miles is not at MILES_COMMIT'",
+        f"lock = json.load(open('{MILES_PATH}/release-lock.json'))",
+        (
+            f"assert head('{MEGATRON_PATH}') == lock['megatron_commit'], "
+            "'Megatron-LM differs from release-lock.json'"
+        ),
+        f"dockerfile = open('{MILES_PATH}/docker/Dockerfile').read()",
+        "bridge = re.search(r'Megatron-Bridge[.]git@([0-9a-f]{40})', dockerfile)[1]",
+        "url = json.loads(distribution('megatron-bridge').read_text('direct_url.json'))",
+        (
+            "assert url['vcs_info']['commit_id'] == bridge, "
+            "'Megatron-Bridge differs from the Miles Dockerfile'"
+        ),
+        "print('megatron-lm', lock['megatron_commit'], 'megatron-bridge', bridge)",
+    ]
+)
 
 image = (
     modal.Image.from_registry(BASE_IMAGE)
@@ -30,24 +56,7 @@ image = (
             "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }
     )
-    .apt_install("git")
-    .run_commands(
-        f"rm -rf {MILES_PATH}"
-        f" && git clone --filter=blob:none {MILES_REPOSITORY} {MILES_PATH}"
-        f" && git -C {MILES_PATH} fetch --depth 1 origin {MILES_COMMIT}"
-        f" && git -C {MILES_PATH} checkout --detach FETCH_HEAD",
-        f"pip install --no-build-isolation --no-deps -e {MILES_PATH}",
-        f"git -C {MEGATRON_PATH} fetch --depth 1"
-        f" {MEGATRON_REPOSITORY} {MEGATRON_REVISION}"
-        f" && git -C {MEGATRON_PATH} checkout --detach FETCH_HEAD",
-        f"pip install --no-build-isolation --no-deps -e {MEGATRON_PATH}",
-        f"rm -rf {BRIDGE_PATH}"
-        f" && git clone --filter=blob:none {BRIDGE_REPOSITORY} {BRIDGE_PATH}"
-        f" && git -C {BRIDGE_PATH} fetch --depth 1 origin {BRIDGE_REVISION}"
-        f" && git -C {BRIDGE_PATH} checkout --detach FETCH_HEAD",
-        "pip uninstall -y megatron-bridge megatron_bridge || true",
-        f"pip install --no-build-isolation --no-deps -e {BRIDGE_PATH}",
-    )
+    .run_commands(f"python -c {shlex.quote(RELEASE_CHECK)}")
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE)
     .pip_install(
         *MEGATRON_RUNTIME_PACKAGES,
