@@ -1,7 +1,8 @@
 """Four-layer GLM checkpoint check: two slots, updates, restore and PEFT export.
 
-Invoked by validate_glm53.py --train. Uses the upstream validation slice, preserving full layer widths and expert
-counts. This is an integration test; the full 45-layer checkpoint is not loaded.
+Invoked by validate_glm53.py --train. Uses the upstream validation slice,
+preserving full layer widths and expert counts. This integration test does not
+load the full 45-layer checkpoint.
 """
 
 import json
@@ -39,9 +40,12 @@ def main():
         default_lora_alpha=8,
         extra_args=["--seq-length", "256"],
     )
+    model_config = json.loads((path / "config.json").read_text())["text_config"]
+    layers = model_config["num_hidden_layers"]
+    dense_layers = model_config["first_k_dense_replace"]
     settings["cli_options"].update(
-        num_layers=4,
-        moe_layer_freq="[0]*3+[1]",
+        num_layers=layers,
+        moe_layer_freq=f"[0]*{dense_layers}+[1]*{layers - dense_layers}",
         global_batch_size=2,
         micro_batch_size=1,
     )
@@ -54,7 +58,7 @@ def main():
             (
                 slot,
                 {
-                    "tokens": list(range(10 + slot, 42 + slot)),
+                    "tokens": list(range(10 + slot, 43 + slot)),
                     "target_tokens": list(range(11 + slot, 43 + slot)),
                     "target_len": 32,
                     "weights": [1.0] * 32,
@@ -115,7 +119,7 @@ def main():
         report = {
             "model_path": str(path),
             "adapter_path": str(output / "adapter"),
-            "tokens": rows[0][1]["tokens"],
+            "tokens": rows[0][1]["tokens"][:-1],
             "logprobs": after[0]["logprobs"],
         }
         Path("/validation/latest.json").write_text(json.dumps(report))
