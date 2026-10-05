@@ -132,11 +132,3 @@ python -m tinker_cookbook.recipes.preference.dpo.train \
   the sampler pool.
 - W&B: [Spindle](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/0z0obns5),
   [Tinker](https://wandb.ai/modal-labs/spindle-dpo-validation/runs/3zbxmlbv).
-
-## Running GPU validation in CI
-
-The [DAPO GPU validation workflow](../scripts/gpu_ci/README.md) checks eight
-Qwen3.5-9B LoRA clients on a shared trainer. Maintainers can run a three-update
-correctness check or the 30-update staggered performance workload on a selected
-branch. GPU runs are opt-in. Performance checks fail below 85% of a reviewed reference
-run; see the workflow guide for recording the initial baseline.
