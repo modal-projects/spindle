@@ -1,4 +1,5 @@
 """Stitch pool routing by hydrated IDs, including ephemeral parent apps."""
+
 from __future__ import annotations
 
 import os
@@ -27,14 +28,22 @@ class ScopedFlashPool(Pool):
     def wake(self, replicas, ref) -> None:
         # Requests enter through the authenticated gateway, selecting a replica.
         import logging
+
         with httpx.Client(timeout=5, headers=proxy_auth_headers()) as client:
             for upstream in replicas:
                 try:
-                    client.post(self.gateway_url() + "/wake", headers={
-                        "modal-flash-upstream": upstream.removeprefix("https://").removeprefix("http://")
-                    }).raise_for_status()
+                    client.post(
+                        self.gateway_url() + "/wake",
+                        headers={
+                            "modal-flash-upstream": upstream.removeprefix(
+                                "https://"
+                            ).removeprefix("http://")
+                        },
+                    ).raise_for_status()
                 except httpx.HTTPError:
-                    logging.getLogger(__name__).warning("sampler wake failed", exc_info=True)
+                    logging.getLogger(__name__).warning(
+                        "sampler wake failed", exc_info=True
+                    )
 
 
 def publication_pool(definition_id: str, model_id: str) -> Pool:
@@ -43,6 +52,7 @@ def publication_pool(definition_id: str, model_id: str) -> Pool:
         route = modal.Dict.from_name(registry_name)["model:" + model_id]
         return ScopedFlashPool(route)
     from .fft_pool import FFTLatestPool
+
     return FFTLatestPool(definition_id, model_id)
 
 
@@ -52,6 +62,7 @@ async def set_minimum(function_id: str, minimum: int) -> None:
     # which cannot address an ephemeral server.
     from modal.client import _Client
     from modal_proto import api_pb2
+
     client = await _Client.from_env()
     await client.stub.FunctionUpdateSchedulingParams(
         api_pb2.FunctionUpdateSchedulingParamsRequest(
@@ -65,9 +76,13 @@ async def set_minimum(function_id: str, minimum: int) -> None:
 async def list_replicas(function_id: str) -> list[str]:
     from modal.client import _Client
     from modal_proto import api_pb2
+
     client = await _Client.from_env()
     response = await client.stub.FlashContainerList(
         api_pb2.FlashContainerListRequest(function_id=function_id)
     )
-    return [f"{c.host}:{c.port}" if c.port else c.host
-            for c in response.containers if c.host]
+    return [
+        f"{c.host}:{c.port}" if c.port else c.host
+        for c in response.containers
+        if c.host
+    ]

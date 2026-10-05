@@ -107,9 +107,7 @@ def _score_response(
     chunk_precision = overlap / len(predicted) if predicted else 0.0
     chunk_recall = overlap / len(reference) if reference else 0.0
     denominator = 4 * chunk_precision + chunk_recall
-    chunk_f2 = (
-        5 * chunk_precision * chunk_recall / denominator if denominator else 0.0
-    )
+    chunk_f2 = 5 * chunk_precision * chunk_recall / denominator if denominator else 0.0
     answer_f1 = _token_f1(answer, ground_truth)
     reward = answer_f1 + 0.1 * chunk_f2 + 0.9 * answer_f1 * chunk_f2
     return {
@@ -197,9 +195,7 @@ class LongRLVRDataset(DatasetConfig):
                         {
                             "question": question,
                             "ground_truth": ground_truth,
-                            "ref_chunks": [
-                                int(chunk) for chunk in reference_chunks
-                            ],
+                            "ref_chunks": [int(chunk) for chunk in reference_chunks],
                         },
                         ensure_ascii=False,
                     ),
@@ -276,8 +272,7 @@ def build_config(*, steps: int, seed: int = SEED) -> TrainConfig:
         global_batch_size=GROUPS_PER_BATCH * GROUP_SIZE,
         over_sampling_batch_size=source_groups_per_batch,
         dynamic_sampling_filter_path=(
-            "miles.rollout.filter_hub.dynamic_sampling_filters."
-            "check_reward_nonzero_std"
+            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
         ),
         balance_data=True,
         custom_rm_function=longrlvr_reward,
@@ -345,9 +340,7 @@ def build_config(*, steps: int, seed: int = SEED) -> TrainConfig:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Run 64K LongRLVR with Miles."
-    )
+    parser = argparse.ArgumentParser(description="Run 64K LongRLVR with Miles.")
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--dry-run", action="store_true")

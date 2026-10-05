@@ -315,7 +315,9 @@ class DistributedExecutor:
                 or self.checkpoint_persistence_group is None
                 or self.sampler_persistence_group is None
             ):
-                raise RuntimeError("run_follower_loop requires distributed command groups")
+                raise RuntimeError(
+                    "run_follower_loop requires distributed command groups"
+                )
             checkpoint_persistence = threading.Thread(
                 target=self.run_follower_loop,
                 args=(self.checkpoint_persistence_group,),

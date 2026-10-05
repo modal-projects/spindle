@@ -77,7 +77,9 @@ class PinOwner:
                 self.failure = exc
                 log.exception("Pinned sampler owner failed")
 
-        self.thread = threading.Thread(target=run, name="spindle-pinned-apps", daemon=True)
+        self.thread = threading.Thread(
+            target=run, name="spindle-pinned-apps", daemon=True
+        )
         self.thread.start()
 
     def close(self):

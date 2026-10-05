@@ -174,7 +174,9 @@ def _start_worker(topology: ClusterTopology, *, attempts: int = 30) -> None:
     for attempt in range(1, attempts + 1):
         result = subprocess.run(command, env=dict(os.environ), check=False)
         if result.returncode == 0:
-            print(f"[spindle-cluster] rank {topology.rank} joined {topology.ray_address}")
+            print(
+                f"[spindle-cluster] rank {topology.rank} joined {topology.ray_address}"
+            )
             return
         print(
             f"[spindle-cluster] rank {topology.rank} join attempt {attempt} failed; "

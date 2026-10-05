@@ -138,7 +138,9 @@ def config_path(name: str) -> Path:
     """Locate an installed example config without maintaining a model catalog."""
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
         raise ValueError("invalid config name")
-    return Path(str(files("spindle").joinpath("configs", name.replace("-", "_") + ".py")))
+    return Path(
+        str(files("spindle").joinpath("configs", name.replace("-", "_") + ".py"))
+    )
 
 
 def load(path: str | Path) -> BaseConfig:

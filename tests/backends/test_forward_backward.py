@@ -179,7 +179,14 @@ def test_full_parameter_microbatches_do_not_include_adapter_routing() -> None:
             # sampling prob 1.0 each; ratios 0.5, 1.5, 1.05, 0.95, 0.5, 1.5
             # blocked: A>0 & ratio>1 & tv>0.1 (1.5, A=1); A<0 & ratio<1 & tv>0.1 (0.5, A=-1)
             "dppo",
-            [math.log(0.5), math.log(1.5), math.log(1.05), math.log(0.95), math.log(0.5), math.log(1.5)],
+            [
+                math.log(0.5),
+                math.log(1.5),
+                math.log(1.05),
+                math.log(0.95),
+                math.log(0.5),
+                math.log(1.5),
+            ],
             [1.0, 1.0, 1.0, -1.0, -1.0, -1.0],
             {"tv_threshold": 0.1},
             -(0.5 + 0.0 + 1.05 - 0.95 - 0.0 - 1.5),

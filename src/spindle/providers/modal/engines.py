@@ -59,9 +59,7 @@ class ModalEnginePlatform:
         self.kv = kv
         self.spawn = spawn
         self._records: dict[str, EngineInstanceRecord] = {}
-        self._clients: dict[
-            str, tuple[tuple[str, str | None], HttpEngineClient]
-        ] = {}
+        self._clients: dict[str, tuple[tuple[str, str | None], HttpEngineClient]] = {}
         self._call_ids: dict[str, str] = {}
 
     async def ensure_instance(
@@ -225,4 +223,3 @@ class ModalEnginePlatform:
             cached = (endpoint, HttpEngineClient(record.url, token=record.token))
             self._clients[instance_id] = cached
         return cached[1]
-

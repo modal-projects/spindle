@@ -152,7 +152,10 @@ def test_batch_links_all_commands_and_error_omits_payload(setup):
                 "spindle.packed_microbatch_count": 2,
                 "secret": "PRIVATE",
             },
-            "models": {"a": {"spindle.loss_tokens": 2}, "b": {"spindle.loss_tokens": 5}},
+            "models": {
+                "a": {"spindle.loss_tokens": 2},
+                "b": {"spindle.loss_tokens": 5},
+            },
         }
     )
     telemetry.span(
@@ -183,7 +186,7 @@ def test_batch_links_all_commands_and_error_omits_payload(setup):
     assert all("spindle.padded_tokens" not in s.attributes for s in roots)
     assert backend.received.get() is None
     assert sorted(s.attributes["spindle.input_tokens"] for s in roots) == [3, 8]
-    assert {l.context.span_id for l in batch.links} == {
+    assert {link.context.span_id for link in batch.links} == {
         s.context.span_id for s in roots
     }
     assert all("PRIVATE" not in str(s.attributes) and not s.events for s in spans)
@@ -256,7 +259,9 @@ def test_unload_ends_buffered_command_without_retaining_span(setup):
 
     asyncio.run(run())
     (command,) = [
-        s for s in exporter.get_finished_spans() if s.name == "spindle.command.optim_step"
+        s
+        for s in exporter.get_finished_spans()
+        if s.name == "spindle.command.optim_step"
     ]
     assert command.status.status_code.name == "ERROR"
 
@@ -447,7 +452,8 @@ def test_only_scoped_metrics_promote_the_deployment_run_resource(monkeypatch):
                 )
                 assert "spindle.run_attempt_id" not in point.attributes
                 assert (
-                    point.attributes["spindle.trainer_instance_id"] == "physical-instance"
+                    point.attributes["spindle.trainer_instance_id"]
+                    == "physical-instance"
                 )
         finally:
             telemetry.close()

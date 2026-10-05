@@ -511,7 +511,9 @@ def test_checkpoint_topology_rejects_legacy_data_parallel_size_for_dp2(
         dp2._validate_checkpoint(metadata, dp2.jobs["model-a"], False)
 
 
-def test_sampler_capture_publishes_existing_spindle_format(tmp_path, monkeypatch) -> None:
+def test_sampler_capture_publishes_existing_spindle_format(
+    tmp_path, monkeypatch
+) -> None:
     runtime = FakeMilesRuntime()
     backend = _backend(tmp_path, runtime)
     bulletin_root = tmp_path / "bulletin"

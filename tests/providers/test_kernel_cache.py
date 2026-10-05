@@ -16,7 +16,9 @@ from spindle.providers.modal.kernel_cache import (
 
 
 def test_kernel_cache_creates_one_v2_volume_without_live_lookup() -> None:
-    module_path = Path(__file__).parents[2] / "src/spindle/providers/modal/kernel_cache.py"
+    module_path = (
+        Path(__file__).parents[2] / "src/spindle/providers/modal/kernel_cache.py"
+    )
     with patch.object(
         modal.Volume,
         "from_name",

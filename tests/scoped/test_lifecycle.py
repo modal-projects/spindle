@@ -135,7 +135,6 @@ def test_shared_publication_keeps_existing_pool(monkeypatch):
 
 
 def test_latest_minimum_updates_by_id_without_name_lookup(monkeypatch):
-    import asyncio
     from modal.client import _Client
     from spindle.providers.modal.scoped_pool import set_minimum
 
