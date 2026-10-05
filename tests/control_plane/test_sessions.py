@@ -64,9 +64,7 @@ def test_sweep_closes_idle_sessions_only() -> None:
         await plane.create_session()
 
         now = 150.0
-        assert await plane.sweep_idle_sessions(idle_timeout=60.0) == (
-            "session-idle",
-        )
+        assert await plane.sweep_idle_sessions(idle_timeout=60.0) == ("session-idle",)
         with pytest.raises(RecordNotFound):
             await plane.heartbeat("session-idle")
         assert await plane.kv.list_keys("session:") == ("session:session-live",)

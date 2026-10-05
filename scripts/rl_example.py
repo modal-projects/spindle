@@ -43,8 +43,7 @@ def main() -> None:
         loss_fn_inputs={
             "target_tokens": [0] * prompt_targets + response_tokens,
             "logprobs": [0.0] * prompt_targets + response_logprobs,
-            "advantages": [0.0] * prompt_targets
-            + [reward] * len(response_tokens),
+            "advantages": [0.0] * prompt_targets + [reward] * len(response_tokens),
         },
     )
     forward = training.forward_backward([datum], "importance_sampling")

@@ -224,8 +224,7 @@ async def reconcile_trainers(
             records = [
                 instance
                 for instance in await engines.list_instances()
-                if instance.definition_id == definition_id
-                and not instance.terminal
+                if instance.definition_id == definition_id and not instance.terminal
             ]
         available = (
             missing

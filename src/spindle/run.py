@@ -93,7 +93,10 @@ def run(
             from dataclasses import replace
             from functools import partial
 
-            from spindle.providers.modal.scoped_pin_owner import PinOwner, open_pinned_app
+            from spindle.providers.modal.scoped_pin_owner import (
+                PinOwner,
+                open_pinned_app,
+            )
 
             sampler_engine = replace(
                 engine,

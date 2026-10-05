@@ -145,7 +145,7 @@ response = (
 answer_tokens = list(response.tokens)
 logprobs = list(response.logprobs or [])
 assert answer_tokens and len(logprobs) == len(answer_tokens)
-answer = tokenizer.decode(answer_tokens).strip()
+answer = tokenizer.decode(answer_tokens, skip_special_tokens=True).strip()
 reward = 1.0 if answer == "4" else -1.0
 
 prompt_targets = len(prompt_tokens) - 1
@@ -175,7 +175,7 @@ updated = (
     .result(timeout=3600)
     .sequences[0]
 )
-print("After update:", tokenizer.decode(updated.tokens))
+print("After update:", tokenizer.decode(updated.tokens, skip_special_tokens=True))
 ```
 
 ## Full-parameter training
@@ -311,3 +311,11 @@ for end-to-end training runs we've done with both parameterizations. The [Codefo
 with GRPO or TailRL advantages for correctness and short solutions. It includes
 a sandboxed judge, checkpoint recovery, and commands to continue a checkpoint
 with a different reward or advantage estimator, as well as pass@k and best-of-k evaluation. 
+
+## Development
+
+Install git hooks:
+
+```bash
+uvx pre-commit install
+```

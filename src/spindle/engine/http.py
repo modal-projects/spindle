@@ -189,7 +189,9 @@ class HttpEngineClient:
             if canonical:
                 context = extract({"traceparent": canonical})
                 try:
-                    raw = json.loads(response.headers.get("x-spindle-command-tags", "{}"))
+                    raw = json.loads(
+                        response.headers.get("x-spindle-command-tags", "{}")
+                    )
                     tags = {
                         k: v
                         for k, v in raw.items()

@@ -199,7 +199,9 @@ def test_http_protobuf_export_uses_configured_endpoint_and_header(monkeypatch):
         path, auth, body = received[0]
         assert (path, auth) == ("/v1/traces", "local-test")
         decoded = ExportTraceServiceRequest.FromString(body)
-        assert decoded.resource_spans[0].scope_spans[0].spans[0].name == "spindle.sample"
+        assert (
+            decoded.resource_spans[0].scope_spans[0].spans[0].name == "spindle.sample"
+        )
     finally:
         otlp.provider().shutdown()
         otlp.provider.cache_clear()

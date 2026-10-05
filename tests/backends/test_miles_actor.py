@@ -171,9 +171,9 @@ def _load_actor(monkeypatch):
     sys.modules["miles.backends.megatron_utils"].model = megatron_model
 
     # Replay hook behavior is covered separately with its Miles interfaces.
-    _module(monkeypatch, "spindle.backends.miles_runtime.replay").install_replay_hooks = (
-        lambda **kwargs: None
-    )
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.replay"
+    ).install_replay_hooks = lambda **kwargs: None
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(

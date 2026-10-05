@@ -359,7 +359,6 @@ def trainer_autoscaling(definition_id: str) -> bool:
 
 @app.function(
     image=image,
-    env=TRAINER_DEPLOYMENT_ENV,
     max_containers=1,
     timeout=20 * 60,
     retries=3,
@@ -539,7 +538,6 @@ def _plane():
 
 @app.function(
     image=image,
-    env=TRAINER_DEPLOYMENT_ENV,
     name="server",
     routing_region=ROUTING_REGION,
     timeout=20 * 60,
@@ -645,7 +643,7 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
     return tuple(stopped)
 
 
-@app.function(image=image, env=TRAINER_DEPLOYMENT_ENV, schedule=SWEEP_PERIOD)
+@app.function(image=image, schedule=SWEEP_PERIOD)
 def cleaner():
     async def run() -> None:
         plane = _plane()

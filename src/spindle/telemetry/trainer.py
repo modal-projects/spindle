@@ -106,7 +106,10 @@ class CommandMiddleware:
         if p is None:
             return await self.app(scope, receive, send)
         now = time.time()
-        carrier = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope.get("headers", [])}
+        carrier = {
+            k.decode("latin-1"): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
         if self.receiver:
             try:
                 started = float(carrier.get("x-spindle-command-start", now))
@@ -251,7 +254,9 @@ class TrainerTelemetry:
                     resource=resource,
                     metric_readers=[reader],
                 )
-                self.meter_provider.get_meter("spindle.trainer").create_observable_gauge(
+                self.meter_provider.get_meter(
+                    "spindle.trainer"
+                ).create_observable_gauge(
                     "spindle.trainer.state",
                     callbacks=[self.observe],
                     description="Sampled trainer operation activity, one-hot per lane",

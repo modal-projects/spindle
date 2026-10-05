@@ -10,11 +10,7 @@ def _part(value: str) -> str:
 def _model_part(value: str) -> str:
     if not value:
         raise ValueError("model_id must be non-empty")
-    return (
-        value
-        if ":" not in value
-        else hashlib.sha256(value.encode()).hexdigest()
-    )
+    return value if ":" not in value else hashlib.sha256(value.encode()).hexdigest()
 
 
 def session_key(session_id: str) -> str:

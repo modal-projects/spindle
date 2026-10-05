@@ -84,4 +84,5 @@ def test_owner_repairs_missing_route_after_cleanup_response_was_lost():
         await touch_pin(registry, "pin", now=1701)
         await pin_demand(registry, now=1702, routes={"pin": old})
         assert registry.values["pin"] == old
+
     asyncio.run(check())

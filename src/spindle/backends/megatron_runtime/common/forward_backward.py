@@ -409,8 +409,12 @@ def _loss(
         elif loss_name == "dppo":
             threshold = batch["loss_config"].get("tv_threshold", 0.1)
             ratio = probability_ratio.detach()
-            divergence = (ratio * sampling_logprobs.exp() - sampling_logprobs.exp()).abs()
-            leaving = ((advantages > 0) & (ratio > 1)) | ((advantages < 0) & (ratio < 1))
+            divergence = (
+                ratio * sampling_logprobs.exp() - sampling_logprobs.exp()
+            ).abs()
+            leaving = ((advantages > 0) & (ratio > 1)) | (
+                (advantages < 0) & (ratio < 1)
+            )
             blocked = leaving & (divergence > threshold)
             objective = probability_ratio * advantages * (~blocked).to(logprobs.dtype)
         elif loss_name == "ppo":

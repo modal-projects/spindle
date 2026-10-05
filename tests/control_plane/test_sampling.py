@@ -114,7 +114,9 @@ def test_session_collection_removes_task_store() -> None:
 
         assert session_id not in task_stores.stores
         assert await plane.kv.get(sampling_session_key(sampling_session_id)) is not None
-        assert await plane.kv.get(sampling_session_creation_key(session_id, 0)) is not None
+        assert (
+            await plane.kv.get(sampling_session_creation_key(session_id, 0)) is not None
+        )
         with pytest.raises(RecordNotFound):
             await plane.get_sampling_session(sampling_session_id)
         with pytest.raises(RecordNotFound):
@@ -131,8 +133,12 @@ def test_session_sweep_never_lists_sampling_metadata(session_task_stores) -> Non
     class LifecycleStore(InMemoryKeyValueStore):
         async def list_items(self, *prefixes):
             assert set(prefixes) <= {
-                "session:", "session_last_seen:", "session_closed:",
-                "model:", "model_creation:", "placement:",
+                "session:",
+                "session_last_seen:",
+                "session_closed:",
+                "model:",
+                "model_creation:",
+                "placement:",
             }
             return await super().list_items(*prefixes)
 

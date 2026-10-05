@@ -93,7 +93,6 @@ async def _run(
             f"to ~/.cache/harbor/tasks/{DATASET}"
         )
 
-    create_lora = tinker.ServiceClient.create_lora_training_client_async
     create_adam_params = tinker.AdamParams
     save_checkpoint = checkpoint_utils.save_checkpoint_async
 
@@ -216,9 +215,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(
-            "scripts/results/e2e_terminal_bench_qwen3_5_9b_full.json"
-        ),
+        default=Path("scripts/results/e2e_terminal_bench_qwen3_5_9b_full.json"),
     )
     parser.add_argument("--base-url", default=BASE_URL)
     parser.add_argument("--detach", action="store_true")
@@ -281,9 +278,7 @@ def main() -> None:
                 "group_size": GROUP_SIZE,
                 "groups_per_batch": GROUPS_PER_BATCH,
                 "rollout_workers": args.rollout_workers,
-                "max_concurrent_trajectories": (
-                    args.rollout_workers * GROUP_SIZE
-                ),
+                "max_concurrent_trajectories": (args.rollout_workers * GROUP_SIZE),
                 "max_steps_off_policy": MAX_STEPS_OFF_POLICY,
                 "steps": args.steps,
                 "metrics": metrics,

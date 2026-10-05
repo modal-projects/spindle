@@ -45,11 +45,17 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
     async def check():
         async with open_pinned_app(
             f"pinned:{model_id}:7",
-            engine=object(), name="test", image_id="im-test",
-            registry_name="registry", pool=object(), proxy_secret=None,
+            engine=object(),
+            name="test",
+            image_id="im-test",
+            registry_name="registry",
+            pool=object(),
+            proxy_secret=None,
         ) as route:
             assert route == {
-                "url": "https://sampler", "function_id": "fu-sampler", "app_id": "ap-child"
+                "url": "https://sampler",
+                "function_id": "fu-sampler",
+                "app_id": "ap-child",
             }
 
     asyncio.run(check())

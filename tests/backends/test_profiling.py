@@ -173,7 +173,9 @@ def test_backend_starts_and_stops_torch_profile(tmp_path, monkeypatch) -> None:
         def stop(self, output_dir, name):
             return {"trace": f"{output_dir}/{name}.trace.json.gz"}
 
-    monkeypatch.setattr("spindle.backends.miles_lora.RankProfiler", FakeControllerProfiler)
+    monkeypatch.setattr(
+        "spindle.backends.miles_lora.RankProfiler", FakeControllerProfiler
+    )
     runtime = FakeMilesRuntime()
     backend = _backend(tmp_path, runtime)
     backend.accept_model("model-a", _spec())
@@ -221,7 +223,9 @@ def test_backend_stops_torch_profile_after_publish(tmp_path, monkeypatch) -> Non
         def stop(self, output_dir, name):
             return {"trace": f"{output_dir}/{name}.trace.json.gz"}
 
-    monkeypatch.setattr("spindle.backends.miles_lora.RankProfiler", FakeControllerProfiler)
+    monkeypatch.setattr(
+        "spindle.backends.miles_lora.RankProfiler", FakeControllerProfiler
+    )
     runtime = FakeMilesRuntime()
     backend = _backend(tmp_path, runtime)
     backend.accept_model("model-a", _spec())
