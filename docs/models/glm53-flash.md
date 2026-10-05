@@ -103,6 +103,8 @@ The sampler verifies the contents before loading a new version.
 The GLM image loads each worker's local experts into CPU memory before normalizing
 the adapter. Preparation runs on a background thread while the scheduler continues
 serving. All TP ranks must finish successfully before registration completes.
+Cached tensors own their CPU storage, so loading an adapter leaves no checkpoint
+file mappings open. This lets the sampler refresh its volume for later versions.
 GPU buffer placement still happens through SGLang's existing LoRA memory pool.
 The sampler keeps up to eight registered versions in CPU memory and four on GPU,
 with 512 GiB of host memory requested. The BF16 test below measures the full-model
@@ -114,7 +116,8 @@ Run the installed-loader checks and TP2/EP2 serving measurement with:
 PYTHONPATH=src modal run --detach tests/manual/validate_glm53_loading.py
 ```
 
-This checks expert ownership, failed and cancelled preparation, and TP readiness.
+This checks expert ownership, refreshing the volume with a cached adapter, failed
+and cancelled preparation, and TP readiness. Use `--cpu-only` to skip serving.
 The serving measurement loads a second adapter while an existing adapter generates
 128 tokens, recording registration time and streaming progress during the load.
 
@@ -155,8 +158,8 @@ uses up to four preparation GPUs. The BF16 checkpoint occupies 642.65 GB. Conver
 only needs to run once for the cached source checkpoint.
 
 The integration test starts an eight-GPU BF16 sampler (H200, with B200 as a
-capacity fallback) and checks the previously exported full adapter before
-allocating the four training nodes. It runs two
+capacity fallback) and checks the previously exported full adapter, including a
+volume refresh while it remains loaded, before allocating the four training nodes. It runs two
 updates with one active rank-32 adapter, two math problems per update, four
 responses per problem, and a 1,024-token generation cap. Context capacity remains
 16K. Rewards combine exact boxed-answer correctness with a small length penalty;
@@ -169,6 +172,7 @@ and a changed fixed-prompt logprob after each update. The SDK frontend and
 EngineServer scheduling are outside this test. Reports and sampled responses are
 saved in `spindle-glm53-pr26-rl-checkpoints`.
 
+CUDA graphs are disabled for this functional test.
 The BF16 test limits checkpoint loading to two threads per worker to bound CPU
 staging memory. SGLang's default eight-thread loader temporarily retained roughly
 1 TB across the eight workers during the first full-model load. This is separate

@@ -4,14 +4,17 @@ Run prepare_glm53_bf16.py first, then:
 PYTHONPATH=src modal run --detach tests/manual/validate_glm53_rl.py
 This bypasses the SDK frontend. It exercises real generation, rewards, the Miles
 command backend, adapter publication, and loading the updated policy for sampling.
+Use --publication-visibility for a CPU-only writer/reader check with mocked serving.
 """
 
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -59,7 +62,6 @@ volumes = {
     timeout=3600,
     scaledown_window=1800,
     max_containers=1,
-    region="us",
     env=cache_env,
     volumes=volumes,
 )
@@ -123,6 +125,9 @@ class Sampler:
             registration_s = time.monotonic() - started
             try:
                 started = time.monotonic()
+                assets.reload()
+                refresh_s = time.monotonic() - started
+                started = time.monotonic()
                 response = client.post(
                     "/generate",
                     json={
@@ -134,6 +139,7 @@ class Sampler:
                 response.raise_for_status()
                 return {
                     "registration_s": registration_s,
+                    "refresh_while_loaded_s": refresh_s,
                     "generation_s": time.monotonic() - started,
                     "sample": response.json(),
                 }
@@ -209,8 +215,16 @@ def check_sampler(sampler_settings: str):
     return Sampler(settings_json=sampler_settings).ready.remote()
 
 
-@app.function(image=inference_image, cpu=4, memory=16384, timeout=600, volumes=volumes)
-def check_publication(run_id: str):
+@app.function(
+    image=inference_image,
+    cpu=4,
+    memory=16384,
+    timeout=600,
+    volumes=volumes,
+    max_containers=1,
+    scaledown_window=600,
+)
+def check_publication(run_id: str, prime: bool = False):
     def upstream(request):
         return httpx.Response(200, json={"meta_info": {}})
 
@@ -218,6 +232,9 @@ def check_publication(run_id: str):
         "/bulletin", refresh=modal.Volume.from_name(BULLETIN_VOLUME, version=2).reload
     )
     ref = VersionRef(run_id, 1)
+    if prime:
+        assert not reader.snapshot_dir(ref).exists()
+        return os.environ["MODAL_TASK_ID"]
     print(
         "SNAPSHOT", str(reader.snapshot_dir(ref)), "volume", BULLETIN_VOLUME, flush=True
     )
@@ -234,11 +251,40 @@ def check_publication(run_id: str):
         )
         print("PUBLICATION RESPONSE", response.status_code, response.text, flush=True)
         response.raise_for_status()
-    return "Cross-container snapshot resolution passed"
+    return os.environ["MODAL_TASK_ID"]
+
+
+@app.function(image=trainer_image, cpu=2, timeout=120, volumes=volumes)
+def publication_probe(run_id: str, remove: bool = False):
+    assert run_id.startswith("visibility-") and "/" not in run_id
+    root = Path("/bulletin")
+    if remove:
+        shutil.rmtree(root / run_id)
+        bulletin.commit()
+        return
+    stage = root / ".captures" / run_id
+    stage.mkdir(parents=True)
+    (stage / "adapter_config.json").write_text("{}")
+    (stage / "adapter_model.safetensors").write_bytes(b"visibility probe")
+    SnapshotBulletin(root, commit=bulletin.commit).publish(
+        VersionRef(run_id, 1), stage, consume=True
+    )
 
 
 @app.local_entrypoint()
-def main(publication_only: str = ""):
+def main(publication_only: str = "", publication_visibility: bool = False):
+    if publication_visibility:
+        run_id = "visibility-" + uuid.uuid4().hex
+        reader = check_publication.remote(run_id, prime=True)
+        publication_probe.remote(run_id)
+        try:
+            assert (
+                check_publication.remote(run_id) == reader
+            ), "Reader must stay warm across publication"
+            print("PASS warm reader saw the newly committed snapshot after refresh")
+        finally:
+            publication_probe.remote(run_id, remove=True)
+        return
     if publication_only:
         print(check_publication.remote(publication_only))
         return

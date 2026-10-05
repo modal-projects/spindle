@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import modal
 import torch
 from safetensors.torch import save_file
 from sglang.srt.configs.load_config import LoadConfig
@@ -43,14 +44,21 @@ def main():
         ] = torch.ones(shape)
     full = LoRAAdapter("full", config, hf, LoadConfig(), None)
     full.initialize_weights_from_tensors(weights)
-    with tempfile.TemporaryDirectory() as root:
+    volume = modal.Volume.from_name("spindle-glm53-pr26-rl-bulletin", version=2)
+    with tempfile.TemporaryDirectory(dir="/validation") as root:
         save_file(weights, str(Path(root) / "adapter_model.safetensors"))
+        volume.commit()
         config.path = root
         for start in range(0, 8, 2):
             local = LoRAAdapter(
                 "local", config, hf, LoadConfig(), None, expert_range=(start, start + 2)
             )
             local.initialize_weights()
+            assert (
+                str(Path(root) / "adapter_model.safetensors")
+                not in Path("/proc/self/maps").read_text()
+            ), "CPU adapter cache retained a file mapping"
+            volume.reload()
             expected = {
                 k: v for k, v in full.layers[0].weights.items() if local._owns_expert(k)
             }
@@ -62,6 +70,11 @@ def main():
             assert sum(t.numel() for t in local.layers[0].weights.values()) < sum(
                 t.numel() for t in full.layers[0].weights.values()
             )
+    volume.commit()
+    print(
+        "PASS: cached adapters release file mappings and allow volume refresh",
+        flush=True,
+    )
     print(
         "PASS: all EP partitions preserve owned and shared weights exactly", flush=True
     )

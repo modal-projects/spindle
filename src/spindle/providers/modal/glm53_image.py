@@ -104,6 +104,13 @@ inference_image = (
     modal.Image.from_registry(INFERENCE_BASE_IMAGE)
     .entrypoint([])
     .apt_install("git")
+    .pip_install(
+        *CORE_PACKAGES,
+        STITCH_PACKAGE,
+        TINKER_PACKAGE,
+        "opentelemetry-exporter-otlp==1.43.0",
+        "opentelemetry-exporter-prometheus==0.64b0",
+    )
     .run_commands(
         "cd /sgl-workspace/sglang && git apply --check - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
@@ -115,13 +122,6 @@ inference_image = (
         + SGLANG_GLM_LORA_DIMENSIONS_PATCH
         + SGLANG_GLM_LORA_LOADING_PATCH
         + "PATCH\n",
-    )
-    .pip_install(
-        *CORE_PACKAGES,
-        STITCH_PACKAGE,
-        TINKER_PACKAGE,
-        "opentelemetry-exporter-otlp==1.43.0",
-        "opentelemetry-exporter-prometheus==0.64b0",
     )
     .env(
         {

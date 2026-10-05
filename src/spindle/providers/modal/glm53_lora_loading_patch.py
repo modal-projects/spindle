@@ -31,7 +31,7 @@ SGLANG_GLM_LORA_LOADING_PATCH = (
     "         self.uid: str = uid\n"
     "         self.config: LoRAConfig = config\n"
     '         assert self.config.hf_config["peft_type"].lower() == "lora"\n'
-    "@@ -142,6 +147,14 @@\n"
+    "@@ -142,6 +147,16 @@\n"
     " \n"
     "     def initialize_weights(self):\n"
     "         model_path = self.config.path\n"
@@ -40,13 +40,15 @@ SGLANG_GLM_LORA_LOADING_PATCH = (
     '+            with safe_open(local_file, framework="pt", device="cpu") as weights:\n'
     "+                for name in weights.keys():\n"
     "+                    if self._owns_expert(name):\n"
-    "+                        self._process_weight(name, weights.get_tensor(name))\n"
+    "+                        # Cached tensors must not retain the volume mmap.\n"
+    "+                        # Later publications need to refresh this mount.\n"
+    "+                        self._process_weight(name, weights.get_tensor(name).clone())\n"
     "+            self._normalize_weights()\n"
     "+            return\n"
     "         loader = DefaultModelLoader(self.load_config)\n"
     '         revision = getattr(self.config.hf_config, "revision", None)\n'
     " \n"
-    "@@ -161,9 +174,15 @@\n"
+    "@@ -161,9 +176,15 @@\n"
     " \n"
     "         self._normalize_weights()\n"
     " \n"

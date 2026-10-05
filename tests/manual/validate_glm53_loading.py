@@ -22,7 +22,15 @@ app = modal.App("spindle-glm53-loading-validation")
 artifacts = modal.Volume.from_name("spindle-glm53-pr26-validation")
 
 
-@app.function(image=inference_image, cpu=4, memory=16384, timeout=600)
+@app.function(
+    image=inference_image,
+    cpu=4,
+    memory=16384,
+    timeout=600,
+    volumes={
+        "/validation": modal.Volume.from_name("spindle-glm53-pr26-rl-bulletin", version=2)
+    },
+)
 def checks(program: str):
     path = Path("/tmp/glm53-loading-checks.py")
     path.write_text(program)
@@ -46,11 +54,13 @@ def serving(program: str, settings: dict):
 
 
 @app.local_entrypoint()
-def main():
+def main(cpu_only: bool = False):
     root = Path(__file__).parent
     call = checks.spawn((root / "glm53_loading_checks.py").read_text())
     print("CPU loading checks", call.object_id, flush=True)
     call.get()
+    if cpu_only:
+        return
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     program = (root / "glm53_sampling.py").read_text()
     settings = {
