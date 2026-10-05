@@ -69,5 +69,6 @@ image = (
 
 
 @app.function(image=image, schedule=modal.Period(minutes=10), timeout=300)
-def reap_expired():
-    print(asyncio.run(stop_apps(environment)))
+async def reap_expired():
+    # Keep Modal's task context and client on the function's event loop.
+    print(await asyncio.wait_for(stop_apps(environment), timeout=60))
