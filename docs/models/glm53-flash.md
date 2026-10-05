@@ -1,7 +1,7 @@
 # GLM-5.3 Flash LoRA (experimental)
 
 This recipe connects `zai-org/GLM-5.3-Flash` to Spindle's Miles trainer and shared
-SGLang sampling pool. It supports text inputs with a 16,384-token context, including
+SGLang sampling pool. It configures text inputs with a 16,384-token context, including
 the prompt and generated response.
 
 ```bash
@@ -55,4 +55,7 @@ weights. Add `--sample` to load the exported adapter in a normal SGLang server
 and compare its logprobs with training. The weights are cached in the
 `spindle-glm53-pr26-validation` volume. Running `--sample` alone reuses the latest
 export without retraining.
-These checks do not load the full checkpoint or demonstrate training convergence.
+The four-layer test passed two updates, checkpoint restore, adapter export and
+eight-token generation through SGLang. The mean trainer/sampler logprob difference
+was 0.049 over 32 scored tokens. Full-model startup, multi-node execution, FP8
+serving and 16K memory use remain unvalidated.
