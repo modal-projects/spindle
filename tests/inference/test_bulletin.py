@@ -100,3 +100,35 @@ def test_refresh_retries_transient_open_files(tmp_path):
 
     asyncio.run(SnapshotBulletin(tmp_path, refresh=refresh).refresh())
     assert attempts == 3
+
+
+def test_consumed_publication_renames_without_copy_and_retries_commit(
+    tmp_path, monkeypatch
+):
+    attempts = []
+
+    def commit():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("commit interrupted")
+
+    def unexpected_copy(*args, **kwargs):
+        pytest.fail("Consumed publication copied adapter bytes")
+
+    monkeypatch.setattr("spindle.inference.bulletin.shutil.copy2", unexpected_copy)
+    board = SnapshotBulletin(tmp_path / "bulletin", commit=commit)
+    source = export(tmp_path, "staged", b"adapter")
+    inode = (source / "adapter_model.safetensors").stat().st_ino
+    ref = VersionRef("run-a", 1)
+    with pytest.raises(RuntimeError, match="commit interrupted"):
+        board.publish(ref, source, consume=True)
+    assert not source.exists()
+    assert (
+        board.resolve(ref).joinpath("adapter_model.safetensors").stat().st_ino == inode
+    )
+    assert not board.publish(ref, source, consume=True)
+    assert len(attempts) == 2
+    conflicting = export(tmp_path, "conflicting", b"different")
+    with pytest.raises(ImmutableSnapshotError):
+        board.publish(ref, conflicting, consume=True)
+    assert conflicting.exists()

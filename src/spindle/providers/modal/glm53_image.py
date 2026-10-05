@@ -2,6 +2,7 @@
 
 import modal
 
+from .glm53_lora_loading_patch import SGLANG_GLM_LORA_LOADING_PATCH
 from .image_dependencies import (
     CORE_PACKAGES,
     MEGATRON_RUNTIME_PACKAGES,
@@ -107,10 +108,12 @@ inference_image = (
         "cd /sgl-workspace/sglang && git apply --check - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
         + SGLANG_GLM_LORA_DIMENSIONS_PATCH
+        + SGLANG_GLM_LORA_LOADING_PATCH
         + "PATCH\n",
         "cd /sgl-workspace/sglang && git apply - <<'PATCH'\n"
         + SGLANG_REGISTRY_PATCH
         + SGLANG_GLM_LORA_DIMENSIONS_PATCH
+        + SGLANG_GLM_LORA_LOADING_PATCH
         + "PATCH\n",
     )
     .pip_install(
@@ -120,6 +123,12 @@ inference_image = (
         "opentelemetry-exporter-otlp==1.43.0",
         "opentelemetry-exporter-prometheus==0.64b0",
     )
-    .env({"HF_XET_HIGH_PERFORMANCE": "1", "SGLANG_DISABLE_CUDNN_CHECK": "1"})
+    .env(
+        {
+            "HF_XET_HIGH_PERFORMANCE": "1",
+            "SGLANG_DISABLE_CUDNN_CHECK": "1",
+            "SPINDLE_GLM_ASYNC_LORA_LOADING": "1",
+        }
+    )
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )

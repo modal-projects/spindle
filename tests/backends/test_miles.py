@@ -520,11 +520,16 @@ def test_sampler_capture_publishes_existing_spindle_format(tmp_path, monkeypatch
     backend.accept_model("model-a", _spec())
 
     publication = backend.capture_sampler_snapshot("model-a", "capture-a", 7)
+    staged = backend._sampler_captures["capture-a"]["path"]
+    assert staged.parent == bulletin_root / ".captures"
+    inode = (staged / "adapter_model.safetensors").stat().st_ino
     backend.publish_sampler_snapshot("capture-a")
 
     assert publication.publish_version == 7
     resolved = SnapshotBulletin(bulletin_root).resolve(VersionRef("model-a", 7))
     assert (resolved / "adapter_model.safetensors").read_bytes() == b"adapter"
+    assert (resolved / "adapter_model.safetensors").stat().st_ino == inode
+    assert not staged.exists()
     assert "capture-a" not in backend._sampler_captures
 
 

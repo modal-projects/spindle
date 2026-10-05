@@ -439,9 +439,17 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         _sync_checkpoint_volume("commit")
         return result
 
-    def export_slot(self, *args, **kwargs):
-        result = super().export_slot(*args, **kwargs)
-        _sync_checkpoint_volume("commit")
+    def export_slot(
+        self,
+        slot: int,
+        rank: int,
+        alpha: float,
+        path: str,
+        metadata: dict | None = None,
+    ):
+        result = super().export_slot(slot, rank, alpha, path, metadata)
+        if _checkpoint_volume_path(Path(path)) is not None:
+            _sync_checkpoint_volume("commit")
         return result
 
     def _profiled(self, operation: str, *args, **kwargs):

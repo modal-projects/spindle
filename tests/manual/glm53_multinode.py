@@ -70,7 +70,7 @@ def prepare():
     cpu=32,
     memory=262144,
     timeout=7200,
-    region="us-west",
+    region="us",
     experimental_options={"efa_enabled": True},
     env={
         **KERNEL_CACHE_ENV,

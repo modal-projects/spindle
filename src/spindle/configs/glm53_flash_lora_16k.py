@@ -90,7 +90,7 @@ class Config(BaseConfig):
     inference_gpu = "H200"
     inference_gpus_per_node = 8
     inference_cpu = 32
-    inference_memory_mib = 262144
+    inference_memory_mib = 524288
     inference_target_concurrency = 16
     inference_max_replicas = 1
     inference_startup_timeout_s = 3600
@@ -108,7 +108,7 @@ class Config(BaseConfig):
         "mem_fraction_static": 0.8,
         "max_running_requests": 32,
         "max_queued_requests": 32,
-        "max_loaded_loras": 32,
+        "max_loaded_loras": 8,
         "max_loras_per_batch": 4,
         "chunked_prefill_size": 4096,
         "disable_prefill_cuda_graph": True,
