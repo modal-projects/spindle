@@ -64,6 +64,7 @@ def prepare(output, mode, environment, reference=None, record_reference=False):
         expected=expected,
         dataset_sha256=plan["dataset_sha256"],
         stagger_seconds=plan["stagger_seconds"],
+        region=Config().platform["modal"]["region"],
         deployment={
             k: v for k, v in vars(Config()).items() if k not in ("name", "platform")
         },
