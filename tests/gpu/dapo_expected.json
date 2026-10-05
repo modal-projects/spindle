@@ -1,0 +1,12 @@
+{
+  "clients": 8,
+  "trainer_gpus": 8,
+  "inference_replicas": 8,
+  "inference_gpus_per_replica": 2,
+  "groups_per_update": 8,
+  "samples_per_group": 8,
+  "correctness_updates": 3,
+  "performance_updates": 30,
+  "performance_stagger_seconds": 150,
+  "max_policy_lag": 1
+}

@@ -1,6 +1,12 @@
 # Observability
 
-For Tinker-SDK level metrics logging, the easiest solution is to use a library like Wandb -- we have an example of this in `scripts/wandb_rl_example.py`
+The shared [RL example](../scripts/rl_example.py) can log reward, response length,
+training metrics, and step timing to W&B from the client:
+
+```bash
+uv run --with wandb scripts/rl_example.py --parameterization lora \
+  --wandb-project spindle-examples
+```
 
 
 Spindle also comes with much more fine-grained tracking for each subsystem, ie. how long training commands, checkpoint writes, and sampling requests
