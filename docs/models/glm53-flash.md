@@ -184,3 +184,58 @@ and generated tokens successfully. Each TP8/EP8 worker retained 1,983,807,488 by
 (1.98 GB) of adapter tensors on CPU. This counts tensor storage, excluding Python
 objects and temporary loading buffers. Registration used a cold adapter; it
 does not measure repeated GPU cache swaps or loading during an active decode.
+
+The two-update BF16 loop completed on October 6. Both newly published adapters
+loaded into the same running sampler and generated successfully. Forward/backward
+took 102.3 s on the first update, including compilation, and 4.29 s on the second.
+Mean trainer–sampler logprob differences were 0.0137 and 0.0194 over generated
+tokens, with maxima 0.659 and 1.408. This was a short functional test on easy math
+questions; it does not establish learning on DAPO Math.
+
+## Four-client DAPO Math experiment
+
+```bash
+PYTHONPATH=src modal run --detach scripts/run_glm53_dapo.py
+```
+
+This runs four independent rank-32 LoRA clients on the same four training nodes
+and one eight-GPU BF16 sampler. Each of 30 rounds collects 32 useful groups of
+8 responses **per client**, mixes their inference requests, and submits all four
+clients in one packed forward/backward call. Each adapter has its own optimizer
+state and publication namespace. The sampler allows 128 concurrent requests.
+
+The run uses the pinned `zhuzilin/dapo-math-17k` dataset, GLM's native reasoning
+chat template, 16K context capacity, and an 8K generation limit. Miles' DAPO
+integer-answer grader gives +1 for a correct answer and −1 otherwise. Constant-
+reward groups are replaced; each client can sample up to 256 candidate groups
+per round before stopping with a diagnostic. Truncated responses have zero loss
+weight. Advantages use group sample-standard-deviation normalization, and the PPO
+objective averages over each client's non-truncated response tokens. Ratio bounds
+are 0.8 and 1.28, learning rate is 1e-5, and gradient clipping is 1.0. There is one
+optimizer update per round and no reference-policy KL term. This is GRPO/PPO on
+the DAPO Math task, without the paper's soft overlength penalty.
+
+Raw rollout accuracy, selected-batch accuracy, truncation, generation length,
+logprob differences, and phase timings are recorded separately for each client.
+A fixed 64-prompt held-out set is excluded from training, including duplicate
+prompt texts. The shared base is evaluated before allocating the trainers; each
+adapter is evaluated every five rounds with the same prompts and sampling seeds.
+The clients use different training prompt orders and rollout seeds.
+
+Reports, compressed responses, and optimizer checkpoints are stored in the
+`spindle-glm53-dapo` volume under the printed run ID. Checkpoints are saved after
+round 1, every five rounds, and at completion. To resume all four clients:
+
+```bash
+PYTHONPATH=src modal run --detach scripts/run_glm53_dapo.py \
+  --resume /checkpoints/RUN_ID/resume-latest.json
+```
+
+The resume file includes all four optimizer checkpoints and dataset positions.
+A resumed attempt uses new publication namespaces. A run approaching the runtime
+limit saves a resume point and reports `paused`. Orchestration runs in a remote
+CPU function, so closing the launch terminal does not interrupt the loop.
+
+Use `--prepare-only` to check the dataset and tokenization without allocating GPUs.
+This experiment uses the Miles command backend directly, as does the short BF16
+test above.
