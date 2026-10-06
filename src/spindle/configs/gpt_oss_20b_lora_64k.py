@@ -33,9 +33,10 @@ class Config(BaseConfig):
             "qkv_format": "thd",
             "attention_backend": "fused",
             "moe_permute_fusion": False,
-            "recompute_granularity": "full",
-            "recompute_method": "uniform",
-            "recompute_num_layers": 1,
+            # Selective beats full uniform recompute by ~28% tok/s at TP8 (H100:8 replay of
+            # real F4 batches) with matching logprobs; peak memory rises from ~22 to ~59 GB.
+            "recompute_granularity": "selective",
+            "recompute_modules": ["core_attn", "moe_act", "layernorm"],
         },
     }
     trainer_env = {
