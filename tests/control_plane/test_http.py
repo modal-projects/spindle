@@ -6,6 +6,8 @@ import pytest
 import zstandard
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.control_plane import http as control_http
+from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
 from spindle.proto import tinker_public_pb2
 from spindle.providers.local import (
     InMemoryKeyValueStore,
@@ -537,5 +539,36 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
             )
             assert record.base_model == BASE_MODEL
             assert record.engine_definition_id == "isolated"
+
+    asyncio.run(run())
+
+
+def test_result_timing_counts_actual_response_bytes(monkeypatch):
+    result = {"logprobs": [-0.125] * 1000, "name": "数学", "id": 2**63 - 1}
+    marks = []
+
+    class Plane:
+        async def retrieve(self, request_id, timeout):
+            return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
+
+    monkeypatch.setattr(control_http, "request_timing_enabled", lambda: True)
+    monkeypatch.setattr(
+        control_http, "mark", lambda name, **fields: marks.append((name, fields))
+    )
+
+    async def run():
+        async with httpx.AsyncClient(
+            base_url="http://frontend",
+            transport=httpx.ASGITransport(
+                app=create_control_plane_app(Plane(), DEFINITIONS)
+            ),
+        ) as client:
+            response = await client.post(
+                "/api/v1/retrieve_future", json={"request_id": "a:1"}
+            )
+            assert response.status_code == 200
+            assert response.json() == result
+            end = next(fields for name, fields in marks if name == "cp.retrieve.end")
+            assert end["bytes"] == len(response.content)
 
     asyncio.run(run())

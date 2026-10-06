@@ -585,13 +585,18 @@ def create_control_plane_app(
             body.request_id,
             timeout=retrieve_window,
         )
+        response = (
+            JSONResponse(resolution.result)
+            if resolution.status == FutureResolutionStatus.COMPLETE
+            else None
+        )
         if sampled:
             fields: dict[str, object] = {"status": resolution.status.value}
             if (
                 request_timing_enabled()
                 and resolution.status == FutureResolutionStatus.COMPLETE
             ):
-                fields["bytes"] = len(json.dumps(resolution.result))
+                fields["bytes"] = len(response.body)
             mark("cp.retrieve.end", request_id=body.request_id, **fields)
         if resolution.status == FutureResolutionStatus.PENDING:
             return JSONResponse(
@@ -602,8 +607,8 @@ def create_control_plane_app(
                     "queue_state": "active",
                 },
             )
-        if resolution.status == FutureResolutionStatus.COMPLETE:
-            return JSONResponse(resolution.result)
+        if response is not None:
+            return response
         if resolution.status == FutureResolutionStatus.RETRYABLE:
             return JSONResponse(
                 status_code=410,

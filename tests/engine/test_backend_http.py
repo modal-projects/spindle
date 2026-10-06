@@ -8,7 +8,7 @@ import time
 import httpx
 import pytest
 
-from spindle.engine import Engine, FutureStatus
+from spindle.engine import Engine, FutureStatus, backend_http
 from spindle.engine.api import Command, OperationKind
 from spindle.engine.backend_http import HttpBackendClient, create_backend_app
 from spindle.engine.operations import parse_operation_payload
@@ -366,6 +366,71 @@ def test_miles_worker_failure_fences_trainer_across_executor_http(fatal):
             else:
                 assert fenced == []
                 assert runtime._failure is None
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("large", [False, True])
+@pytest.mark.parametrize("status", [200, 500, 503])
+def test_backend_parses_response_once_with_telemetry(monkeypatch, large, status):
+    monkeypatch.setattr(backend_http, "provider", lambda: object())
+    original = httpx.Response.json
+    parses = []
+
+    def counted(response, **kwargs):
+        parses.append(response)
+        return original(response, **kwargs)
+
+    monkeypatch.setattr(httpx.Response, "json", counted)
+    result = {"logprobs": [-0.125] * (20000 if large else 1), "tokens": [2**63 - 1]}
+    content = {"telemetry": {"duration": 1.5}, "result": result, "error": "failed"}
+
+    async def run():
+        fenced = []
+        client = HttpBackendClient(
+            "http://backend",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    status,
+                    json=content,
+                    headers={"x-spindle-backend-failed": "1"} if status == 503 else {},
+                )
+            ),
+            on_transport_error=lambda: fenced.append(True),
+        )
+        try:
+            if status == 200:
+                assert await client._post("/execute", {}) == result
+            else:
+                with pytest.raises(RuntimeError, match="failed"):
+                    await client._post("/execute", {})
+            assert backend_http.telemetry.received.get() == {"duration": 1.5}
+            assert len(parses) == 1
+            assert fenced == ([True] if status == 503 else [])
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_backend_non_json_failure_preserves_message_and_fencing():
+    async def run():
+        fenced = []
+        client = HttpBackendClient(
+            "http://backend",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    503, text="worker lost", headers={"x-spindle-backend-failed": "1"}
+                )
+            ),
+            on_transport_error=lambda: fenced.append(True),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="worker lost"):
+                await client._post("/execute", {})
+            assert fenced == [True]
         finally:
             await client.close()
 
