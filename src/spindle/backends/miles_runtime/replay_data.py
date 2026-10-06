@@ -65,13 +65,25 @@ def replay_row(inputs, targets: list[int]) -> dict:
 
 
 def validate_routed_experts(
-    slot_rows, *, num_layers: int, num_experts: int | None, topk: int
+    slot_rows,
+    *,
+    num_layers: int,
+    num_experts: int | None,
+    topk: int,
+    moe_layer_freq: int | list[int] = 1,
 ) -> None:
     """Check model-specific route constraints before dispatching to any GPU rank.
 
     replay_row owns tensor encoding and token alignment. Here the resolved Miles
     model dimensions determine which layer streams and expert IDs are legal.
     """
+    # Match Miles register_replay_list_moe: dense layers have no router stream.
+    moe_layers = [
+        layer % moe_layer_freq == 0
+        if isinstance(moe_layer_freq, int)
+        else bool(moe_layer_freq[layer])
+        for layer in range(num_layers)
+    ]
     for _, datum in slot_rows:
         if "routed_experts" not in datum:
             continue
@@ -83,12 +95,14 @@ def validate_routed_experts(
                 f"routed_experts must have {num_layers} layers and {topk} experts per token"
             )
         values = routes["values"]
-        if any(expert >= num_experts for expert in values):
-            raise ValueError(
-                f"routed_experts IDs must be below the model's expert count ({num_experts})"
-            )
         for offset in range(0, len(values), topk):
+            if not moe_layers[(offset // topk) % num_layers]:
+                continue
             experts = values[offset : offset + topk]
+            if any(expert >= num_experts for expert in experts):
+                raise ValueError(
+                    f"routed_experts IDs must be below the model's expert count ({num_experts})"
+                )
             if all(expert == -1 for expert in experts):
                 continue
             if -1 in experts:

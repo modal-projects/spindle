@@ -16,7 +16,9 @@ from spindle.backends.miles_runtime.runtime import MilesRuntime
 @pytest.fixture
 def runtime():
     runtime = MilesRuntime.__new__(MilesRuntime)
-    runtime._args = SimpleNamespace(num_layers=2, num_experts=8, moe_router_topk=2)
+    runtime._args = SimpleNamespace(
+        num_layers=2, num_experts=8, moe_router_topk=2, moe_layer_freq=1
+    )
     runtime._unit_ids = count(1)
     runtime._failure = None
     runtime._closed = False
@@ -109,3 +111,21 @@ def test_bridge_installation_is_idempotent():
     assert str(routes.dtype) == "int32"
     assert routes.shape == (2, 2, 2)
     assert routes.reshape(-1).tolist() == [0, 7] * 4
+
+
+@pytest.mark.parametrize(
+    "layout,values", [([0, 1], [0, 0, 0, 7] * 2), (2, [0, 7, 0, 0] * 2)]
+)
+@pytest.mark.parametrize("forward_only", [False, True])
+def test_dense_layer_capture_is_ignored_but_moe_routes_still_checked(
+    runtime, layout, values, forward_only
+):
+    runtime, calls = runtime
+    runtime._args.moe_layer_freq = layout
+    rows = _rows(values, alignment=8)
+    _forward(runtime, rows, forward_only)
+    assert len(calls) == 1
+    assert rows[0][1]["routed_experts"]["values"][:8] == values
+    with pytest.raises(ValueError, match="distinct"):
+        _forward(runtime, _rows([0, 0] * 4), forward_only)
+    assert len(calls) == 1
