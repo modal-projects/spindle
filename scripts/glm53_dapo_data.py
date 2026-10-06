@@ -411,7 +411,7 @@ def summary(groups):
 
 def save_rollouts(path, groups):
     temporary = Path(str(path) + ".tmp")
-    with gzip.open(temporary, "wt") as f:
+    with gzip.open(temporary, "wt", compresslevel=1) as f:
         for group in groups:
             f.write(json.dumps(group) + "\n")
     temporary.replace(path)
