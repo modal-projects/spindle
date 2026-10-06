@@ -186,14 +186,9 @@ class Engine:
 
     async def forward_backward(self, body: bytes, content_type: str) -> str:
         mark("engine.forward_backward.received", bytes=len(body))
-        if len(body) >= 65536:
-            model_id, seq_id, kind, payload = await asyncio.to_thread(
-                decode_forward_backward, body, content_type
-            )
-        else:
-            model_id, seq_id, kind, payload = decode_forward_backward(
-                body, content_type
-            )
+        model_id, seq_id, kind, payload = await asyncio.to_thread(
+            decode_forward_backward, body, content_type
+        )
         mark("engine.forward_backward.decoded", request_id=f"{model_id}:{seq_id}")
         return await self._submit(kind, model_id, seq_id, payload)
 
@@ -371,20 +366,7 @@ class Engine:
                 return encoded, digest.hexdigest()
             return None, fingerprint(kind.value, serialize_operation_payload(payload))
 
-        # Tiny commands are cheaper than a thread handoff. Large arrays never
-        # get encoded while holding the state lock or blocking HTTP handling.
-        if (
-            isinstance(payload, ForwardBackwardInput)
-            and sum(
-                d.model_input.length
-                + sum(len(t.data) for t in d.loss_fn_inputs.values())
-                for d in payload.data
-            )
-            >= 1024
-        ):
-            encoded_payload, mark_ = await asyncio.to_thread(prepare)
-        else:
-            encoded_payload, mark_ = prepare()
+        encoded_payload, mark_ = await asyncio.to_thread(prepare)
         fingerprint_s = time.perf_counter() - fingerprint_started
         operation = Operation(
             request_id=f"{model_id}:{seq_id}",
