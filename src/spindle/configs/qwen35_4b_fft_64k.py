@@ -33,7 +33,7 @@ class Config(BaseConfig):
         "mem_fraction_static": 0.85,
         "max_running_requests": 32,
         "max_queued_requests": 4,
-        "cpu_weight_cache_max_compile_group_gb": 16,
+        "weight_update_max_compile_group_gb": 16,
     }
 
 

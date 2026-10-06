@@ -7,7 +7,7 @@ from spindle.inference.serving import (
 )
 
 
-def test_full_sglang_uses_cpu_weight_cache() -> None:
+def test_full_sglang_uses_cpu_weight_staging() -> None:
     with patch("subprocess.Popen") as popen:
         start_sglang(
             "/model",
@@ -18,14 +18,15 @@ def test_full_sglang_uses_cpu_weight_cache() -> None:
             max_lora_rank=1,
             max_running_requests=64,
             enable_lora=False,
-            enable_cpu_weight_cache=True,
-            cpu_weight_cache_max_compile_group_gb=16,
+            weight_update_staging="cpu",
+            weight_update_max_compile_group_gb=16,
             schedule_policy="lpm",
         )
     command = popen.call_args.args[0]
     assert "--enable-lora" not in command
-    assert "--enable-cpu-weight-cache" in command
-    assert command[command.index("--cpu-weight-cache-max-compile-group-gb") + 1] == "16"
+    assert command[command.index("--weight-update-staging") + 1] == "cpu"
+    assert command[command.index("--weight-version") + 1] == "0"
+    assert command[command.index("--weight-update-max-compile-group-gb") + 1] == "16"
     assert command[command.index("--schedule-policy") + 1] == "lpm"
 
 

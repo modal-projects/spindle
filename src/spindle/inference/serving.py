@@ -30,8 +30,8 @@ def start_sglang(
     lora_target_modules: Sequence[str] = ("all",),
     enable_lora: bool = True,
     enable_return_routed_experts: bool = False,
-    enable_cpu_weight_cache: bool = False,
-    cpu_weight_cache_max_compile_group_gb: float | None = None,
+    weight_update_staging: str | None = None,
+    weight_update_max_compile_group_gb: float | None = None,
     memory_fraction: float = 0.85,
     schedule_policy: str = "fcfs",
 ) -> subprocess.Popen:
@@ -47,12 +47,14 @@ def start_sglang(
         raise ValueError("expert_tensor_parallel_size must be at least 1")
     if enable_lora and not lora_target_modules:
         raise ValueError("lora_target_modules must not be empty")
+    if weight_update_staging not in (None, "cpu"):
+        raise ValueError("weight_update_staging must be None or 'cpu'")
     if (
-        cpu_weight_cache_max_compile_group_gb is not None
-        and not enable_cpu_weight_cache
+        weight_update_max_compile_group_gb is not None
+        and weight_update_staging != "cpu"
     ):
         raise ValueError(
-            "cpu_weight_cache_max_compile_group_gb requires enable_cpu_weight_cache"
+            "weight_update_max_compile_group_gb requires weight_update_staging='cpu'"
         )
     if not 0 < memory_fraction < 1:
         raise ValueError("memory_fraction must be between 0 and 1")
@@ -95,13 +97,16 @@ def start_sglang(
         command.extend(["--moe-dp-size", str(moe_data_parallel_size)])
     if trust_remote_code:
         command.append("--trust-remote-code")
-    if enable_cpu_weight_cache:
-        command.append("--enable-cpu-weight-cache")
-    if cpu_weight_cache_max_compile_group_gb is not None:
+    if weight_update_staging is not None:
+        # Staged updates count versions from the boot checkpoint at v0.
+        command.extend(
+            ["--weight-update-staging", weight_update_staging, "--weight-version", "0"]
+        )
+    if weight_update_max_compile_group_gb is not None:
         command.extend(
             [
-                "--cpu-weight-cache-max-compile-group-gb",
-                str(cpu_weight_cache_max_compile_group_gb),
+                "--weight-update-max-compile-group-gb",
+                str(weight_update_max_compile_group_gb),
             ]
         )
     command.extend(

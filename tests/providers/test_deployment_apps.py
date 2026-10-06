@@ -170,7 +170,8 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
             "lm_head",
         ]
     else:
-        assert native["enable_cpu_weight_cache"] is True
+        assert native["weight_update_staging"] == "cpu"
+        assert native["weight_version"] == "0"
         assert calls[0][1]["pinned_version"] == (
             None if kind == "latest" else 0 if kind == "base" else 7
         )

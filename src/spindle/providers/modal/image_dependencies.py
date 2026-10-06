@@ -18,7 +18,7 @@ CORE_PACKAGES = (
 )
 STITCH_PACKAGE = (
     "stitch @ git+https://github.com/modal-projects/stitch.git"
-    "@375a9396a7b05770dc4ed9cc5fe34fc4d5a472d5"
+    "@d9f681fd894b02257da129ec3483a977659cd7ab"
 )
 
 TINKER_PACKAGE = "tinker>=0.24.1,<0.26"
