@@ -73,13 +73,11 @@ def test_fft_sidecar_receives_store_scope() -> None:
         start_fft_sidecar(
             port=8000,
             sglang_port=8001,
-            model_path="/model",
             bulletin_root="/bulletin",
             bulletin_volume="bulletin",
             run_id="run-a",
             pinned_version=7,
         )
     command = popen.call_args.args[0]
-    assert command[command.index("--base-checkpoint-dir") + 1] == "/model"
     assert command[command.index("--run-id") + 1] == "run-a"
     assert command[command.index("--pinned-version") + 1] == "7"

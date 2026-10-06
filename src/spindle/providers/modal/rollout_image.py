@@ -244,9 +244,11 @@ image = (
         "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
         + SGLANG_LORA_LIFETIME_PATCH
         + "PATCH\n",
-        "rm -rf /sgl-workspace/sglang/python/sglang"
-        " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
+        # Overlay in place: the image's compiled Rust extensions live inside the
+        # package, and the fork only adds or edits Python sources.
+        "cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"
         " && rm -rf /tmp/stitch-sglang-overlay",
+        'python -c "import sglang.srt.mem_cache.rust_tree_core.mem_cache"',
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")

@@ -121,7 +121,6 @@ def register_sampler(
             self.sidecar = start_fft_sidecar(
                 port=8000,
                 sglang_port=8001,
-                model_path=model_path,
                 bulletin_root="/bulletin",
                 bulletin_volume=bulletin.name,
                 run_id=run_id,
