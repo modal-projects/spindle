@@ -77,20 +77,22 @@ def main(settings, sampler):
             ),
         )
         prompts = [
-            sampler.encode.remote(
+            sampler.request.remote(
+                "encode",
                 question
-                + " Show a short calculation, then give the final integer answer in \\boxed{}."
+                + " Show a short calculation, then give the final integer answer in \\boxed{}.",
             )
             for question, _ in PROBLEMS
         ]
         fixed_probe = prompts[0]
-        probe_before = sampler.generate.remote(
+        probe_before = sampler.request.remote(
+            "generate",
             {
                 "input_ids": fixed_probe,
                 "return_logprob": True,
                 "logprob_start_len": 0,
                 "sampling_params": {"max_new_tokens": 1, "temperature": 0},
-            }
+            },
         )
         for step in range(2):
             step_started = time.monotonic()
@@ -117,7 +119,12 @@ def main(settings, sampler):
             print("RL SAMPLING", step + 1, flush=True)
             start = time.monotonic()
             with ThreadPoolExecutor(max_workers=8) as pool:
-                samples = list(pool.map(sampler.generate.remote, requests))
+                samples = list(
+                    pool.map(
+                        lambda payload: sampler.request.remote("generate", payload),
+                        requests,
+                    )
+                )
             sampling_s = time.monotonic() - start
             (output / f"samples-{step + 1}.json").write_text(json.dumps(samples))
             modal.Volume.from_name("spindle-glm53-pr26-rl-checkpoints").commit()
@@ -215,7 +222,8 @@ def main(settings, sampler):
             backend.publish_sampler_snapshot(capture)
             publication_s = time.monotonic() - start
             start = time.monotonic()
-            probe_after = sampler.generate.remote(
+            probe_after = sampler.request.remote(
+                "generate",
                 {
                     "input_ids": fixed_probe,
                     "return_logprob": True,
@@ -223,7 +231,7 @@ def main(settings, sampler):
                     "weight_run_id": run_id,
                     "weight_version": {"exact_version": step + 1},
                     "sampling_params": {"max_new_tokens": 1, "temperature": 0},
-                }
+                },
             )
             load_probe_s = time.monotonic() - start
             assert probe_after["meta_info"]["weight_version_start"] == step + 1

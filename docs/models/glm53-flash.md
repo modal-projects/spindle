@@ -158,7 +158,8 @@ uses up to four preparation GPUs. The BF16 checkpoint occupies 642.65 GB. Conver
 only needs to run once for the cached source checkpoint.
 
 The integration test starts an eight-GPU BF16 sampler (H200, with B200 as a
-capacity fallback) and checks the previously exported full adapter, including a
+capacity fallback) with explicit single-node RDMA placement. It checks the
+previously exported full adapter, including a
 volume refresh while it remains loaded, before allocating the four training nodes. It runs two
 updates with one active rank-32 adapter, two math problems per update, four
 responses per problem, and a 1,024-token generation cap. Context capacity remains

@@ -62,10 +62,12 @@ volumes = {
     timeout=3600,
     scaledown_window=1800,
     max_containers=1,
+    experimental_options={"efa_enabled": True},
     env=cache_env,
     volumes=volumes,
 )
 @modal.concurrent(max_inputs=16)
+@modal.experimental.clustered(1, rdma=True)
 class Sampler:
     settings_json: str = modal.parameter()
 
@@ -105,14 +107,25 @@ class Sampler:
         )
         wait_http("http://127.0.0.1:8000/health", self.sidecar, 120)
 
+    # Modal clustered classes expose one RPC method, including single-node RDMA.
     @modal.method()
+    def request(self, operation: str, payload=None):
+        if operation == "ready":
+            return self.ready()
+        if operation == "encode":
+            return self.encode(payload)
+        if operation == "generate":
+            return self.generate(payload)
+        if operation == "check_exported_adapter":
+            return self.check_exported_adapter(payload)
+        raise ValueError(f"Unknown sampler operation: {operation}")
+
     def ready(self):
         with httpx.Client(timeout=30) as client:
             response = client.get("http://127.0.0.1:8001/server_info")
             response.raise_for_status()
             return response.json()
 
-    @modal.method()
     def check_exported_adapter(self, tokens):
         report = json.loads(Path("/validation/latest.json").read_text())
         with httpx.Client(base_url="http://127.0.0.1:8001", timeout=3000) as client:
@@ -149,7 +162,6 @@ class Sampler:
                 )
                 response.raise_for_status()
 
-    @modal.method()
     def encode(self, text: str):
         return self.tokenizer.apply_chat_template(
             [{"role": "user", "content": text}],
@@ -159,7 +171,6 @@ class Sampler:
             enable_thinking=False,
         )
 
-    @modal.method()
     def generate(self, payload: dict):
         with httpx.Client(timeout=3000) as client:
             response = client.post("http://127.0.0.1:8000/generate", json=payload)
@@ -212,7 +223,7 @@ def train(program: str, settings: dict, sampler_settings: str):
 @app.function(image=trainer_image, timeout=3600)
 def check_sampler(sampler_settings: str):
     # Resolve the class in the remote app instead of serializing a bound instance.
-    return Sampler(settings_json=sampler_settings).ready.remote()
+    return Sampler(settings_json=sampler_settings).request.remote("ready")
 
 
 @app.function(
@@ -290,8 +301,8 @@ def main(publication_only: str = "", publication_visibility: bool = False):
         return
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     sampler = Sampler(settings_json=json.dumps(config.inference_settings))
-    ready = sampler.ready.spawn()
-    print("SAMPLER CALL", ready.object_id, sampler.ready.object_id, flush=True)
+    ready = sampler.request.spawn("ready")
+    print("SAMPLER CALL", ready.object_id, sampler.request.object_id, flush=True)
     info = ready.get()
     assert (
         check_sampler.remote(json.dumps(config.inference_settings))["dtype"]
@@ -316,20 +327,23 @@ def main(publication_only: str = "", publication_visibility: bool = False):
         ),
         flush=True,
     )
-    tokens = sampler.encode.remote("What is 7 times 8? Reply with just the number.")
+    tokens = sampler.request.remote(
+        "encode", "What is 7 times 8? Reply with just the number."
+    )
     print(
         "BASE SAMPLE",
-        sampler.generate.remote(
+        sampler.request.remote(
+            "generate",
             {
                 "input_ids": tokens,
                 "sampling_params": {"max_new_tokens": 32, "temperature": 0},
-            }
+            },
         ),
         flush=True,
     )
     print(
         "EXPORTED ADAPTER CHECK",
-        sampler.check_exported_adapter.remote(tokens),
+        sampler.request.remote("check_exported_adapter", tokens),
         flush=True,
     )
     call = train.spawn(
