@@ -1,0 +1,13 @@
+diff --git a/src/tinker/lib/public_interfaces/training_client.py b/src/tinker/lib/public_interfaces/training_client.py
+index 6d26409..ff32111 100644
+--- a/src/tinker/lib/public_interfaces/training_client.py
++++ b/src/tinker/lib/public_interfaces/training_client.py
+@@ -149,7 +149,7 @@ class TrainingClient(TelemetryProvider):
+ 
+     def _estimate_bytes_count(self, datum: types.Datum) -> int:
+         return self.holder.estimate_bytes_count_in_model_input(datum.model_input) + sum(
+-            len(value.data) * 10 for _, value in datum.loss_fn_inputs.items()
++            value._numpy.size * 10 for value in datum.loss_fn_inputs.values()
+         )
+ 
+     def _chunked_requests_generator(

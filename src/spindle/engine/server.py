@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections import deque
@@ -22,6 +23,7 @@ from .operations import (
     SkipPayload,
     serialize_operation_payload,
 )
+from .training_transport import encode_payload
 
 PERSISTED_OPERATIONS = {
     OperationKind.SAVE_WEIGHTS,
@@ -71,6 +73,7 @@ class Operation:
     seq_id: int
     kind: OperationKind
     payload: OperationPayload
+    encoded_payload: bytes | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -183,7 +186,14 @@ class Engine:
 
     async def forward_backward(self, body: bytes, content_type: str) -> str:
         mark("engine.forward_backward.received", bytes=len(body))
-        model_id, seq_id, kind, payload = decode_forward_backward(body, content_type)
+        if len(body) >= 65536:
+            model_id, seq_id, kind, payload = await asyncio.to_thread(
+                decode_forward_backward, body, content_type
+            )
+        else:
+            model_id, seq_id, kind, payload = decode_forward_backward(
+                body, content_type
+            )
         mark("engine.forward_backward.decoded", request_id=f"{model_id}:{seq_id}")
         return await self._submit(kind, model_id, seq_id, payload)
 
@@ -350,23 +360,44 @@ class Engine:
         seq_id: int,
         payload: OperationPayload,
     ) -> str:
+        fingerprint_started = time.perf_counter()
+
+        def prepare():
+            if isinstance(payload, ForwardBackwardInput):
+                encoded = encode_payload(payload)
+                digest = hashlib.sha256()
+                digest.update(kind.value.encode() + b"\0")
+                digest.update(encoded)
+                return encoded, digest.hexdigest()
+            return None, fingerprint(kind.value, serialize_operation_payload(payload))
+
+        # Tiny commands are cheaper than a thread handoff. Large arrays never
+        # get encoded while holding the state lock or blocking HTTP handling.
+        if (
+            isinstance(payload, ForwardBackwardInput)
+            and sum(
+                d.model_input.length
+                + sum(len(t.data) for t in d.loss_fn_inputs.values())
+                for d in payload.data
+            )
+            >= 1024
+        ):
+            encoded_payload, mark_ = await asyncio.to_thread(prepare)
+        else:
+            encoded_payload, mark_ = prepare()
+        fingerprint_s = time.perf_counter() - fingerprint_started
         operation = Operation(
             request_id=f"{model_id}:{seq_id}",
             model_id=model_id,
             seq_id=seq_id,
             kind=kind,
             payload=payload,
+            encoded_payload=encoded_payload,
         )
         async with self._lock:
             model = self._models.get(operation.model_id)
             if model is None or model.unload is not None:
                 raise RecordNotFound("model", operation.model_id)
-            fingerprint_started = time.perf_counter()
-            mark_ = fingerprint(
-                operation.kind.value,
-                serialize_operation_payload(operation.payload),
-            )
-            fingerprint_s = time.perf_counter() - fingerprint_started
             seen = model.fingerprints.get(operation.seq_id)
             if seen is not None:
                 if seen != mark_:
@@ -467,7 +498,12 @@ class Engine:
                 if operation.kind == OperationKind.FORWARD_BACKWARD:
                     results = await self.executor.execute_forward_backward_batch(
                         tuple(
-                            Command(item.model_id, item.kind, item.payload)
+                            Command(
+                                item.model_id,
+                                item.kind,
+                                item.payload,
+                                item.encoded_payload,
+                            )
                             for item in operations
                         )
                     )

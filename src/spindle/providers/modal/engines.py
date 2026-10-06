@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -61,6 +62,7 @@ class ModalEnginePlatform:
         self._records: dict[str, EngineInstanceRecord] = {}
         self._clients: dict[str, tuple[tuple[str, str | None], HttpEngineClient]] = {}
         self._call_ids: dict[str, str] = {}
+        self._instance_reads: dict[str, asyncio.Task] = {}
 
     async def ensure_instance(
         self,
@@ -162,6 +164,19 @@ class ModalEnginePlatform:
         self._call_ids.pop(instance_id, None)
 
     async def get_instance(self, instance_id: str) -> EngineInstance | None:
+        pending = self._instance_reads.get(instance_id)
+        if pending is None or pending.done():
+            pending = asyncio.create_task(self._read_instance(instance_id))
+            self._instance_reads[instance_id] = pending
+        return await asyncio.shield(pending)
+
+    async def _read_instance(self, instance_id: str) -> EngineInstance | None:
+        try:
+            return await self._read_live_instance(instance_id)
+        finally:
+            self._instance_reads.pop(instance_id, None)
+
+    async def _read_live_instance(self, instance_id: str) -> EngineInstance | None:
         value = await self.kv.get(instance_key(instance_id))
         if value is None:
             return None

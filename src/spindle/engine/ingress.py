@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import base64
 import json
-import struct
 from collections.abc import Mapping
 
-from google.protobuf.json_format import MessageToDict
+import numpy as np
 from tinker import ModelInput
 from tinker.types._pydantic_types.datum import Datum
 from tinker.types._pydantic_types.tensor_data import TensorData
@@ -30,18 +28,19 @@ def decode_forward_backward(
     if content_type.startswith("application/x-protobuf"):
         message = tinker_public_pb2.ForwardBackwardRequest()
         message.ParseFromString(body)
-        raw = MessageToDict(message, preserving_proto_field_name=True)
         kind = (
             OperationKind.FORWARD
             if message.forward_only
             else OperationKind.FORWARD_BACKWARD
         )
         payload = ForwardBackwardInput(
-            data=[_decode_proto_datum(item) for item in raw.get("data", ())],
-            loss_fn=raw.get("loss_fn"),
-            loss_fn_config=raw.get("loss_fn_config") or None,
+            data=[_decode_proto_datum(item) for item in message.data],
+            loss_fn=message.loss_fn,
+            loss_fn_config=dict(message.loss_fn_config) or None,
         )
-        model_id, seq_id = _identity(raw, kind)
+        model_id, seq_id = _identity(
+            {"model_id": message.model_id, "seq_id": message.seq_id}, kind
+        )
         return model_id, seq_id, kind, payload
 
     request = json.loads(body)
@@ -89,87 +88,69 @@ def _payload(request: Mapping[str, object]) -> dict[str, object]:
     return {key: value for key, value in request.items() if key not in _ENVELOPE_FIELDS}
 
 
-def _decode_proto_datum(value: object) -> Datum:
-    if not isinstance(value, Mapping):
-        raise ValueError("protobuf datum must be an object")
-    raw_inputs = value.get("loss_fn_inputs") or {}
-    if not isinstance(raw_inputs, Mapping):
-        raise ValueError("protobuf loss_fn_inputs must be an object")
+def _decode_proto_datum(value) -> Datum:
     return Datum(
-        model_input=_decode_proto_model_input(value.get("model_input")),
+        model_input=_decode_proto_model_input(value.model_input),
         loss_fn_inputs={
-            str(key): _decode_proto_tensor(tensor) for key, tensor in raw_inputs.items()
+            name: _decode_proto_tensor(tensor)
+            for name, tensor in value.loss_fn_inputs.items()
         },
     )
 
 
-def _decode_proto_model_input(value: object) -> ModelInput:
-    if not isinstance(value, list):
-        raise ValueError("protobuf model_input must be a list")
+def _decode_proto_model_input(value) -> ModelInput:
     chunks = []
     for chunk in value:
-        if not isinstance(chunk, Mapping):
-            raise ValueError("protobuf model input chunk must be an object")
-        if "encoded_text" in chunk:
-            encoded = chunk["encoded_text"]
-            if not isinstance(encoded, Mapping):
-                raise ValueError("invalid encoded text chunk")
-            raw = base64.b64decode(encoded["tokens"])
-            if len(raw) % 4:
-                raise ValueError("encoded text tokens have invalid byte length")
+        kind = chunk.WhichOneof("chunk")
+        if kind == "encoded_text":
             chunks.append(
                 {
                     "type": "encoded_text",
-                    "tokens": [token for (token,) in struct.iter_unpack("<i", raw)],
+                    "tokens": _decode_values(chunk.encoded_text.tokens, "i"),
                 }
             )
-        elif "image" in chunk:
-            chunks.append({"type": "image", **dict(chunk["image"])})
-        elif "dmel" in chunk:
-            chunks.append({"type": "dmel", **dict(chunk["dmel"])})
+        elif kind == "image":
+            image = chunk.image
+            chunks.append(
+                {
+                    "type": "image",
+                    "data": image.data,
+                    "format": image.format,
+                    "expected_tokens": image.expected_tokens
+                    if image.HasField("expected_tokens")
+                    else None,
+                }
+            )
+        elif kind == "dmel":
+            chunks.append({"type": "dmel", "dmel": chunk.dmel.dmel})
         else:
             raise ValueError("unsupported protobuf model input chunk")
     return ModelInput.model_validate({"chunks": chunks})
 
 
-def _decode_proto_tensor(value: object) -> TensorData:
-    if not isinstance(value, Mapping):
-        raise ValueError("protobuf tensor must be an object")
-    dtype_value = str(value.get("dtype"))
+def _decode_proto_tensor(value) -> TensorData:
+    dtype_value = tinker_public_pb2.DType.Name(value.dtype)
     try:
         item_format, dtype = _PROTO_DTYPES[dtype_value]
     except KeyError:
         raise ValueError(f"unsupported protobuf tensor dtype: {dtype_value}") from None
-    shape = [int(item) for item in value.get("shape") or ()]
-    sparse = value.get("sparse_csr")
-    if sparse is not None:
-        if not isinstance(sparse, Mapping):
-            raise ValueError("invalid protobuf sparse tensor")
+    shape = list(value.shape)
+    if value.WhichOneof("encoding") == "sparse_csr":
+        sparse = value.sparse_csr
         return TensorData(
-            data=_decode_values(sparse.get("values"), item_format),
+            data=_decode_values(sparse.values, item_format),
             dtype=dtype,
             shape=shape,
-            sparse_crow_indices=_decode_values(
-                sparse.get("crow_indices"),
-                "q",
-            ),
-            sparse_col_indices=_decode_values(
-                sparse.get("col_indices"),
-                "q",
-            ),
+            sparse_crow_indices=_decode_values(sparse.crow_indices, "q"),
+            sparse_col_indices=_decode_values(sparse.col_indices, "q"),
         )
     return TensorData(
-        data=_decode_values(value.get("dense"), item_format),
-        dtype=dtype,
-        shape=shape,
+        data=_decode_values(value.dense, item_format), dtype=dtype, shape=shape
     )
 
 
-def _decode_values(value: object, item_format: str) -> list[int | float]:
-    if not isinstance(value, str):
-        raise ValueError("protobuf tensor data must be base64")
-    raw = base64.b64decode(value)
-    item_size = struct.calcsize(f"<{item_format}")
-    if len(raw) % item_size:
+def _decode_values(raw: bytes, item_format: str) -> list[int | float]:
+    dtype = np.dtype(f"<{item_format}")
+    if len(raw) % dtype.itemsize:
         raise ValueError("protobuf tensor data has invalid byte length")
-    return [item for (item,) in struct.iter_unpack(f"<{item_format}", raw)]
+    return np.frombuffer(raw, dtype=dtype).tolist()

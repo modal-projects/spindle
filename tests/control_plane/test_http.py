@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import zstandard
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.proto import tinker_public_pb2
@@ -178,7 +179,8 @@ def test_rejected_operation_does_not_stall_model(path: str, body: dict) -> None:
     asyncio.run(run())
 
 
-def test_rejected_protobuf_operation_does_not_stall_model() -> None:
+@pytest.mark.parametrize("compressed", [False, True])
+def test_rejected_protobuf_operation_does_not_stall_model(compressed) -> None:
     async def run() -> None:
         client = http_client()
         _, model_id = await created_model(client)
@@ -188,10 +190,15 @@ def test_rejected_protobuf_operation_does_not_stall_model() -> None:
             loss_fn="cross_entropy",
         )
         message.data.add().model_input.add()
+        body = message.SerializeToString()
+        headers = {"Content-Type": "application/x-protobuf"}
+        if compressed:
+            body = zstandard.ZstdCompressor().compress(body)
+            headers["Content-Encoding"] = "zstd"
         rejected = await client.post(
             "/api/v1/forward_backward",
-            content=message.SerializeToString(),
-            headers={"Content-Type": "application/x-protobuf"},
+            content=body,
+            headers=headers,
         )
         assert rejected.status_code == 400
         submitted = await client.post(

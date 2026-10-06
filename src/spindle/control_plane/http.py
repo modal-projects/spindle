@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -154,6 +155,21 @@ class SaveWeightsForSamplerBody(BaseModel):
     ttl_seconds: int | None = None
 
 
+def _training_envelope(
+    body: bytes, content_type: str, encoding: str
+) -> tuple[bytes, dict]:
+    if encoding == "zstd":
+        body = zstandard.ZstdDecompressor().decompress(body)
+    if content_type.startswith("application/x-protobuf"):
+        message = tinker_public_pb2.ForwardBackwardRequest()
+        message.ParseFromString(body)
+        identity = {"model_id": message.model_id, "seq_id": message.seq_id}
+    else:
+        parsed = json.loads(body)
+        identity = {"model_id": parsed.get("model_id"), "seq_id": parsed.get("seq_id")}
+    return body, identity
+
+
 def create_control_plane_app(
     control_plane: ControlPlane,
     definitions: Iterable[Any],
@@ -188,14 +204,12 @@ def create_control_plane_app(
         if api_key is not None and request.headers.get("x-api-key") != api_key:
             return
         if path == "/api/v1/forward_backward":
-            if request.headers.get("content-type", "").startswith(
-                "application/x-protobuf"
-            ):
-                message = tinker_public_pb2.ForwardBackwardRequest()
-                message.ParseFromString(await request.body())
-                body = {"model_id": message.model_id, "seq_id": message.seq_id}
-            else:
-                body = await request.json()
+            _, body = await asyncio.to_thread(
+                _training_envelope,
+                await request.body(),
+                request.headers.get("content-type", "application/json"),
+                request.headers.get("content-encoding", "identity"),
+            )
         elif path in {f"/api/v1/{kind.value}" for kind in JSON_OPERATIONS}:
             body = (
                 exc.body
@@ -285,7 +299,8 @@ def create_control_plane_app(
             "pjwt_auth_enabled": False,
             "credential_default_source": "api_key",
             "parallel_fwdbwd_chunks": True,
-            "proto_write_fwdbwd": False,
+            "proto_write_fwdbwd": True,
+            "proto_compress_fwdbwd": True,
             "use_pyqwest_transport": False,
             "create_model_via_load_weights": True,
         }
@@ -540,16 +555,15 @@ def create_control_plane_app(
             bytes=len(body),
             encoding=request.headers.get("content-encoding", "identity"),
         )
-        if request.headers.get("content-encoding") == "zstd":
-            body = zstandard.ZstdDecompressor().decompress(body)
-        mark("cp.forward_backward.decompressed", bytes=len(body))
         content_type = request.headers.get("content-type", "application/json")
-        if content_type.startswith("application/x-protobuf"):
-            message = tinker_public_pb2.ForwardBackwardRequest()
-            message.ParseFromString(body)
-            model_id = message.model_id
-        else:
-            model_id = json.loads(body)["model_id"]
+        body, identity = await asyncio.to_thread(
+            _training_envelope,
+            body,
+            content_type,
+            request.headers.get("content-encoding", "identity"),
+        )
+        mark("cp.forward_backward.decompressed", bytes=len(body))
+        model_id = identity["model_id"]
         engine = await control_plane.engine_for(model_id)
         request_id = await engine.forward_backward(body, content_type)
         mark("cp.forward_backward.forwarded", request_id=request_id, model_id=model_id)
