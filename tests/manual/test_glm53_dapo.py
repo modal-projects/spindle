@@ -1,6 +1,14 @@
 """CPU checks; run with scripts and the pinned Miles checkout on PYTHONPATH."""
 
+import ast
+import json
+from contextlib import suppress
+from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import glm53_dapo_data as data_helpers
 
 import numpy as np
 import pytest
@@ -8,9 +16,12 @@ import pytest
 pytest.importorskip("miles.rollout.rm_hub.math_dapo_utils")
 
 from glm53_dapo_data import (
+    collect_training_groups,
     grade_sample,
     group_advantages,
     sample_problems,
+    save_rollouts,
+    write_json,
     training_data,
 )
 
@@ -100,3 +111,178 @@ def test_mixed_rollouts_pin_each_clients_adapter():
     assert len({p["sampling_params"]["sampling_seed"] for p in received}) == 4
     with pytest.raises(AssertionError, match="wrong policy"):
         sample_problems(sampler, [(0, problem)], config, 4)
+
+
+def test_fixed_batches_reuse_saved_groups_and_keep_constant_rewards(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(data_helpers, "write_status", MagicMock())
+    problems = [{"id": i, "tokens": [i + 10], "answer": "34"} for i in range(3)]
+    dataset = {"train": problems, "orders": [[0, 1, 2], [0, 1, 2]]}
+    config = {
+        "run_id": "test",
+        "clients": 2,
+        "groups": 3,
+        "group_size": 2,
+        "concurrency": 4,
+        "seed": 42,
+        "max_tokens": 8192,
+        "continue_run": "test",
+    }
+    cached_response = response()
+    cached_response["meta_info"]["weight_version_start"] = 0
+    cached_sample = grade_sample(cached_response, problems[0])
+    for client in range(2):
+        save_rollouts(
+            tmp_path / f"client{client}-train-0001.jsonl.gz",
+            [
+                {
+                    "client": client,
+                    "problem": problems[0],
+                    "samples": [cached_sample, cached_sample],
+                }
+            ],
+        )
+    received = []
+
+    def generate(operation, payload):
+        received.append(payload)
+        return cached_response
+
+    cursors = [0, 0]
+    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    groups = collect_training_groups(sampler, dataset, config, 1, cursors, tmp_path)
+    assert [len(batch) for batch in groups] == [3, 3]
+    assert cursors == [3, 3]
+    assert len(received) == 8
+    assert all(p["input_ids"] != [10] for p in received)
+    assert all(
+        not np.any(group_advantages(g["samples"])) for batch in groups for g in batch
+    )
+    assert not list(tmp_path.glob("*.tmp"))
+    # A fresh controller can reuse all completed groups without any generation.
+    received.clear()
+    collect_training_groups(sampler, dataset, config, 1, [0, 0], tmp_path)
+    assert received == []
+
+
+def test_sampling_refills_before_a_slow_group_finishes():
+    later_started = Event()
+    config = {
+        "run_id": "test",
+        "group_size": 2,
+        "seed": 42,
+        "max_tokens": 8192,
+        "concurrency": 4,
+    }
+    jobs = [(0, {"id": i, "tokens": [i], "answer": "34"}) for i in range(3)]
+
+    def generate(operation, payload):
+        if payload["input_ids"] == [0]:
+            assert later_started.wait(5), "Waited for a whole wave before refilling"
+        if payload["input_ids"] == [2]:
+            later_started.set()
+        return response()
+
+    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    groups = sample_problems(sampler, jobs, config, 3)
+    assert len(groups) == 3
+    assert all(len(g["samples"]) == 2 for g in groups)
+
+
+def controller_fixture(tmp_path):
+    # Execute the controller body with fake Modal objects; importing the launcher
+    # would build CUDA images and bind deployment resources in this CPU test.
+    tree = ast.parse(Path("scripts/run_glm53_dapo.py").read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run"
+    )
+    function.decorator_list = []
+    call = MagicMock(object_id="fc-existing")
+    sampler = MagicMock()
+    sampler.request.remote.return_value = {"dtype": "bfloat16", "quantization": None}
+    helpers = {
+        "prepare": MagicMock(),
+        "baseline": MagicMock(),
+        "write_json": write_json,
+        "write_status": MagicMock(),
+    }
+    env = {
+        "Path": lambda *parts: tmp_path.joinpath(str(parts[0]).lstrip("/"), *parts[1:]),
+        "sys": SimpleNamespace(path=[]),
+        "runpy": SimpleNamespace(run_path=lambda _: helpers),
+        "json": json,
+        "suppress": suppress,
+        "assets": MagicMock(),
+        "results": MagicMock(),
+        "Sampler": MagicMock(return_value=sampler),
+        "train": MagicMock(),
+        "modal": MagicMock(),
+    }
+    env["train"].spawn.return_value = call
+    env["modal"].FunctionCall.from_id.return_value = call
+    exec(
+        compile(ast.Module(body=[function], type_ignores=[]), "controller", "exec"), env
+    )
+    config = {
+        "run_id": "test",
+        "app_id": "ap-test",
+        "resume": "",
+        "prepare_only": False,
+    }
+    write_json(tmp_path / "checkpoints/test/baseline.json", {})
+    return env, config, call, sampler
+
+
+def test_controller_reattaches_after_cpu_preemption(tmp_path):
+    env, config, call, sampler = controller_fixture(tmp_path)
+    call.get.side_effect = [KeyboardInterrupt(), {"ok": True}]
+    with pytest.raises(KeyboardInterrupt):
+        env["run"]({}, {}, "{}", config)
+    call.cancel.assert_not_called()
+    sampler.update_autoscaler.assert_not_called()
+    assert sampler.request.remote.call_args_list[-1].args == ("ready",)
+    assert env["run"]({}, {}, "{}", config) == {"ok": True}
+    env["train"].spawn.assert_called_once()
+    env["modal"].FunctionCall.from_id.assert_called_once_with("fc-existing")
+    sampler.request.remote.assert_called_with("stop")
+    sampler.update_autoscaler.assert_called_once_with(
+        min_containers=0, max_containers=0
+    )
+
+
+def test_controller_cancels_trainer_on_failure(tmp_path):
+    env, config, call, sampler = controller_fixture(tmp_path)
+    call.get.side_effect = RuntimeError("trainer failed")
+    with pytest.raises(RuntimeError, match="trainer failed"):
+        env["run"]({}, {}, "{}", config)
+    call.cancel.assert_called_once_with(terminate_containers=True)
+    sampler.request.remote.assert_called_with("stop")
+    sampler.update_autoscaler.assert_called_once_with(
+        min_containers=0, max_containers=0
+    )
+
+
+def test_sampler_stop_does_not_call_decorated_exit_method():
+    tree = ast.parse(Path("scripts/run_glm53_dapo.py").read_text())
+    cls = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Sampler"
+    )
+    method = next(
+        node
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "request"
+    )
+    method.decorator_list = []
+    env = {"terminate": MagicMock()}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "sampler", "exec"), env)
+    sampler = SimpleNamespace(sidecar="sidecar", server="server")
+    env["request"](sampler, "stop")
+    assert [call.args for call in env["terminate"].call_args_list] == [
+        ("sidecar",),
+        ("server",),
+    ]

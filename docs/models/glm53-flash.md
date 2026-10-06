@@ -199,23 +199,22 @@ PYTHONPATH=src modal run --detach scripts/run_glm53_dapo.py
 ```
 
 This runs four independent rank-32 LoRA clients on the same four training nodes
-and one eight-GPU BF16 sampler. Each of 30 rounds collects 32 useful groups of
+and one eight-GPU BF16 sampler. Each of 30 rounds collects a fixed batch of 32 groups of
 8 responses **per client**, mixes their inference requests, and submits all four
 clients in one packed forward/backward call. Each adapter has its own optimizer
-state and publication namespace. The sampler allows 128 concurrent requests.
+state and publication namespace. The sampler allows 128 concurrent requests and submits another as each finishes.
 
 The run uses the pinned `zhuzilin/dapo-math-17k` dataset, GLM's native reasoning
 chat template, 16K context capacity, and an 8K generation limit. Miles' DAPO
-integer-answer grader gives +1 for a correct answer and −1 otherwise. Constant-
-reward groups are replaced; each client can sample up to 256 candidate groups
-per round before stopping with a diagnostic. Truncated responses have zero loss
-weight. Advantages use group sample-standard-deviation normalization, and the PPO
+integer-answer grader gives +1 for a correct answer and −1 otherwise. Constant-reward
+groups stay in the batch with zero advantage; no replacement groups are sampled.
+Truncated responses also have zero loss weight. Advantages use group sample-standard-deviation normalization, and the PPO
 objective averages over each client's non-truncated response tokens. Ratio bounds
 are 0.8 and 1.28, learning rate is 1e-5, and gradient clipping is 1.0. There is one
 optimizer update per round and no reference-policy KL term. This is GRPO/PPO on
 the DAPO Math task, without the paper's soft overlength penalty.
 
-Raw rollout accuracy, selected-batch accuracy, truncation, generation length,
+Rollout accuracy, informative-group counts, truncation, generation length,
 logprob differences, and phase timings are recorded separately for each client.
 A fixed 64-prompt held-out set is excluded from training, including duplicate
 prompt texts. The shared base is evaluated before allocating the trainers; each
@@ -234,7 +233,13 @@ PYTHONPATH=src modal run --detach scripts/run_glm53_dapo.py \
 The resume file includes all four optimizer checkpoints and dataset positions.
 A resumed attempt uses new publication namespaces. A run approaching the runtime
 limit saves a resume point and reports `paused`. Orchestration runs in a remote
-CPU function, so closing the launch terminal does not interrupt the loop.
+CPU function, so closing the launch terminal does not interrupt the loop. If that
+controller is preempted, its replacement reattaches to the saved trainer call.
+A failed trainer call stops the sampler.
+
+Before the first optimizer update, `--continue-run RUN_ID` can reuse the saved
+baseline and completed rollout groups on a fresh deployment. After an optimizer
+checkpoint exists, use `--resume` instead.
 
 Use `--prepare-only` to check the dataset and tokenization without allocating GPUs.
 This experiment uses the Miles command backend directly, as does the short BF16

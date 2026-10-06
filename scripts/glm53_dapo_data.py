@@ -9,7 +9,7 @@ import json
 import math
 import random
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import modal
@@ -40,7 +40,31 @@ def write_status(config, phase, **details):
 
 def prepare(config):
     root = Path("/checkpoints") / config["run_id"]
-    root.mkdir(exist_ok=False)
+    root.mkdir(exist_ok=True)
+    previous_path = root / "config.json"
+    if previous_path.exists():
+        previous = json.loads(previous_path.read_text())
+        for key in (
+            "clients",
+            "groups",
+            "group_size",
+            "max_tokens",
+            "learning_rate",
+            "seed",
+            "dataset",
+            "dataset_revision",
+            "eval_prompts",
+            "clip_low",
+            "clip_high",
+        ):
+            if previous[key] != config[key]:
+                raise ValueError(f"Existing run differs for {key}")
+        if (root / "dataset.json").exists():
+            write_json(root / "config.json", config)
+            modal.Volume.from_name(config["results_volume"]).commit()
+            return
+    elif config.get("continue_run"):
+        raise ValueError("The requested prior run does not exist")
     write_json(root / "config.json", config)
     write_status(config, "preparing_dataset")
     path = hf_hub_download(
@@ -204,7 +228,7 @@ def training_data(groups):
     return data, replay, total_tokens
 
 
-def sample_problems(sampler, jobs, config, version, *, evaluation=False):
+def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_group=None):
     """Mix clients in one request stream; every request pins its own adapter."""
     requests = []
     count = 1 if evaluation else config["group_size"]
@@ -231,22 +255,110 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False):
                     weight_version={"exact_version": version},
                 )
             requests.append(payload)
-    with ThreadPoolExecutor(max_workers=config["concurrency"]) as pool:
-        samples = list(
-            pool.map(
-                lambda payload: sampler.request.remote("generate", payload), requests
+    groups = [
+        {"client": client, "problem": problem, "samples": [None] * count}
+        for client, problem in jobs
+    ]
+    remaining = [count] * len(jobs)
+    pool = ThreadPoolExecutor(max_workers=config["concurrency"])
+    futures = {
+        pool.submit(sampler.request.remote, "generate", payload): divmod(index, count)
+        for index, payload in enumerate(requests)
+    }
+    try:
+        for future in as_completed(futures):
+            index, member = futures[future]
+            group = groups[index]
+            sample = grade_sample(future.result(), group["problem"])
+            assert (
+                sample["served_version"] == version
+            ), "Sampler served the wrong policy version"
+            group["samples"][member] = sample
+            remaining[index] -= 1
+            if remaining[index] == 0 and on_group is not None:
+                on_group(group)
+    finally:
+        # On failure, let the controller terminate serving instead of waiting for
+        # every queued generation to finish before it can clean up.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return groups
+
+
+def collect_training_groups(sampler, dataset, config, step, cursors, root):
+    """Collect a fixed batch, retaining constant-reward groups without replacement."""
+    groups = [[] for _ in range(config["clients"])]
+    positions = {}
+    jobs = []
+    for client in range(config["clients"]):
+        end = cursors[client] + config["groups"]
+        if end > len(dataset["orders"][client]):
+            raise RuntimeError(
+                "Training dataset exhausted; refusing to silently repeat prompts"
             )
-        )
-    groups = []
-    for index, (client, problem) in enumerate(jobs):
-        responses = [
-            grade_sample(s, problem)
-            for s in samples[index * count : (index + 1) * count]
-        ]
-        assert all(
-            s["served_version"] == version for s in responses
-        ), "Sampler served the wrong policy version"
-        groups.append({"client": client, "problem": problem, "samples": responses})
+        for position in range(cursors[client], end):
+            index = dataset["orders"][client][position]
+            problem = dataset["train"][index]
+            positions[client, problem["id"]] = position
+        path = root / f"client{client}-train-{step:04d}.jsonl.gz"
+        if config.get("continue_run") and step == 1 and path.exists():
+            with gzip.open(path, "rt") as stream:
+                groups[client] = [json.loads(line) for line in stream]
+            seen = set()
+            for group in groups[client]:
+                key = (client, group["problem"]["id"])
+                assert group["client"] == client and key in positions
+                position = positions[key]
+                assert position not in seen, "Duplicate saved training group"
+                seen.add(position)
+                expected = dataset["train"][dataset["orders"][client][position]]
+                assert group["problem"] == expected, "Saved prompt differs from dataset"
+                assert len(group["samples"]) == config["group_size"]
+                assert all(sample["served_version"] == 0 for sample in group["samples"])
+                group["position"] = position
+        else:
+            seen = set()
+        for position in range(cursors[client], end):
+            if position not in seen:
+                index = dataset["orders"][client][position]
+                jobs.append((client, dataset["train"][index]))
+    # Interleave clients so each has requests admitted throughout collection.
+    jobs.sort(key=lambda job: (positions[job[0], job[1]["id"]], job[0]))
+    last_saved = 0.0
+
+    def persist():
+        nonlocal last_saved
+        progress = []
+        for client, completed in enumerate(groups):
+            completed.sort(key=lambda group: group["position"])
+            save_rollouts(root / f"client{client}-train-{step:04d}.jsonl.gz", completed)
+            progress.append(
+                {
+                    "client": client,
+                    "completed_groups": len(completed),
+                    "target_groups": config["groups"],
+                    "informative_groups": sum(
+                        bool(np.any(group_advantages(g["samples"]))) for g in completed
+                    ),
+                    **(summary(completed) if completed else {}),
+                }
+            )
+        write_status(config, "sampling", step=step, clients=progress)
+        last_saved = time.monotonic()
+
+    def completed(group):
+        group["position"] = positions[group["client"], group["problem"]["id"]]
+        groups[group["client"]].append(group)
+        if time.monotonic() - last_saved >= 60:
+            persist()
+
+    persist()
+    try:
+        sample_problems(sampler, jobs, config, step - 1, on_group=completed)
+    finally:
+        persist()
+    assert all(len(batch) == config["groups"] for batch in groups)
+    for client in range(config["clients"]):
+        cursors[client] += config["groups"]
     return groups
 
 
@@ -269,9 +381,11 @@ def summary(groups):
 
 
 def save_rollouts(path, groups):
-    with gzip.open(path, "wt") as f:
+    temporary = Path(str(path) + ".tmp")
+    with gzip.open(temporary, "wt") as f:
         for group in groups:
             f.write(json.dumps(group) + "\n")
+    temporary.replace(path)
 
 
 def evaluate(sampler, config, dataset, step):

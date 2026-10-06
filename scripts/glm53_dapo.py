@@ -12,12 +12,10 @@ from tinker import AdamParams, LoraConfig
 
 from glm53_dapo_data import (
     MODEL,
+    collect_training_groups,
     evaluate,
-    group_advantages,
     publish,
-    sample_problems,
     save_checkpoint,
-    save_rollouts,
     summary,
     training_data,
     write_json,
@@ -85,85 +83,26 @@ def train(settings, sampler, config):
         volume.commit()
         for step in range(start_step + 1, config["steps"] + 1):
             step_start = time.monotonic()
-            round_start_cursors = list(cursors)
-            selected = [[] for _ in models]
-            candidates = [[] for _ in models]
-            wave_groups = max(1, config["concurrency"] // config["group_size"])
-            while any(len(groups) < config["groups"] for groups in selected):
-                if time.monotonic() - training_started > 72000:
-                    completed_step = step - 1
-                    if not (root / f"resume-{completed_step:04d}.json").exists():
-                        save_checkpoint(
-                            backend, config, completed_step, round_start_cursors
-                        )
-                    write_status(
-                        config,
-                        "paused",
-                        step=completed_step,
-                        resume=str(root / f"resume-{completed_step:04d}.json"),
-                    )
-                    return {
-                        "run_id": config["run_id"],
-                        "paused": True,
-                        "step": completed_step,
-                    }
-                jobs, picked = [], [0] * len(models)
-                while len(jobs) < wave_groups:
-                    before = len(jobs)
-                    for client in range(len(models)):
-                        if (
-                            len(jobs) == wave_groups
-                            or len(selected[client]) + picked[client]
-                            >= config["groups"]
-                        ):
-                            continue
-                        if (
-                            len(candidates[client]) + picked[client]
-                            >= config["max_candidate_groups"]
-                        ):
-                            if picked[client] == 0:
-                                raise RuntimeError(
-                                    f"Client {client}: only {len(selected[client])} useful groups after {len(candidates[client])} candidates"
-                                )
-                            continue
-                        cursor = cursors[client]
-                        if cursor >= len(dataset["orders"][client]):
-                            raise RuntimeError(
-                                "Training dataset exhausted; refusing to silently repeat prompts"
-                            )
-                        index = dataset["orders"][client][cursor]
-                        jobs.append((client, dataset["train"][index]))
-                        cursors[client] += 1
-                        picked[client] += 1
-                    if len(jobs) == before:
-                        break
-                for group in sample_problems(sampler, jobs, config, step - 1):
-                    client = group["client"]
-                    candidates[client].append(group)
-                    if np.any(group_advantages(group["samples"])):
-                        selected[client].append(group)
-                progress = []
-                for client in range(len(models)):
-                    save_rollouts(
-                        root / f"client{client}-train-{step:04d}.jsonl.gz",
-                        candidates[client],
-                    )
-                    progress.append(
-                        {
-                            "client": client,
-                            "selected_groups": len(selected[client]),
-                            **(
-                                summary(candidates[client])
-                                if candidates[client]
-                                else {}
-                            ),
-                        }
-                    )
+            if time.monotonic() - training_started > 72000:
+                completed_step = step - 1
+                if not (root / f"resume-{completed_step:04d}.json").exists():
+                    save_checkpoint(backend, config, completed_step, cursors)
                 write_status(
-                    config, "sampling", step=step, clients=progress, cursors=cursors
+                    config,
+                    "paused",
+                    step=completed_step,
+                    resume=str(root / "resume-latest.json"),
                 )
+                return {
+                    "run_id": config["run_id"],
+                    "paused": True,
+                    "step": completed_step,
+                }
+            candidates = collect_training_groups(
+                sampler, dataset, config, step, cursors, root
+            )
             sampling_s = time.monotonic() - step_start
-            batches = [training_data(groups) for groups in selected]
+            batches = [training_data(groups) for groups in candidates]
             write_status(
                 config,
                 "forward_backward",
@@ -207,7 +146,6 @@ def train(settings, sampler, config):
                         "client": client,
                         "cursor": cursors[client],
                         "raw_rollouts": summary(candidates[client]),
-                        "selected_rollouts": summary(selected[client]),
                         "trained_response_tokens": trained_tokens,
                         "train_sample_logprob_diff_mean": float(
                             np.abs(differences).mean()

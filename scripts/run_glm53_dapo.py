@@ -11,6 +11,7 @@ import runpy
 import subprocess
 import sys
 import uuid
+from contextlib import suppress
 from pathlib import Path
 
 import httpx
@@ -87,7 +88,8 @@ class Sampler:
     @modal.method()
     def request(self, operation: str, payload=None):
         if operation == "stop":
-            self.stop()
+            terminate(getattr(self, "sidecar", None))
+            terminate(getattr(self, "server", None))
             return
         with httpx.Client(timeout=6900) as client:
             if operation == "ready":
@@ -156,30 +158,67 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
     namespace = runpy.run_path("/tmp/glm53_dapo_data.py")
     assets.reload()
     results.reload()
+    control_path = Path("/checkpoints") / experiment["run_id"] / "controller.json"
+    control = json.loads(control_path.read_text()) if control_path.exists() else {}
+    reattach = control.get("app_id") == experiment["app_id"]
+    if (
+        experiment.get("continue_run")
+        and not reattach
+        and any(control_path.parent.glob("resume-*.json"))
+    ):
+        raise ValueError(
+            "Optimizer checkpoints exist; use --resume instead of --continue-run"
+        )
     namespace["prepare"](experiment)
     if experiment["prepare_only"]:
         return {"run_id": experiment["run_id"], "prepared": True}
     sampler = Sampler(settings_json=sampler_settings)
     sampler_ready = False
+    trainer_call = None
+    finished = False
     try:
         info = sampler.request.remote("ready")
         assert info["dtype"] == "bfloat16" and info["quantization"] is None
         sampler_ready = True
         print("DAPO SAMPLER READY", flush=True)
-        if not experiment["resume"]:
+        if (
+            not experiment["resume"]
+            and not (control_path.parent / "baseline.json").exists()
+        ):
             namespace["baseline"](sampler, experiment)
-        call = train.spawn(programs, settings, sampler_settings, experiment)
-        print("DAPO TRAINER", call.object_id, flush=True)
-        return call.get()
-    except BaseException as exc:
+        if reattach:
+            trainer_call = modal.FunctionCall.from_id(control["trainer_call_id"])
+            print("DAPO REATTACH", trainer_call.object_id, flush=True)
+        else:
+            trainer_call = train.spawn(programs, settings, sampler_settings, experiment)
+            namespace["write_json"](
+                control_path,
+                {
+                    "app_id": experiment["app_id"],
+                    "trainer_call_id": trainer_call.object_id,
+                },
+            )
+            results.commit()
+            print("DAPO TRAINER", trainer_call.object_id, flush=True)
+        outcome = trainer_call.get()
+        finished = True
+        return outcome
+    except Exception as exc:
+        finished = True
+        if trainer_call is not None:
+            with suppress(Exception):
+                trainer_call.cancel(terminate_containers=True)
         namespace["write_status"](experiment, "failed", error=repr(exc))
         raise
     finally:
-        try:
-            if sampler_ready:
-                sampler.request.remote("stop")
-        finally:
-            sampler.update_autoscaler(min_containers=0, max_containers=0)
+        # Preemption interrupts this CPU waiter with KeyboardInterrupt. Leave the
+        # GPU call alive; the restarted waiter reattaches using controller.json.
+        if finished:
+            try:
+                if sampler_ready:
+                    sampler.request.remote("stop")
+            finally:
+                sampler.update_autoscaler(min_containers=0, max_containers=0)
 
 
 @app.local_entrypoint()
@@ -196,6 +235,7 @@ def main(
     concurrency: int = 128,
     prepare_only: bool = False,
     resume: str = "",
+    continue_run: str = "",
 ):
     if (
         min(
@@ -214,6 +254,12 @@ def main(
         raise ValueError(
             "This recipe supports up to four clients, 128 concurrent requests and 8192 generated tokens"
         )
+    if continue_run and (
+        not continue_run.startswith("glm53-dapo-") or "/" in continue_run or resume
+    ):
+        raise ValueError(
+            "Use a DAPO run ID for --continue-run, separately from --resume"
+        )
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     inference = dict(config.inference_settings)
     inference.update(
@@ -227,7 +273,8 @@ def main(
         ),
     )
     experiment = {
-        "run_id": "glm53-dapo-" + uuid.uuid4().hex[:12],
+        "run_id": continue_run or "glm53-dapo-" + uuid.uuid4().hex[:12],
+        "continue_run": continue_run,
         "steps": steps,
         "clients": clients,
         "groups": groups,
@@ -245,7 +292,8 @@ def main(
         "dataset_revision": "2e65612930298bde4c5d58fd97b3f23a483aaff9",
         "results_volume": RESULTS_VOLUME,
         "context_length": 16384,
-        "max_candidate_groups": groups * 8,
+        "dynamic_sampling": False,
+        "app_id": app.app_id,
         "clip_low": 0.8,
         "clip_high": 1.28,
         "enable_thinking": True,
