@@ -196,6 +196,9 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
         for call in ready_calls:
             info = call.get()
             assert info["dtype"] == "bfloat16" and info["quantization"] is None
+            assert info["cuda_graph_config"]["decode"]["backend"] == "full", (
+                "GLM rollouts require decode CUDA graphs"
+            )
         sampler_ready = True
         print("DAPO SAMPLER READY", flush=True)
         if reattach:
@@ -291,7 +294,8 @@ def main(
     inference.update(
         quantization=None,
         dtype="bfloat16",
-        disable_cuda_graph=True,
+        cuda_graph_backend_decode="full",
+        cuda_graph_max_bs_decode=concurrency,
         max_running_requests=concurrency,
         max_queued_requests=concurrency,
         model_loader_extra_config=json.dumps(
@@ -313,7 +317,8 @@ def main(
         "beta2": 0.98,
         "weight_decay": 0.1,
         "routing_replay": True,
-        "recipe": "glm53-kda-gates-r3-independent-v2",
+        "recipe": "glm53-kda-gates-r3-independent-v3",
+        "decode_cuda_graph": True,
         "checkpoint_every": checkpoint_every,
         "eval_prompts": eval_prompts,
         "eval_every": eval_every,

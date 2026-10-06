@@ -208,6 +208,7 @@ def controller_fixture(tmp_path):
     sampler.request.spawn.return_value.get.return_value = {
         "dtype": "bfloat16",
         "quantization": None,
+        "cuda_graph_config": {"decode": {"backend": "full"}},
     }
     helpers = {
         "prepare": MagicMock(),
@@ -370,3 +371,16 @@ def test_clients_route_to_separate_replicas():
     assert all(p["weight_run_id"] == "test-client0" for p in received[0])
     assert all(p["weight_run_id"] == "test-client1" for p in received[1])
     assert list(map(len, received)) == [2, 2]
+
+
+def test_controller_rejects_eager_rollouts_before_launching_trainer(tmp_path):
+    env, config, call, sampler = controller_fixture(tmp_path)
+    sampler.request.spawn.return_value.get.return_value["cuda_graph_config"]["decode"][
+        "backend"
+    ] = "disabled"
+    with pytest.raises(AssertionError, match="require decode CUDA graphs"):
+        env["run"]({}, {}, "{}", config)
+    env["train"].spawn.assert_not_called()
+    sampler.update_autoscaler.assert_called_once_with(
+        min_containers=0, max_containers=0
+    )
