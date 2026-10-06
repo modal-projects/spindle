@@ -199,3 +199,60 @@ def test_transport_does_not_cast_values_based_only_on_declared_dtype(dtype, valu
     result = decode_payload(encode_payload(original))
     assert serialize_operation_payload(result) == serialize_operation_payload(original)
     assert result.data[0].loss_fn_inputs["weights"].data == values
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_binary_matches_previous_json_backend_path(seed):
+    """Compare executor inputs against the old serialize/JSON/parse sequence."""
+    rng = np.random.default_rng(seed)
+    raw = serialize_operation_payload(payload())
+    raw["data"] = [
+        {
+            "model_input": {
+                "chunks": [{"tokens": rng.integers(0, 150000, 37).tolist()}]
+            },
+            "loss_fn_inputs": {
+                "advantages": {
+                    "data": rng.normal(size=37).tolist(),
+                    "dtype": "float32",
+                    "shape": [37] if seed % 2 else None,
+                },
+                "target_tokens": {
+                    "data": [-(2**63), 2**63 - 1, 2**53 + 1],
+                    "dtype": "int64",
+                    "shape": [3],
+                },
+                "weights": {
+                    "data": [-0.0, 5e-324, 1.7976931348623157e308],
+                    "dtype": "float32",
+                    "shape": [3],
+                },
+            },
+        }
+        for _ in range(3)
+    ] + raw["data"]
+    original = parse_operation_payload(OperationKind.FORWARD_BACKWARD, raw)
+    previous = parse_operation_payload(
+        OperationKind.FORWARD_BACKWARD,
+        json.loads(json.dumps(serialize_operation_payload(original))),
+    )
+    actual = decode_payload(encode_payload(original))
+    assert actual.loss_fn == previous.loss_fn
+    assert actual.loss_fn_config == previous.loss_fn_config
+    assert len(actual.data) == len(previous.data)
+    for before, after in zip(previous.data, actual.data, strict=True):
+        assert before.model_input == after.model_input
+        assert before.loss_fn_inputs.keys() == after.loss_fn_inputs.keys()
+        for name, tensor in before.loss_fn_inputs.items():
+            result = after.loss_fn_inputs[name]
+            assert tensor.dtype == result.dtype
+            assert tensor.shape == result.shape
+            assert tensor.sparse_crow_indices == result.sparse_crow_indices
+            assert tensor.sparse_col_indices == result.sparse_col_indices
+            assert len(tensor.data) == len(result.data)
+            for x, y in zip(tensor.data, result.data, strict=True):
+                assert type(x) is type(y)
+                if isinstance(x, float):
+                    assert struct.pack("<d", x) == struct.pack("<d", y)
+                else:
+                    assert x == y

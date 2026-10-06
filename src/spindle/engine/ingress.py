@@ -134,7 +134,8 @@ def _decode_proto_tensor(value) -> TensorData:
         item_format, dtype = _PROTO_DTYPES[dtype_value]
     except KeyError:
         raise ValueError(f"unsupported protobuf tensor dtype: {dtype_value}") from None
-    shape = list(value.shape)
+    # Repeated protobuf fields have no presence bit; empty means infer shape.
+    shape = list(value.shape) or None
     if value.WhichOneof("encoding") == "sparse_csr":
         sparse = value.sparse_csr
         return TensorData(
