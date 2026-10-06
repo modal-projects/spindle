@@ -1,10 +1,10 @@
 """Correlate client chunk hashes with backend arrivals; refuse mismatched data."""
 
 import argparse
-from collections import Counter, defaultdict, deque
 import json
-from pathlib import Path
 import statistics
+from collections import Counter, defaultdict, deque
+from pathlib import Path
 
 
 def rows(path):
@@ -13,12 +13,13 @@ def rows(path):
     result = []
     for line in path.read_text().splitlines():
         start = line.find("{")
-        if start < 0:
-            continue
-        try:
-            result.append(json.loads(line[start:]))
-        except ValueError:
-            continue
+        while start >= 0:
+            try:
+                value, end = json.JSONDecoder().raw_decode(line[start:])
+                result.append(value)
+                start = line.find("{", start + end)
+            except ValueError:
+                break
     return result
 
 
@@ -40,7 +41,20 @@ def summarize(clients, backend, warmup):
         any(r["event"] == "complete" for r in trace) for trace in traces
     ), "Run is incomplete"
     received = defaultdict(deque)
-    for row in rows(backend):
+    backend_rows = rows(backend)
+    decoded, submitted, dispatched, finished = {}, {}, {}, {}
+    for row in backend_rows:
+        mark = row.get("mark")
+        if mark == "engine.forward_backward.decoded":
+            decoded.setdefault(row["request_id"], row["ts"])
+        elif mark == "engine.op.submitted":
+            submitted.setdefault(row["request_id"], row["ts"])
+        elif mark == "engine.op.exec_begin":
+            for request_id in row["request_ids"]:
+                dispatched.setdefault(request_id, row["ts"])
+        elif mark == "engine.op.exec_end" and row["ok"]:
+            for request_id in row["request_ids"]:
+                finished.setdefault(request_id, row["ts"])
         if row.get("mark") == "benchmark.backend_payload":
             received[(row["model_id"], row["sha256"])].append(row["arrived"])
     expected = Counter(
@@ -63,11 +77,34 @@ def summarize(clients, backend, warmup):
         train = {r["step"]: r["time"] for r in trace if r["event"] == "train_done"}
         for step, r in prepared.items():
             arrivals = [received[(r["model_id"], h)].popleft() for h in r["sha256"]]
+            ids = [
+                f"{r['model_id']}:{r['first_seq'] + i}" for i in range(len(arrivals))
+            ]
+            stages = {}
+            if all(i in decoded and i in submitted and i in dispatched for i in ids):
+                stages = {
+                    "all_chunks_submitted_s": max(submitted[i] for i in ids)
+                    - starts[step],
+                    "chunk_prepare_s": statistics.mean(
+                        submitted[i] - decoded[i] for i in ids
+                    ),
+                    "chunk_queue_s": statistics.mean(
+                        dispatched[i] - submitted[i] for i in ids
+                    ),
+                    "chunk_transport_s": statistics.mean(
+                        t - dispatched[i] for i, t in zip(ids, arrivals, strict=True)
+                    ),
+                }
+            if all(i in finished for i in ids):
+                stages["result_delivery_s"] = ends[step] - max(finished[i] for i in ids)
             requests.append(
                 {
+                    **stages,
                     "client": r["client"],
                     "step": step,
                     "tokens": r["input_tokens"],
+                    "started": starts[step],
+                    "finished": train[step],
                     "chunks": r["chunks"],
                     "first_backend_s": min(arrivals) - starts[step],
                     "last_backend_s": max(arrivals) - starts[step],
@@ -76,7 +113,35 @@ def summarize(clients, backend, warmup):
                 }
             )
     measured = [r for r in requests if r["step"] >= warmup]
+    window_start = min(r["started"] for r in measured)
+    window_end = max(r["finished"] for r in measured)
+    elapsed = window_end - window_start
+    backend_seconds = Counter()
+    for row in backend_rows:
+        if (
+            row.get("event") == "spindle_step_timing"
+            and window_start <= row["ts"] - row["seconds"]
+            and row["ts"] <= window_end
+        ):
+            backend_seconds[row["phase"]] += row["seconds"]
+        elif (
+            row.get("mark") == "benchmark.audit_done"
+            and window_start <= row["ts"] - row["seconds"]
+            and row["ts"] <= window_end
+        ):
+            backend_seconds["data_audit"] += row["seconds"]
+    audits = [
+        r["seconds"] for r in rows(backend) if r.get("mark") == "benchmark.audit_done"
+    ]
     return {
+        "backend_seconds_in_measured_window": dict(backend_seconds),
+        "throughput": {
+            "input_tokens": sum(r["tokens"] for r in measured),
+            "elapsed_s": elapsed,
+            "input_tokens_per_s": sum(r["tokens"] for r in measured) / elapsed,
+            "window": "first measured forward call to last measured optimizer result",
+        },
+        "audit_seconds": distribution(audits) if audits else None,
         "correctness": {
             "matched_chunks": sum(expected.values()),
             "matched_updates": len(requests),
@@ -92,6 +157,17 @@ def summarize(clients, backend, warmup):
                 "forward_result_s",
                 "train_result_s",
             ]
+        },
+        "request_stages": {
+            k: distribution([r[k] for r in measured if k in r])
+            for k in (
+                "all_chunks_submitted_s",
+                "chunk_prepare_s",
+                "chunk_queue_s",
+                "chunk_transport_s",
+                "result_delivery_s",
+            )
+            if any(k in r for r in measured)
         },
         "requests": requests,
     }

@@ -2,9 +2,9 @@ from spindle.configs.qwen35_9b_instruct_lora_16k import Config as Parent
 
 
 class Config(Parent):
-    name = "request-path-before-20261006b"
-    trainer_gpu = "H200"
-    trainer_gpus_per_node = 8
+    name = "request-path-before-20261006fit"
+    trainer_gpu = "H100"
+    trainer_gpus_per_node = 4
     trainer_cpu = 32
     trainer_memory_mib = 262144
     trainer_max_instances = 1
@@ -20,15 +20,16 @@ class Config(Parent):
         "trainer_env.TORCH_COMPILE_DISABLE": "1",
         "miles_cfg.tensor_model_parallel_size": 1,
         "miles_cfg.max_lora_slots": 8,
-        "miles_cfg.max_tokens_per_gpu": 32768,
-        "platform.frontend": "spindle-request-path-before-20261006b",
+        # Fits H100 memory; longest replay sequence is 16,670 tokens.
+        "miles_cfg.max_tokens_per_gpu": 20480,
+        "platform.frontend": "spindle-request-path-before-20261006fit",
         "platform.modal.environment": "lilo-deploy",
         "platform.modal.region": "us-west",
         "platform.secrets.api": "spindle-swe-staggered-api",
         "platform.secrets.sampler_proxy": "lilo-proxy",
         "platform.storage.assets": "lilo-model-assets",
-        "platform.storage.checkpoints": "spindle-request-path-20261006b-checkpoints",
-        "platform.storage.bulletin": "spindle-request-path-20261006b-bulletin",
+        "platform.storage.checkpoints": "spindle-request-path-20261006fit-checkpoints",
+        "platform.storage.bulletin": "spindle-request-path-20261006fit-bulletin",
         "sglang_cfg.tp_size": 2,
         "sglang_cfg.max_running_requests": 128,
         "sglang_cfg.max_queued_requests": 256,

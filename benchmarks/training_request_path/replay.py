@@ -58,6 +58,8 @@ def main():
     parser.add_argument("--clients", type=int, default=8)
     parser.add_argument("--start-update", type=int, default=8)
     parser.add_argument("--updates", type=int, default=6)
+    parser.add_argument("--startup-stagger", type=float, default=0.0)
+    parser.add_argument("--submission-stagger", type=float, default=0.0)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "config.json").write_text(
@@ -82,6 +84,7 @@ def main():
                 )
 
         try:
+            time.sleep(index * args.startup_stagger)
             event("create_start")
             service = tinker.ServiceClient(base_url=args.base_url)
             trainer = service.create_lora_training_client(
@@ -127,6 +130,9 @@ def main():
                     input_tokens=sum(d.model_input.length for d in data),
                     examples=len(data),
                 )
+                if step == 0:
+                    barrier.wait()
+                    time.sleep(index * args.submission_stagger)
                 start = time.time()
                 event("forward_start", step=step)
                 future = trainer.forward_backward(data, "ppo", loss_fn_config=config)

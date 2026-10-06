@@ -3,8 +3,8 @@
 These scripts replay saved inputs from the eight-client Qwen3.5-9B DAPO run of
 2026-10-02. They do not generate a substitute dataset. Each client update contains
 64 responses. Token IDs, rollout log probabilities, rewards and the original
-advantage calculation are preserved. The CPU codec test uses updates 8–13; the
-HTTP tests use updates 8–10.
+advantage calculation are preserved. The GPU and CPU codec tests use updates 8–13; the
+local HTTP tests use updates 8–10.
 
 ## Changes
 
@@ -34,9 +34,12 @@ supported. No result format, loss function or optimizer behavior changes.
 The HTTP benchmark computes SHA-256 over an independent canonical JSON
 representation before submission and again at executor entry. It compares the
 complete multiset of `(model_id, payload_hash)` pairs, checking for altered,
-missing and duplicate chunks. Every measured arm delivered all 217 chunks from
-24 client updates (24,772,945 input tokens) exactly. The longer CPU codec replay
-also matched all 48 updates: 3,072 datums and 49,331,231 input tokens.
+missing and duplicate chunks. Both GPU arms delivered all **436 chunks from 48 client updates** exactly:
+3,072 datums and **49,331,231 input tokens per arm**. Every optimizer update
+succeeded with finite metrics. The backend reported the expected token and
+sequence counts for each update. The first-update losses matched exactly for
+all eight clients. The local HTTP tests also matched all 217 chunks across 24
+updates, and the CPU codec replay matched the same 48 updates used on GPU.
 
 244 engine, control-plane, provider and replay tests pass. They include exact
 numeric preservation, sparse and multimodal data, JSON/protobuf retry equivalence,
@@ -44,10 +47,81 @@ changed-data rejection, compressed-request rejection with sequence advancement,
 concurrent routing, closed sessions and cancelled liveness waiters. Two separate
 SDK tests verify unchanged chunk-size estimates without tensor-list conversion.
 
-This establishes data preservation through executor entry. A real GPU A/B is
-still needed to compare losses, parameter updates and actual training latency.
+These checks cover data preservation and successful real training. They do not
+establish bitwise parameter equivalence: per-model seeds are unsupported by this
+Miles backend, CUDA execution was not forced deterministic, and no checkpoints
+were saved. Across all updates, the largest absolute loss-sum difference was
+0.00002815; this is a diagnostic value, not an asserted numerical tolerance.
 
-## Measurement boundaries
+## GPU comparison: October 6, 2026
+
+![GPU request performance](gpu-comparison.png)
+
+Baseline: commit `7279288e095d7d1b42cd6abb902cbf87ddc6039d`. Optimized:
+`633f914`. Both used the released Tinker 0.24.1 SDK; the optional SDK patch was
+not applied. Only the eight intended request-path source files differed between
+the deployed copies. Both received the same benchmark instrumentation.
+
+Both configurations used Qwen3.5-9B, eight rank-32 clients, one **4×H100 trainer**,
+TP1/DP4, 32 CPUs, 256 GiB host memory, 32k context and a **20,480-token microbatch
+budget per GPU**. PyTorch compilation was disabled with `TORCH_COMPILE_DISABLE=1` in both
+sets of Ray workers. GPU kernels could still compile on first use, and both
+used the shared kernel cache. Two warmup updates were excluded. The longest saved input was 16,670 tokens; none were
+truncated. Eight-GPU allocations stayed queued, and 32k microbatches exceeded
+H100 memory, so both measured runs used this smaller GPU configuration and token
+budget. Aborted attempts are excluded.
+
+Client creation was staggered by five seconds and initial submissions by two
+seconds. Each client completed six updates. The first two were excluded, leaving
+**32 measured client updates and 32,867,945 input tokens per arm**. The baseline
+was fully stopped and verified to have zero tasks before optimized clients
+started. All test apps were stopped after completion; existing deployments were
+not redeployed. Sampling, publication and checkpointing were disabled; saved
+rollouts make the training inputs identical.
+
+| Metric | Baseline | Optimized | Change |
+| --- | ---: | ---: | ---: |
+| Training input tokens/s | 20,526 | 23,469 | +14.3% |
+| Mean call → forward/backward result | 349.41 s | 306.02 s | −12.4% |
+| Mean call → optimizer result | 385.81 s | 341.02 s | −11.6% |
+| Mean call → full input admitted by engine | 36.85 s | 11.13 s | −69.8% |
+| Mean call → backend entry, including queue | 82.71 s | 35.86 s | −56.6% |
+| Mean internal encode/send/decode per chunk | 16.44 s | 1.84 s | −88.8% |
+| Mean result delivery after engine completion | 15.49 s | 19.57 s | +26.4% |
+| Mean GPU activity | 71.2% | 82.2% | +10.9 percentage points |
+
+Throughput divides measured input tokens by wall time from the first measured
+forward call to the last measured optimizer result: **1,601.32 s versus
+1,400.46 s**. It includes client preparation between updates and all request,
+training and result overhead during that interval. This is training input TPS;
+there is no live inference throughput measurement. P95 forward-result latency
+fell from 405.82 s to 350.96 s.
+
+The SDK splits each client batch into HTTP chunks. Internal encode/send/decode
+measures dispatch to executor entry for the batch carrying each chunk; chunks
+combined into one backend call share that duration. It includes serialization
+and parsing, not just network transit. These overlapping per-request durations
+must not be summed to obtain total run time. Admission ends when the engine has
+accepted every chunk. Result delivery starts at the engine's execution-complete
+marker and includes frontend retrieval, transfer, SDK decoding and polling.
+
+Backend forward/backward calls occupied **1,185.58 s versus 1,190.72 s** in the
+measured windows, a 0.4% increase. The throughput gain came from reduced time
+around those calls. The response tail got longer in this pair; its individual
+causes were not separated by this benchmark. It remains an optimization target.
+
+The independent data audit cost **46.80 s versus 44.79 s** in the measured windows
+and is included in the results. Lightweight request timing and five-second GPU
+sampling were enabled in both. This is one sequential A/B pair on separate Modal
+allocations; the size of the improvement may differ on other workloads.
+
+![GPU activity during measured updates](gpu-activity.png)
+
+GPU activity is the five-second `nvidia-smi` utilization reading averaged across
+four GPUs. It shows shorter idle gaps with the optimized path. MFU was not
+measured.
+
+## Local HTTP measurement boundaries
 
 `http_replay.py` runs the real SDK, frontend, engine and backend as separate local
 HTTP processes. Eight clients run concurrently; arms run sequentially and each
@@ -64,12 +138,6 @@ excluded as warmup, leaving 16 measured calls per arm.
 - `cpu_replay.py` isolates encoding/decoding on CPU, excluding HTTP, queues,
   routing, GPU execution, result delivery and SDK chunk sizing. It encodes a full
   client batch rather than SDK-sized chunks.
-
-The isolated 8×H200 baseline deployment remained queued with zero runners for
-approximately 40 minutes. It never executed a training step. All isolated test
-apps were then stopped and verified to have zero tasks. Existing deployments
-were not redeployed. The GPU comparison is blocked on allocation; no conclusion
-about actual training throughput or model-update equivalence is claimed.
 
 ## Local HTTP results (seconds)
 
@@ -121,5 +189,7 @@ Ray workers, and the same executor audit. `deployment.py` describes the GPU
 configuration; change the test deployment names and storage names for a new run.
 Deployment is explicit, never performed by the replay scripts. For a GPU run,
 use `replay.py --archive "$ARCHIVE" --base-url URL --output OUTPUT` (six updates)
-and summarize with `--warmup 2`. Stop the first arm completely before starting
-the second. Stop all isolated apps afterwards, including on client failure.
+and summarize with `--warmup 2`. The current GPU recipe uses four H100s and a
+20,480-token microbatch budget; all saved sequences fit without truncation. Pass
+`--startup-stagger 5 --submission-stagger 2` for the matched GPU comparison.
+Stop the first arm completely before starting the second. Stop all isolated apps afterwards, including on client failure.
