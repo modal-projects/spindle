@@ -22,7 +22,7 @@ from spindle.encoding import canonical_json
 
 from .api import Command, OperationKind
 
-CONTENT_TYPE = "application/vnd.spindle.training.v1"
+TRAINING_BATCH_CONTENT_TYPE = "application/vnd.spindle.training.v1"
 _MAGIC = b"SPND1\0"
 _SIZE = struct.Struct("<Q")
 

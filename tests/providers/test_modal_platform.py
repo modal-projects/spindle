@@ -180,6 +180,7 @@ def test_concurrent_instance_reads_share_only_pending_liveness_check():
             first = asyncio.create_task(platform.get_instance("shared"))
             await entered.wait()
             second = asyncio.create_task(platform.get_instance("shared"))
+            # Yield so the second waiter joins the pending read before cancellation.
             await asyncio.sleep(0)
             first.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -187,11 +188,46 @@ def test_concurrent_instance_reads_share_only_pending_liveness_check():
             release.set()
             assert (await second).state == "running"
             assert calls == 1
-            assert not platform._instance_reads
             # No cache survives completion; the next read must see a restart.
             restarted = record.model_copy(update={"boot_id": "new-boot"})
             await kv.put(instance_key("shared"), restarted.model_dump(mode="json"))
             assert (await platform.get_instance("shared")).boot_id == "new-boot"
             assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_failed_shared_instance_read_reaches_all_waiters_and_can_retry():
+    async def run():
+        platform, kv, _ = recording_platform()
+        entered, release = asyncio.Event(), asyncio.Event()
+        failure = RuntimeError("instance store unavailable")
+
+        async def fail_read(key):
+            entered.set()
+            await release.wait()
+            raise failure
+
+        with patch.object(kv, "get", side_effect=fail_read) as get:
+            first = asyncio.create_task(platform.get_instance("shared"))
+            await entered.wait()
+            second = asyncio.create_task(platform.get_instance("shared"))
+            # Yield so both callers await the same read before it fails.
+            await asyncio.sleep(0)
+            release.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
+            assert results == [failure, failure]
+            get.assert_awaited_once_with(instance_key("shared"))
+
+        # A later read must reach the store again rather than reuse the failure.
+        record = EngineInstanceRecord(
+            instance_id="shared",
+            definition_id=DEFINITION,
+            revision="one",
+            state="running",
+            boot_id="recovered-boot",
+        )
+        await kv.put(instance_key("shared"), record.model_dump(mode="json"))
+        assert (await platform.get_instance("shared")).boot_id == "recovered-boot"
 
     asyncio.run(run())

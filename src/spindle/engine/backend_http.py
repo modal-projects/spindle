@@ -24,7 +24,7 @@ from .operations import (
     parse_operation_payload,
     serialize_operation_payload,
 )
-from .training_transport import CONTENT_TYPE, decode_batch, encode_batch
+from .training_transport import TRAINING_BATCH_CONTENT_TYPE, decode_batch, encode_batch
 
 
 class ModelBody(BaseModel):
@@ -109,7 +109,7 @@ def create_backend_app(executor: Executor) -> FastAPI:
     @app.post("/execute_forward_backward_batch")
     async def execute_forward_backward_batch(request: Request) -> JSONResponse:
         body = await request.body()
-        if request.headers.get("content-type") == CONTENT_TYPE:
+        if request.headers.get("content-type") == TRAINING_BATCH_CONTENT_TYPE:
             commands = await asyncio.to_thread(decode_batch, body)
         else:
             parsed = ForwardBackwardBatchBody.model_validate_json(body)
@@ -215,7 +215,7 @@ class HttpBackendClient:
         result = await self._post(
             "/execute_forward_backward_batch",
             encoded,
-            content_type=CONTENT_TYPE,
+            content_type=TRAINING_BATCH_CONTENT_TYPE,
         )
         return tuple(result)
 
