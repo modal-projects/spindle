@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -109,3 +110,34 @@ def test_unsupported_backend_rejects_replay():
             max_slots=None,
             max_seq_length=32,
         )
+
+
+@pytest.mark.parametrize(
+    "extra,override,enabled",
+    [
+        (False, True, True),
+        (True, None, True),
+        (True, False, False),
+    ],
+)
+def test_router_admission_honors_cli_override(tmp_path, extra, override, enabled):
+    backend = _backend(tmp_path)
+    backend.config = replace(
+        backend.config,
+        extra_args=("--use-rollout-routing-replay",) if extra else (),
+        cli_options={}
+        if override is None
+        else {"use_rollout_routing_replay": override},
+    )
+    backend.accept_model("m", _spec())
+    batch = ForwardBatch(
+        items=(ForwardItem("m", (replay_datum(),)),),
+        loss_fn="ppo",
+        loss_fn_config={"sampling_temperature": 0.7},
+    )
+    if enabled:
+        backend.forward_backward(batch)
+        assert any(c[0] == "forward_backward" for c in backend.runtime.calls)
+    else:
+        with pytest.raises(ValueError, match="use-rollout-routing-replay"):
+            backend.forward_backward(batch)

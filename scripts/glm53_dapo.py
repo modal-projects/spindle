@@ -69,7 +69,9 @@ def train(settings, sampler, config):
                 ModelSpec(
                     base_model=MODEL,
                     parameterization="lora",
-                    lora_config=LoraConfig(rank=32, train_unembed=False),
+                    lora_config=LoraConfig(
+                        rank=config["lora_rank"], train_unembed=False
+                    ),
                 ),
             )
             if resume:
@@ -102,7 +104,10 @@ def train(settings, sampler, config):
                 sampler, dataset, config, step, cursors, root
             )
             sampling_s = time.monotonic() - step_start
-            batches = [training_data(groups) for groups in candidates]
+            batches = [
+                training_data(groups, routing_replay=config["routing_replay"])
+                for groups in candidates
+            ]
             write_status(
                 config,
                 "forward_backward",
@@ -167,7 +172,13 @@ def train(settings, sampler, config):
             start = time.monotonic()
             optimizers = backend.optim_step(
                 tuple(models),
-                AdamParams(learning_rate=config["learning_rate"], grad_clip_norm=1.0),
+                AdamParams(
+                    learning_rate=config["learning_rate"],
+                    beta1=config["beta1"],
+                    beta2=config["beta2"],
+                    weight_decay=config["weight_decay"],
+                    grad_clip_norm=1.0,
+                ),
             )
             optimizer_s = time.monotonic() - start
             for row, optimizer in zip(rows, optimizers, strict=True):

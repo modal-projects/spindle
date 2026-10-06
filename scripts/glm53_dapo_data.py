@@ -19,6 +19,8 @@ from miles.rollout.rm_hub.math_dapo_utils import compute_score
 from tinker import Datum, ModelInput, TensorData
 from transformers import AutoTokenizer
 
+from spindle.replay import SamplingReplay
+
 
 MODEL = "zai-org/GLM-5.3-Flash"
 
@@ -44,6 +46,8 @@ def prepare(config):
     previous_path = root / "config.json"
     if previous_path.exists():
         previous = json.loads(previous_path.read_text())
+        if previous.get("recipe") != config.get("recipe"):
+            raise ValueError("Changed LoRA targets or replay require a fresh run")
         for key in (
             "clients",
             "groups",
@@ -123,6 +127,8 @@ def prepare(config):
     if config["resume"]:
         state = json.loads(Path(config["resume"]).read_text())
         previous = state["config"]
+        if previous.get("recipe") != config.get("recipe"):
+            raise ValueError("Changed LoRA targets or replay require a fresh run")
         for key in (
             "clients",
             "dataset",
@@ -173,6 +179,7 @@ def grade_sample(sample, problem):
         "prediction": score["pred"],
         "truncated": reason == "length",
         "served_version": metadata.get("weight_version_start", 0),
+        "routed_experts": metadata.get("routed_experts"),
     }
 
 
@@ -188,7 +195,7 @@ def group_advantages(samples):
     return advantages
 
 
-def training_data(groups):
+def training_data(groups, *, routing_replay=False):
     total_tokens = sum(
         len(s["tokens"]) for g in groups for s in g["samples"] if not s["truncated"]
     )
@@ -202,10 +209,22 @@ def training_data(groups):
             tokens = prompt + sample["tokens"]
             prefix = len(prompt) - 1
             length = len(tokens) - 1
+            replay_inputs = {}
+            if routing_replay:
+                if not sample.get("routed_experts"):
+                    raise ValueError("Training rollout is missing expert routes")
+                replay_inputs = SamplingReplay(
+                    prompt_tokens=len(prompt),
+                    temperature=1.0,
+                    routed_experts=sample["routed_experts"],
+                ).training_inputs(
+                    len(sample["tokens"]), num_layers=45, experts_per_token=8
+                )
             data.append(
                 Datum(
                     ModelInput.from_ints(tokens[:-1]),
                     {
+                        **replay_inputs,
                         "target_tokens": TensorData(
                             data=tokens[1:], dtype="int64", shape=[length]
                         ),
@@ -249,6 +268,8 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_grou
                     + (0 if evaluation else 1000003 * client),
                 },
             }
+            if config.get("routing_replay") and not evaluation:
+                payload.update(return_routed_experts=True, routed_experts_start_len=0)
             if version:
                 payload.update(
                     weight_run_id=f"{config['run_id']}-client{client}",

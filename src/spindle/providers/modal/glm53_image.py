@@ -27,7 +27,7 @@ SGLANG_REGISTRY_PATCH = (
     + SGLANG_LORA_LIFETIME_PATCH.split(_REGISTRY_PATCH_HEADER, 1)[1]
 )
 
-# KDA and DSA have different projection widths in the same model.
+# KDA dimensions and gate registration, adapted from sgl-project/sglang#37753.
 SGLANG_GLM_LORA_DIMENSIONS_PATCH = (
     "--- a/python/sglang/srt/models/glm5_next.py\n"
     "+++ b/python/sglang/srt/models/glm5_next.py\n"
@@ -39,14 +39,20 @@ SGLANG_GLM_LORA_DIMENSIONS_PATCH = (
     " from sglang.srt.managers.mm_utils import (\n"
     "     MultiModalityDataPaddingPatternMultimodalTokens,\n"
     "     general_mm_embed_routine,\n"
-    "@@ -1205,6 +1206,16 @@\n"
+    "@@ -1205,6 +1206,22 @@\n"
     "     }\n"
     "     fall_back_to_pt_during_load = False\n"
     " \n"
     "+    def get_hidden_dim(self, module_name: str, layer_idx: int):\n"
+    "+        linear = self.config.linear_attn_config\n"
+    '+        width = linear["num_heads"] * linear["head_dim"]\n'
+    '+        if module_name in ("f_a_proj", "g_a_proj"):\n'
+    '+            return self.config.hidden_size, linear["head_dim"]\n'
+    '+        if module_name in ("f_b_proj", "g_b_proj"):\n'
+    '+            return linear["head_dim"], width\n'
+    '+        if module_name == "b_proj":\n'
+    '+            return self.config.hidden_size, linear["num_heads"]\n'
     '+        if self.config.layer_types[layer_idx] == "linear_attention":\n'
-    "+            linear = self.config.linear_attn_config\n"
-    '+            width = linear["num_heads"] * linear["head_dim"]\n'
     '+            if module_name == "qkv_proj":\n'
     "+                return self.config.hidden_size, 3 * width\n"
     '+            if module_name == "o_proj":\n'
@@ -56,6 +62,53 @@ SGLANG_GLM_LORA_DIMENSIONS_PATCH = (
     "     def __init__(\n"
     "         self,\n"
     "         config: Glm5NextConfig,\n"
+    "--- a/python/sglang/srt/lora/utils.py\n"
+    "+++ b/python/sglang/srt/lora/utils.py\n"
+    "@@ -367,6 +367,8 @@\n"
+    '     {"indexer.wq_b", "indexer.wk", "indexer.weights_proj"}\n'
+    " )\n"
+    " REPLICATED_LINEAR_LORA_NAMES = [\n"
+    '+    "f_a_proj",\n'
+    '+    "g_a_proj",\n'
+    '     "fused_qkv_a_proj_with_mqa",\n'
+    '     "fc1_latent_proj",\n'
+    '     "fc2_latent_proj",\n'
+    "@@ -379,6 +381,9 @@\n"
+    " # qwen3_5.py take tp_size/tp_rank from attn_tp when dp attention is enabled).\n"
+    " ATTN_TP_LORA_MODULE_NAMES = frozenset(\n"
+    "     {\n"
+    '+        "b_proj",\n'
+    '+        "f_b_proj",\n'
+    '+        "g_b_proj",\n'
+    '         "qkv_proj",\n'
+    '         "qkvr",\n'
+    '         "q_b_proj",\n'
+    "@@ -395,6 +400,11 @@\n"
+    " # (i.e. get_hidden_dim, init_buffers, and init_lora_modules can handle them).\n"
+    " _KNOWN_LORA_TARGET_MODULES = frozenset(\n"
+    "     {\n"
+    '+        "b_proj",\n'
+    '+        "f_a_proj",\n'
+    '+        "f_b_proj",\n'
+    '+        "g_a_proj",\n'
+    '+        "g_b_proj",\n'
+    '         "qkv_proj",\n'
+    '         "qkvr",\n'
+    '         "o_proj",\n'
+    "--- a/python/sglang/srt/utils/common.py\n"
+    "+++ b/python/sglang/srt/utils/common.py\n"
+    "@@ -4703,6 +4703,11 @@\n"
+    " \n"
+    " # LoRA-related constants and utilities\n"
+    " SUPPORTED_LORA_TARGET_MODULES = [\n"
+    '+    "b_proj",\n'
+    '+    "f_a_proj",\n'
+    '+    "f_b_proj",\n'
+    '+    "g_a_proj",\n'
+    '+    "g_b_proj",\n'
+    '     "q_proj",\n'
+    '     "k_proj",\n'
+    '     "v_proj",\n'
 )
 
 # PR 35's model package depends on its earlier GLM5 TileLang provider. Copy only

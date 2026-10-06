@@ -29,6 +29,11 @@ class Config(BaseConfig):
             "model.language_model.layers.*.self_attn.q_proj",
             "model.language_model.layers.*.self_attn.k_proj",
             "model.language_model.layers.*.self_attn.v_proj",
+            "model.language_model.layers.*.self_attn.b_proj",
+            "model.language_model.layers.*.self_attn.f_a_proj",
+            "model.language_model.layers.*.self_attn.f_b_proj",
+            "model.language_model.layers.*.self_attn.g_a_proj",
+            "model.language_model.layers.*.self_attn.g_b_proj",
             "model.language_model.layers.*.self_attn.o_proj",
             "model.language_model.layers.*.self_attn.q_a_proj",
             "model.language_model.layers.*.self_attn.q_b_proj",
@@ -44,6 +49,7 @@ class Config(BaseConfig):
             "model.language_model.layers.*.mlp.experts.*.down_proj",
         ],
         "cli_options": {
+            "use_rollout_routing_replay": True,
             "num_layers": 45,
             "hidden_size": 4096,
             "ffn_hidden_size": 12288,
@@ -113,6 +119,8 @@ class Config(BaseConfig):
         "chunked_prefill_size": 4096,
         "disable_prefill_cuda_graph": True,
         "language_only": True,
+        "enable_return_routed_experts": True,
+        "disable_radix_cache": True,
     }
 
 

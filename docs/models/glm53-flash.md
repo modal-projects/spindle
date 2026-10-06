@@ -19,12 +19,25 @@ Use an ordinary Tinker LoRA client with `base_model="zai-org/GLM-5.3-Flash"` and
 `train_unembed=False`. Publishing an adapter loads it into the same model's sampling
 pool. Checkpoints use Miles' per-slot model and optimizer state.
 
-The recipe trains KDA Q/K/V/output projections, DSA query/down projections and
+The recipe trains KDA Q/K/V/output and gate projections, DSA query/down projections and
 output projections, and dense, shared and routed MLP experts. The DSA `kv_b_proj`
 adapter is excluded: the upstream absorbed-attention implementation handles one
 adapter delta, which does not support batches containing different clients.
-The KDA gates, indexer, hyper-connections and vision encoder stay frozen.
+The indexer, hyper-connections and vision encoder stay frozen.
 Context parallelism is currently unsupported by the upstream KDA provider.
+
+Targets follow the [upstream LoRA recipe](https://github.com/radixark/miles/pull/3098),
+with `kv_b_proj` excluded for multi-client training. The sampler captures expert
+routes when requested, and the trainer accepts them through Spindle's existing
+[replay API](../sampler-replay.md). Capture and passing the routes with each training
+datum are both required; enabling the server flags alone does not replay routes.
+New runs of `scripts/run_glm53_dapo.py` request routes and use rank 16, alpha 32,
+LR 1e-5, Adam betas 0.9/0.98 and weight decay 0.1. Earlier rank-32 results in this
+document used no rollout routing replay and left the KDA gates frozen. Their
+checkpoints cannot be resumed under the changed target set. The new gate/replay
+configuration still needs GPU validation. The existing packed experiment driver
+also still synchronizes clients; it must be replaced with independent client
+submissions before the next multi-client performance run.
 
 The public checkpoint stores FP8 weights. The trainer imports them as BF16 and
 keeps the base weights frozen. SGLang serves the FP8 base with BF16 KV cache and

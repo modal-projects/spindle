@@ -19,7 +19,19 @@ def test_glm_recipe_survives_worker_serialization():
     targets = worker.inference_settings["lora_target_modules"]
     # The absorbed KV-up path in the upstream provider supports only single LoRA.
     assert "kv_b_proj" not in targets
-    assert {"q_a_proj", "q_b_proj", "kv_a_proj_with_mqa"} <= set(targets)
+    assert {
+        "q_a_proj",
+        "q_b_proj",
+        "kv_a_proj_with_mqa",
+        "b_proj",
+        "f_a_proj",
+        "f_b_proj",
+        "g_a_proj",
+        "g_b_proj",
+    } <= set(targets)
+    assert worker.inference_settings["enable_return_routed_experts"]
+    assert worker.inference_settings["disable_radix_cache"]
+    assert worker.trainer_settings["miles"]["cli_options"]["use_rollout_routing_replay"]
     assert lora_target_flags(tuple(targets)) == (True, True, False)
     assert worker.trainer_settings["miles"]["context_parallel_size"] == 1
 

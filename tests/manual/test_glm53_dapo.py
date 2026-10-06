@@ -1,6 +1,8 @@
 """CPU checks; run with scripts and the pinned Miles checkout on PYTHONPATH."""
 
 import ast
+import base64
+import struct
 import json
 from contextlib import suppress
 from pathlib import Path
@@ -286,3 +288,61 @@ def test_sampler_stop_does_not_call_decorated_exit_method():
         ("sidecar",),
         ("server",),
     ]
+
+
+@pytest.mark.parametrize("extra_final_token", [False, True])
+def test_routing_replay_capture_reaches_training(extra_final_token):
+    routes = ([-1] * (3 * 8) + list(range(8)) * 42) * (3 + extra_final_token)
+    encoded = base64.b64encode(struct.pack(f"<{len(routes)}i", *routes)).decode()
+    result = response()
+    result["meta_info"]["routed_experts"] = encoded
+    requests = []
+
+    def generate(operation, payload):
+        requests.append(payload)
+        return result
+
+    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    config = dict(
+        run_id="test",
+        group_size=2,
+        seed=42,
+        max_tokens=8,
+        concurrency=2,
+        routing_replay=True,
+    )
+    groups = sample_problems(
+        sampler, [(0, {"id": 0, "tokens": [1, 2], "answer": "34"})], config, 3
+    )
+    assert all(
+        p["return_routed_experts"] and p["routed_experts_start_len"] == 0
+        for p in requests
+    )
+    datums, _, _ = training_data(groups, routing_replay=True)
+    for datum in datums:
+        tensor = datum.loss_fn_inputs["routed_experts"]
+        assert tensor.shape == [3, 45, 8]
+        assert tensor.data == routes[: 3 * 45 * 8]
+    groups[0]["samples"][0]["routed_experts"] = None
+    with pytest.raises(ValueError, match="missing expert routes"):
+        training_data(groups, routing_replay=True)
+    requests.clear()
+    sample_problems(
+        sampler,
+        [(0, {"id": 0, "tokens": [1, 2], "answer": "34"})],
+        config,
+        3,
+        evaluation=True,
+    )
+    assert all("return_routed_experts" not in p for p in requests)
+
+
+def test_recipe_change_cannot_reuse_old_rollouts(tmp_path, monkeypatch):
+    write_json(tmp_path / "config.json", {"recipe": "old"})
+    monkeypatch.setattr(
+        data_helpers,
+        "Path",
+        lambda value: tmp_path if value == "/checkpoints" else Path(value),
+    )
+    with pytest.raises(ValueError, match="fresh run"):
+        data_helpers.prepare({"run_id": ".", "recipe": "new"})

@@ -187,7 +187,10 @@ class MilesCommandBackend(Backend):
                     raise ValueError(
                         "router replay is required for every datum in a batch"
                     )
-                if "--use-rollout-routing-replay" not in self.config.extra_args:
+                if not self.config.cli_options.get(
+                    "use_rollout_routing_replay",
+                    "--use-rollout-routing-replay" in self.config.extra_args,
+                ):
                     raise ValueError(
                         "router replay requires --use-rollout-routing-replay in the Miles configuration"
                     )
