@@ -60,6 +60,7 @@ cache_env = {**KERNEL_CACHE_ENV, "TILELANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/til
 @modal.experimental.clustered(1, rdma=True)
 class Sampler:
     settings_json: str = modal.parameter()
+    replica_id: int = modal.parameter(default=0)
 
     @modal.enter()
     def start(self):
@@ -141,7 +142,12 @@ def train(programs: dict, settings: dict, sampler_settings: str, experiment: dic
     try:
         namespace = runpy.run_path("/tmp/glm53_dapo.py")
         return namespace["train"](
-            settings, Sampler(settings_json=sampler_settings), experiment
+            settings,
+            [
+                Sampler(settings_json=sampler_settings, replica_id=i)
+                for i in range(experiment["rollout_replicas"])
+            ],
+            experiment,
         )
     finally:
         subprocess.run(
@@ -172,24 +178,31 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
     namespace["prepare"](experiment)
     if experiment["prepare_only"]:
         return {"run_id": experiment["run_id"], "prepared": True}
-    sampler = Sampler(settings_json=sampler_settings)
+    samplers = [
+        Sampler(settings_json=sampler_settings, replica_id=i)
+        for i in range(experiment["rollout_replicas"])
+    ]
     sampler_ready = False
     trainer_call = None
     finished = False
     try:
-        info = sampler.request.remote("ready")
-        assert info["dtype"] == "bfloat16" and info["quantization"] is None
+        namespace["write_status"](
+            experiment,
+            "starting_samplers",
+            rollout_replicas=len(samplers),
+            rollout_gpus=8 * len(samplers),
+        )
+        ready_calls = [sampler.request.spawn("ready") for sampler in samplers]
+        for call in ready_calls:
+            info = call.get()
+            assert info["dtype"] == "bfloat16" and info["quantization"] is None
         sampler_ready = True
         print("DAPO SAMPLER READY", flush=True)
-        if (
-            not experiment["resume"]
-            and not (control_path.parent / "baseline.json").exists()
-        ):
-            namespace["baseline"](sampler, experiment)
         if reattach:
             trainer_call = modal.FunctionCall.from_id(control["trainer_call_id"])
-            print("DAPO REATTACH", trainer_call.object_id, flush=True)
+            print("DAPO REATTACH", control["trainer_call_id"], flush=True)
         else:
+            namespace["write_status"](experiment, "starting_trainer", trainer_gpus=32)
             trainer_call = train.spawn(programs, settings, sampler_settings, experiment)
             namespace["write_json"](
                 control_path,
@@ -214,11 +227,12 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
         # Preemption interrupts this CPU waiter with KeyboardInterrupt. Leave the
         # GPU call alive; the restarted waiter reattaches using controller.json.
         if finished:
-            try:
-                if sampler_ready:
-                    sampler.request.remote("stop")
-            finally:
-                sampler.update_autoscaler(min_containers=0, max_containers=0)
+            for sampler in samplers:
+                try:
+                    if sampler_ready:
+                        sampler.request.remote("stop")
+                finally:
+                    sampler.update_autoscaler(min_containers=0, max_containers=0)
 
 
 @app.local_entrypoint()
@@ -232,8 +246,11 @@ def main(
     checkpoint_every: int = 5,
     eval_prompts: int = 64,
     eval_every: int = 5,
-    concurrency: int = 128,
+    concurrency: int = 16,
+    rollout_replicas: int = 4,
     prepare_only: bool = False,
+    validation_only: bool = False,
+    stagger_s: float = 60.0,
     resume: str = "",
     continue_run: str = "",
 ):
@@ -250,15 +267,24 @@ def main(
         < 1
     ):
         raise ValueError("Use positive run sizes, and at least two responses per group")
-    if not 1 <= clients <= 4 or not 1 <= concurrency <= 128 or max_tokens > 8192:
+    if (
+        not 1 <= clients <= 4
+        or not 1 <= concurrency <= 32
+        or not 1 <= rollout_replicas <= 4
+        or max_tokens > 8192
+    ):
         raise ValueError(
-            "This recipe supports up to four clients, 128 concurrent requests and 8192 generated tokens"
+            "This recipe supports four clients, four rollout replicas, 32 requests per replica and 8192 generated tokens"
         )
     if continue_run and (
         not continue_run.startswith("glm53-dapo-") or "/" in continue_run or resume
     ):
         raise ValueError(
             "Use a DAPO run ID for --continue-run, separately from --resume"
+        )
+    if resume or continue_run:
+        raise ValueError(
+            "Start a fresh run for independent clients and the new adapter targets"
         )
     config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
     inference = dict(config.inference_settings)
@@ -287,13 +313,17 @@ def main(
         "beta2": 0.98,
         "weight_decay": 0.1,
         "routing_replay": True,
-        "recipe": "glm53-kda-gates-r3-v1",
+        "recipe": "glm53-kda-gates-r3-independent-v2",
         "checkpoint_every": checkpoint_every,
         "eval_prompts": eval_prompts,
         "eval_every": eval_every,
-        "concurrency": concurrency,
+        "concurrency": concurrency * rollout_replicas,
+        "rollout_replicas": rollout_replicas,
+        "concurrency_per_replica": concurrency,
         "resume": resume,
         "prepare_only": prepare_only,
+        "validation_only": validation_only,
+        "stagger_s": stagger_s,
         "seed": 42,
         "dataset": "zhuzilin/dapo-math-17k",
         "dataset_revision": "2e65612930298bde4c5d58fd97b3f23a483aaff9",

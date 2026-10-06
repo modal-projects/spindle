@@ -91,9 +91,9 @@ def prepare(config):
             return_dict=False,
             add_generation_prompt=True,
         )
-        assert (
-            tokenizer.decode(tokens[-8:]).rstrip().endswith("<think>")
-        ), "Expected GLM native reasoning prefix"
+        assert tokenizer.decode(tokens[-8:]).rstrip().endswith("<think>"), (
+            "Expected GLM native reasoning prefix"
+        )
         if len(tokens) + config["max_tokens"] > config["context_length"]:
             skipped += 1
             continue
@@ -164,9 +164,9 @@ def grade_sample(sample, problem):
         raise RuntimeError(f"Unexpected sample finish: {metadata['finish_reason']}")
     probabilities = metadata["output_token_logprobs"]
     assert tokens and len(tokens) == len(probabilities)
-    assert [
-        row[1] for row in probabilities
-    ] == tokens, "Returned logprobs do not match generated tokens"
+    assert [row[1] for row in probabilities] == tokens, (
+        "Returned logprobs do not match generated tokens"
+    )
     logprobs = [row[0] for row in probabilities]
     assert all(math.isfinite(value) for value in logprobs)
     score = compute_score(sample["text"], problem["answer"])
@@ -283,7 +283,15 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_grou
     remaining = [count] * len(jobs)
     pool = ThreadPoolExecutor(max_workers=config["concurrency"])
     futures = {
-        pool.submit(sampler.request.remote, "generate", payload): divmod(index, count)
+        pool.submit(
+            (
+                sampler[jobs[index // count][0] % len(sampler)]
+                if isinstance(sampler, list)
+                else sampler
+            ).request.remote,
+            "generate",
+            payload,
+        ): divmod(index, count)
         for index, payload in enumerate(requests)
     }
     try:
@@ -291,9 +299,9 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_grou
             index, member = futures[future]
             group = groups[index]
             sample = grade_sample(future.result(), group["problem"])
-            assert (
-                sample["served_version"] == version
-            ), "Sampler served the wrong policy version"
+            assert sample["served_version"] == version, (
+                "Sampler served the wrong policy version"
+            )
             group["samples"][member] = sample
             remaining[index] -= 1
             if remaining[index] == 0 and on_group is not None:

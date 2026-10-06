@@ -35,9 +35,14 @@ New runs of `scripts/run_glm53_dapo.py` request routes and use rank 16, alpha 32
 LR 1e-5, Adam betas 0.9/0.98 and weight decay 0.1. Earlier rank-32 results in this
 document used no rollout routing replay and left the KDA gates frozen. Their
 checkpoints cannot be resumed under the changed target set. The new gate/replay
-configuration still needs GPU validation. The existing packed experiment driver
-also still synchronizes clients; it must be replaced with independent client
-submissions before the next multi-client performance run.
+configuration still needs GPU validation. The experiment driver uses independent client loops with staggered starts and
+Spindle's Engine scheduler. Its default rollout allocation is four 8-GPU replicas,
+16 requests per replica, with each client assigned a replica. A separate two-update
+functional check uses synthetic advantages, verifies routing replay and publication,
+and checks that clients overlap across steps. The real run starts with fresh
+adapters after that check passes. Reports separate validation from RL results.
+Step time runs from a client's sampling start through its updated sampler being
+ready; checkpointing and held-out evaluation are recorded as separate phases.
 
 The public checkpoint stores FP8 weights. The trainer imports them as BF16 and
 keeps the base weights frozen. SGLang serves the FP8 base with BF16 KV cache and

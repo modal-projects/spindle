@@ -8,7 +8,7 @@ from contextlib import suppress
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock
 
 import glm53_dapo_data as data_helpers
 
@@ -205,6 +205,10 @@ def controller_fixture(tmp_path):
     call = MagicMock(object_id="fc-existing")
     sampler = MagicMock()
     sampler.request.remote.return_value = {"dtype": "bfloat16", "quantization": None}
+    sampler.request.spawn.return_value.get.return_value = {
+        "dtype": "bfloat16",
+        "quantization": None,
+    }
     helpers = {
         "prepare": MagicMock(),
         "baseline": MagicMock(),
@@ -233,6 +237,7 @@ def controller_fixture(tmp_path):
         "app_id": "ap-test",
         "resume": "",
         "prepare_only": False,
+        "rollout_replicas": 1,
     }
     write_json(tmp_path / "checkpoints/test/baseline.json", {})
     return env, config, call, sampler
@@ -245,7 +250,8 @@ def test_controller_reattaches_after_cpu_preemption(tmp_path):
         env["run"]({}, {}, "{}", config)
     call.cancel.assert_not_called()
     sampler.update_autoscaler.assert_not_called()
-    assert sampler.request.remote.call_args_list[-1].args == ("ready",)
+    sampler.request.spawn.assert_called_with("ready")
+    type(call).object_id = PropertyMock(side_effect=AttributeError("unhydrated"))
     assert env["run"]({}, {}, "{}", config) == {"ok": True}
     env["train"].spawn.assert_called_once()
     env["modal"].FunctionCall.from_id.assert_called_once_with("fc-existing")
@@ -346,3 +352,21 @@ def test_recipe_change_cannot_reuse_old_rollouts(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="fresh run"):
         data_helpers.prepare({"run_id": ".", "recipe": "new"})
+
+
+def test_clients_route_to_separate_replicas():
+    received = [[], []]
+
+    def replica(index):
+        def generate(operation, payload):
+            received[index].append(payload)
+            return response()
+
+        return SimpleNamespace(request=SimpleNamespace(remote=generate))
+
+    config = dict(run_id="test", group_size=2, seed=42, max_tokens=8, concurrency=2)
+    problem = {"id": 0, "tokens": [1, 2], "answer": "34"}
+    sample_problems([replica(0), replica(1)], [(0, problem), (1, problem)], config, 3)
+    assert all(p["weight_run_id"] == "test-client0" for p in received[0])
+    assert all(p["weight_run_id"] == "test-client1" for p in received[1])
+    assert list(map(len, received)) == [2, 2]
