@@ -29,6 +29,7 @@ def main():
     max_allocated = 0
     max_reserved = 0
     validation_passed = False
+    validation_passed_at = None
     last_progress = time.time()
     last_status = 0
     app = None
@@ -62,8 +63,12 @@ def main():
                         continue
                     seen.add(line)
                     if "GLM VALIDATION PASSED:" in line:
+                        if not validation_passed:
+                            validation_passed_at = datetime.fromisoformat(
+                                " ".join(line.split(" ")[:2])
+                            ).timestamp()
+                            clients = {}
                         validation_passed = True
-                        clients = {}
                         last_progress = time.time()
                     if any(
                         s in line
@@ -79,14 +84,33 @@ def main():
                         if "DAPO STATUS" not in line or '"phase": "failed"' in line:
                             errors.append(line[-2500:])
                             errors[:] = errors[-30:]
-                    if "GLM CLIENT {" in line or "GLM STEP {" in line:
-                        row = json.loads(line[line.index("{") :])
+                    if '"client":' in line and "{" in line:
+                        try:
+                            row, _ = json.JSONDecoder().raw_decode(
+                                line[line.index("{") :]
+                            )
+                        except ValueError:
+                            continue
+                        if "client" not in row or "step" not in row:
+                            continue
                         client = row["client"]
-                        if "phase" in row:
+                        if "phase" in row and "time" in row:
+                            if (
+                                validation_passed_at is not None
+                                and row["time"] < validation_passed_at
+                            ):
+                                continue
                             state = clients.setdefault(client, {})
-                            state[row.get("lane", "update")] = row
-                        else:
-                            target = completed if validation_passed else validation
+                            lane = row.get("lane", "update")
+                            if row["time"] >= state.get(lane, {}).get("time", 0):
+                                state[lane] = row
+                        elif "raw_rollouts" in row:
+                            target = (
+                                completed
+                                if validation_passed_at is not None
+                                and row["end_time"] >= validation_passed_at
+                                else validation
+                            )
                             target[client, row["step"]] = row
                         last_progress = time.time()
                     match = re.search(
