@@ -14,6 +14,7 @@ from tinker.types.forward_backward_input import ForwardBackwardInput
 
 from glm53_dapo_data import (
     MODEL,
+    request_sample,
     sample_problems,
     save_rollouts,
     summary,
@@ -203,8 +204,8 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
                     SaveWeightsForSamplerPayload(publish_version=step),
                 )
                 probe = await asyncio.to_thread(
-                    sampler[client % len(sampler)].request.remote,
-                    "generate",
+                    request_sample,
+                    sampler[client % len(sampler)],
                     {
                         "input_ids": dataset["eval"][0]["tokens"],
                         "weight_run_id": model,

@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import httpx
 import modal
 import numpy as np
 from huggingface_hub import hf_hub_download
@@ -247,6 +248,36 @@ def training_data(groups, *, routing_replay=False):
     return data, replay, total_tokens
 
 
+def request_sample(sampler, payload):
+    """Keep generation alive through long trainer CPU work and retry lost calls."""
+    for attempt in range(3):
+        try:
+            # Spawned calls have durable inputs. Unlike .remote(), their lifetime
+            # does not depend on the caller renewing a 130-second await lease.
+            call = sampler.request.spawn("generate", payload)
+            return call.get()
+        except (modal.exception.RemoteError, httpx.TransportError) as exc:
+            cancelled = isinstance(exc, modal.exception.RemoteError) and (
+                "Function call was cancelled by user or a failure" in str(exc)
+            )
+            if not (cancelled or isinstance(exc, httpx.TransportError)) or attempt == 2:
+                raise
+            print(
+                "GLM SAMPLE RETRY",
+                json.dumps(
+                    {
+                        "attempt": attempt + 1,
+                        "error": str(exc),
+                        "run_id": payload.get("weight_run_id"),
+                        "version": payload.get("weight_version"),
+                    }
+                ),
+                flush=True,
+            )
+            time.sleep(2**attempt)
+    raise AssertionError("Unreachable sampling retry state")
+
+
 def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_group=None):
     """Mix clients in one request stream; every request pins its own adapter."""
     requests = []
@@ -284,12 +315,12 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_grou
     pool = ThreadPoolExecutor(max_workers=config["concurrency"])
     futures = {
         pool.submit(
+            request_sample,
             (
                 sampler[jobs[index // count][0] % len(sampler)]
                 if isinstance(sampler, list)
                 else sampler
-            ).request.remote,
-            "generate",
+            ),
             payload,
         ): divmod(index, count)
         for index, payload in enumerate(requests)

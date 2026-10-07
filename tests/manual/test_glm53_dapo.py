@@ -1,6 +1,7 @@
 """CPU checks; run with scripts and the pinned Miles checkout on PYTHONPATH."""
 
 import ast
+import asyncio
 import base64
 import struct
 import json
@@ -101,7 +102,11 @@ def test_mixed_rollouts_pin_each_clients_adapter():
         "max_tokens": 8192,
         "concurrency": 4,
     }
-    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    sampler = SimpleNamespace(
+        request=SimpleNamespace(
+            spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+        )
+    )
     problem = {"id": 5, "tokens": [1, 2], "answer": "34"}
     groups = sample_problems(sampler, [(0, problem), (1, problem)], config, 3)
     assert [g["client"] for g in groups] == [0, 1]
@@ -152,7 +157,11 @@ def test_fixed_batches_reuse_saved_groups_and_keep_constant_rewards(
         return cached_response
 
     cursors = [0, 0]
-    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    sampler = SimpleNamespace(
+        request=SimpleNamespace(
+            spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+        )
+    )
     groups = collect_training_groups(sampler, dataset, config, 1, cursors, tmp_path)
     assert [len(batch) for batch in groups] == [3, 3]
     assert cursors == [3, 3]
@@ -186,7 +195,11 @@ def test_sampling_refills_before_a_slow_group_finishes():
             later_started.set()
         return response()
 
-    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    sampler = SimpleNamespace(
+        request=SimpleNamespace(
+            spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+        )
+    )
     groups = sample_problems(sampler, jobs, config, 3)
     assert len(groups) == 3
     assert all(len(g["samples"]) == 2 for g in groups)
@@ -204,11 +217,16 @@ def controller_fixture(tmp_path):
     function.decorator_list = []
     call = MagicMock(object_id="fc-existing")
     sampler = MagicMock()
-    sampler.request.remote.return_value = {"dtype": "bfloat16", "quantization": None}
+    sampler.request.remote.return_value = {
+        "dtype": "bfloat16",
+        "quantization": None,
+        "spindle_container_id": "ta-test",
+    }
     sampler.request.spawn.return_value.get.return_value = {
         "dtype": "bfloat16",
         "quantization": None,
         "cuda_graph_config": {"decode": {"backend": "full"}},
+        "output_ids": [1],
     }
     helpers = {
         "prepare": MagicMock(),
@@ -221,6 +239,7 @@ def controller_fixture(tmp_path):
         "sys": SimpleNamespace(path=[]),
         "runpy": SimpleNamespace(run_path=lambda _: helpers),
         "json": json,
+        "time": SimpleNamespace(sleep=lambda _: None),
         "suppress": suppress,
         "assets": MagicMock(),
         "results": MagicMock(),
@@ -240,7 +259,7 @@ def controller_fixture(tmp_path):
         "prepare_only": False,
         "rollout_replicas": 1,
     }
-    write_json(tmp_path / "checkpoints/test/baseline.json", {})
+    write_json(tmp_path / "checkpoints/test/dataset.json", {"eval": [{"tokens": [1]}]})
     return env, config, call, sampler
 
 
@@ -251,7 +270,7 @@ def test_controller_reattaches_after_cpu_preemption(tmp_path):
         env["run"]({}, {}, "{}", config)
     call.cancel.assert_not_called()
     sampler.update_autoscaler.assert_not_called()
-    sampler.request.spawn.assert_called_with("ready")
+    assert sampler.request.spawn.call_args_list[0].args == ("ready",)
     type(call).object_id = PropertyMock(side_effect=AttributeError("unhydrated"))
     assert env["run"]({}, {}, "{}", config) == {"ok": True}
     env["train"].spawn.assert_called_once()
@@ -284,13 +303,13 @@ def test_sampler_stop_does_not_call_decorated_exit_method():
     method = next(
         node
         for node in cls.body
-        if isinstance(node, ast.FunctionDef) and node.name == "request"
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "request"
     )
     method.decorator_list = []
-    env = {"terminate": MagicMock()}
+    env = {"terminate": MagicMock(), "asyncio": asyncio}
     exec(compile(ast.Module(body=[method], type_ignores=[]), "sampler", "exec"), env)
     sampler = SimpleNamespace(sidecar="sidecar", server="server")
-    env["request"](sampler, "stop")
+    asyncio.run(env["request"](sampler, "stop"))
     assert [call.args for call in env["terminate"].call_args_list] == [
         ("sidecar",),
         ("server",),
@@ -309,7 +328,11 @@ def test_routing_replay_capture_reaches_training(extra_final_token):
         requests.append(payload)
         return result
 
-    sampler = SimpleNamespace(request=SimpleNamespace(remote=generate))
+    sampler = SimpleNamespace(
+        request=SimpleNamespace(
+            spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+        )
+    )
     config = dict(
         run_id="test",
         group_size=2,
@@ -363,7 +386,11 @@ def test_clients_route_to_separate_replicas():
             received[index].append(payload)
             return response()
 
-        return SimpleNamespace(request=SimpleNamespace(remote=generate))
+        return SimpleNamespace(
+            request=SimpleNamespace(
+                spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+            )
+        )
 
     config = dict(run_id="test", group_size=2, seed=42, max_tokens=8, concurrency=2)
     problem = {"id": 0, "tokens": [1, 2], "answer": "34"}
@@ -384,3 +411,48 @@ def test_controller_rejects_eager_rollouts_before_launching_trainer(tmp_path):
     sampler.update_autoscaler.assert_called_once_with(
         min_containers=0, max_containers=0
     )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        data_helpers.modal.exception.RemoteError(
+            "Function call was cancelled by user or a failure."
+        ),
+        data_helpers.httpx.RemoteProtocolError("Server disconnected"),
+    ],
+)
+def test_sample_retry_preserves_policy_and_seed(monkeypatch, error):
+    monkeypatch.setattr(data_helpers.time, "sleep", lambda _: None)
+    call = MagicMock()
+    call.get.side_effect = [error, {"output_ids": [1]}]
+    sampler = MagicMock()
+    sampler.request.spawn.return_value = call
+    payload = {
+        "weight_run_id": "adapter-3",
+        "weight_version": {"exact_version": 7},
+        "sampling_params": {"sampling_seed": 42},
+    }
+    assert data_helpers.request_sample(sampler, payload) == {"output_ids": [1]}
+    assert sampler.request.spawn.call_count == 2
+    assert all(
+        c.args == ("generate", payload) for c in sampler.request.spawn.call_args_list
+    )
+    sampler.request.remote.assert_not_called()
+
+
+def test_sample_retry_is_bounded_and_does_not_hide_model_errors(monkeypatch):
+    monkeypatch.setattr(data_helpers.time, "sleep", lambda _: None)
+    sampler = MagicMock()
+    call = sampler.request.spawn.return_value
+    call.get.side_effect = data_helpers.modal.exception.RemoteError(
+        "Function call was cancelled by user or a failure."
+    )
+    with pytest.raises(data_helpers.modal.exception.RemoteError):
+        data_helpers.request_sample(sampler, {})
+    assert sampler.request.spawn.call_count == 3
+    sampler.reset_mock()
+    call.get.side_effect = RuntimeError("CUDA out of memory")
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        data_helpers.request_sample(sampler, {})
+    assert sampler.request.spawn.call_count == 1

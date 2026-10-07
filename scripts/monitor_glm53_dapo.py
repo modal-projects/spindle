@@ -16,6 +16,7 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--env", default="kailash-dev")
     parser.add_argument("--stop-on-oom", action="store_true")
+    parser.add_argument("--stop-on-failure", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     log_path = args.output / "app.log"
@@ -29,6 +30,7 @@ def main():
     max_allocated = 0
     max_reserved = 0
     validation_passed = False
+    terminal_failure = None
     validation_passed_at = None
     last_progress = time.time()
     last_status = 0
@@ -70,6 +72,8 @@ def main():
                             clients = {}
                         validation_passed = True
                         last_progress = time.time()
+                    if "DAPO STATUS" in line and '"phase": "failed"' in line:
+                        terminal_failure = line[-2500:]
                     if any(
                         s in line
                         for s in (
@@ -170,12 +174,15 @@ def main():
                     max_reserved_gib=max_reserved,
                     errors=errors,
                     warnings=warnings,
+                    terminal_failure=terminal_failure,
                 )
                 stopped_for_oom = False
-                if args.stop_on_oom and any(
+                oom = any(
                     "OutOfMemoryError" in error or "CUDA out of memory" in error
                     for error in errors
-                ):
+                )
+                stop_for_failure = args.stop_on_failure and terminal_failure is not None
+                if (args.stop_on_oom and oom) or stop_for_failure:
                     stopped = subprocess.run(
                         modal
                         + ["app", "stop", args.app_id, "--env", args.env, "--yes"],
@@ -184,8 +191,9 @@ def main():
                         timeout=60,
                     )
                     stopped_for_oom = stopped.returncode == 0
-                    state["stopped_for_oom"] = stopped_for_oom
-                    state["oom_stop_error"] = stopped.stderr[-2000:]
+                    state["stopped_for_oom"] = stopped_for_oom and oom
+                    state["stopped_for_failure"] = stopped_for_oom and stop_for_failure
+                    state["stop_error"] = stopped.stderr[-2000:]
                 temp = args.output / "health.tmp"
                 temp.write_text(json.dumps(state, indent=2) + "\n")
                 temp.replace(args.output / "health.json")

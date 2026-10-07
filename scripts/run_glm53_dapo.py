@@ -4,12 +4,14 @@ PYTHONPATH=src modal run --detach scripts/run_glm53_dapo.py
 Requires the BF16 model cached by tests/manual/prepare_glm53_bf16.py.
 """
 
+import asyncio
 import hashlib
 import json
 import os
 import runpy
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
@@ -87,23 +89,30 @@ class Sampler:
         wait_http("http://127.0.0.1:8000/health", self.sidecar, 120)
 
     @modal.method()
-    def request(self, operation: str, payload=None):
+    async def request(self, operation: str, payload=None):
         if operation == "stop":
-            terminate(getattr(self, "sidecar", None))
-            terminate(getattr(self, "server", None))
+            await asyncio.to_thread(terminate, self.sidecar)
+            await asyncio.to_thread(terminate, self.server)
             return
-        with httpx.Client(timeout=6900) as client:
+        # Async inputs can be cancelled individually without killing the other
+        # requests or unloading the model in this container.
+        async with httpx.AsyncClient(timeout=6900) as client:
             if operation == "ready":
-                response = client.get("http://127.0.0.1:8001/server_info")
+                response = await client.get("http://127.0.0.1:8001/server_info")
             elif operation == "generate":
-                response = client.post("http://127.0.0.1:8000/generate", json=payload)
+                response = await client.post(
+                    "http://127.0.0.1:8000/generate", json=payload
+                )
             else:
                 raise ValueError(f"Unknown sampler operation: {operation}")
             if response.is_error:
                 raise RuntimeError(
                     f"Sampler HTTP {response.status_code}: {response.text}"
                 )
-            return response.json()
+            output = response.json()
+            if operation == "ready":
+                output["spindle_container_id"] = os.environ["MODAL_TASK_ID"]
+            return output
 
     @modal.exit()
     def stop(self):
@@ -201,6 +210,45 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
             )
         sampler_ready = True
         print("DAPO SAMPLER READY", flush=True)
+        if not reattach:
+            # Exercise the failure that used to terminate every concurrent input.
+            dataset = json.loads((control_path.parent / "dataset.json").read_text())
+            prompt = dataset["eval"][0]["tokens"]
+            before = [
+                s.request.remote("ready")["spindle_container_id"] for s in samplers
+            ]
+            cancelled = [
+                s.request.spawn(
+                    "generate",
+                    {
+                        "input_ids": prompt,
+                        "sampling_params": {"max_new_tokens": 8192, "ignore_eos": True},
+                    },
+                )
+                for s in samplers
+            ]
+            surviving = [
+                s.request.spawn(
+                    "generate",
+                    {
+                        "input_ids": prompt,
+                        "sampling_params": {"max_new_tokens": 256, "ignore_eos": True},
+                    },
+                )
+                for s in samplers
+            ]
+            time.sleep(5)
+            for call in cancelled:
+                call.cancel()
+            for call in surviving:
+                assert call.get()["output_ids"], "Neighboring rollout was cancelled"
+            after = [
+                s.request.remote("ready")["spindle_container_id"] for s in samplers
+            ]
+            assert before == after, (
+                "Cancelling one request restarted an inference container"
+            )
+            print("GLM CANCELLATION ISOLATION PASSED", json.dumps(after), flush=True)
         if reattach:
             trainer_call = modal.FunctionCall.from_id(control["trainer_call_id"])
             print("DAPO REATTACH", control["trainer_call_id"], flush=True)

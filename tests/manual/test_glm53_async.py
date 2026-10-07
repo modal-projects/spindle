@@ -110,7 +110,13 @@ def test_clients_advance_independently_and_publish_their_own_version(
         "train": [{"id": i, "tokens": [1, 2]} for i in range(3)],
         "eval": [{"tokens": [1, 2]}],
     }
-    samplers = [SimpleNamespace(request=SimpleNamespace(remote=probe))] * 2
+    samplers = [
+        SimpleNamespace(
+            request=SimpleNamespace(
+                spawn=lambda *a: SimpleNamespace(get=lambda: probe(*a))
+            )
+        )
+    ] * 2
 
     async def run():
         engine = Engine(Executor(), max_models=clients)
