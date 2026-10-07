@@ -9,8 +9,9 @@ from .image_dependencies import (
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.17"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-SGLANG_BRANCH = "stitch-sglang-v0.5.17"
-SGLANG_REVISION = "d050d06437d96196fc68d5b4e5c246408790d537"
+# MXFP4 expert-LoRA backport: https://github.com/sgl-project/sglang/pull/42940
+SGLANG_BRANCH = "codex/gpt-oss-mxfp4-lora-v0.5.17"
+SGLANG_REVISION = "9e565a1d757998d4e9ca7d867a33c5e97cfebbdf"
 
 # Reference-lifetime fix for the pinned SGLang revision. git apply fails the build
 # if an upstream update changes this context; keep until the fix is upstream.
