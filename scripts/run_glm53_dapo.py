@@ -241,7 +241,7 @@ def run(programs: dict, settings: dict, sampler_settings: str, experiment: dict)
 @app.local_entrypoint()
 def main(
     steps: int = 30,
-    clients: int = 4,
+    clients: int = 8,
     groups: int = 32,
     group_size: int = 8,
     max_tokens: int = 8192,
@@ -253,7 +253,7 @@ def main(
     rollout_replicas: int = 4,
     prepare_only: bool = False,
     validation_only: bool = False,
-    stagger_s: float = 60.0,
+    stagger_s: float = 180.0,
     resume: str = "",
     continue_run: str = "",
 ):
@@ -271,13 +271,13 @@ def main(
     ):
         raise ValueError("Use positive run sizes, and at least two responses per group")
     if (
-        not 1 <= clients <= 4
+        not 1 <= clients <= 8
         or not 1 <= concurrency <= 32
         or not 1 <= rollout_replicas <= 4
         or max_tokens > 8192
     ):
         raise ValueError(
-            "This recipe supports four clients, four rollout replicas, 32 requests per replica and 8192 generated tokens"
+            "This recipe supports eight clients, four rollout replicas, 32 requests per replica and 8192 generated tokens"
         )
     if continue_run and (
         not continue_run.startswith("glm53-dapo-") or "/" in continue_run or resume
@@ -297,7 +297,7 @@ def main(
         cuda_graph_backend_decode="full",
         cuda_graph_max_bs_decode=concurrency,
         max_running_requests=concurrency,
-        max_queued_requests=concurrency,
+        max_queued_requests=concurrency * 2,
         model_loader_extra_config=json.dumps(
             {"enable_multithread_load": True, "num_threads": 2}
         ),
@@ -317,7 +317,10 @@ def main(
         "beta2": 0.98,
         "weight_decay": 0.1,
         "routing_replay": True,
-        "recipe": "glm53-kda-gates-r3-independent-v3",
+        "recipe": "glm53-kda-gates-r3-async-v4",
+        "async_rl": True,
+        "max_policy_lag": 1,
+        "prepared_batches": 2,
         "decode_cuda_graph": True,
         "checkpoint_every": checkpoint_every,
         "eval_prompts": eval_prompts,
@@ -350,9 +353,12 @@ def main(
         name: hashlib.sha256(source.encode()).hexdigest()
         for name, source in programs.items()
     }
-    call = run.spawn(
-        programs, config.trainer_settings["miles"], json.dumps(inference), experiment
-    )
+    settings = {
+        **config.trainer_settings["miles"],
+        "max_lora_slots": clients,
+        "max_lora_rank": experiment["lora_rank"],
+    }
+    call = run.spawn(programs, settings, json.dumps(inference), experiment)
     print(
         "DAPO LAUNCH",
         json.dumps({"app_id": app.app_id, "call_id": call.object_id, **experiment}),

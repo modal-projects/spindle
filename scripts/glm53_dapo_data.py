@@ -1,7 +1,7 @@
 """DAPO Math rollout, reward, training, evaluation, and recovery for GLM LoRA.
 
 Launched by run_glm53_dapo.py. Uses Spindle's Miles command backend directly;
-SDK ingress and EngineServer scheduling are outside this experiment.
+The experiment submits independent commands through the Engine scheduler.
 """
 
 import gzip

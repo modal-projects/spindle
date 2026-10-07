@@ -4,6 +4,8 @@ import asyncio
 import base64
 import struct
 import time
+
+import pytest
 from types import SimpleNamespace
 
 import glm53_dapo as experiment
@@ -11,8 +13,9 @@ from spindle.engine import Engine
 from tests.support import EchoExecutor
 
 
+@pytest.mark.parametrize("clients", [2, 8])
 def test_clients_advance_independently_and_publish_their_own_version(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, clients
 ):
     forwarded = []
 
@@ -87,12 +90,12 @@ def test_clients_advance_independently_and_publish_their_own_version(
 
     config = dict(
         run_id="test",
-        clients=2,
-        steps=2,
+        clients=clients,
+        steps=3,
         groups=1,
         group_size=2,
         lora_rank=16,
-        concurrency=4,
+        concurrency=clients * 2,
         stagger_s=0,
         functional_validation=True,
         clip_low=0.8,
@@ -103,14 +106,14 @@ def test_clients_advance_independently_and_publish_their_own_version(
         weight_decay=0.1,
     )
     dataset = {
-        "orders": [[0, 1], [0, 1]],
-        "train": [{"id": i, "tokens": [1, 2]} for i in range(2)],
+        "orders": [list(range(3)) for _ in range(clients)],
+        "train": [{"id": i, "tokens": [1, 2]} for i in range(3)],
         "eval": [{"tokens": [1, 2]}],
     }
     samplers = [SimpleNamespace(request=SimpleNamespace(remote=probe))] * 2
 
     async def run():
-        engine = Engine(Executor())
+        engine = Engine(Executor(), max_models=clients)
         try:
             return await asyncio.wait_for(
                 experiment.run_clients(
@@ -121,14 +124,23 @@ def test_clients_advance_independently_and_publish_their_own_version(
                     tmp_path,
                     SimpleNamespace(commit=lambda: None),
                 ),
-                timeout=5,
+                timeout=15,
             )
         finally:
             await engine.close()
 
     report = asyncio.run(run())
-    assert len(report["client_steps"]) == 4
+    assert len(report["client_steps"]) == clients * 3
     rows = {(r["client"], r["step"]): r for r in report["client_steps"]}
     assert rows[0, 2]["start_time"] < rows[1, 1]["end_time"]
-    assert sorted(probes) == [(f"test-client{c}", s) for c in range(2) for s in (1, 2)]
-    assert len(forwarded) == 4
+    assert sorted(probes) == [
+        (f"test-client{c}", s) for c in range(clients) for s in (1, 2, 3)
+    ]
+    assert len(forwarded) == clients * 3
+    for client in range(clients):
+        assert [
+            rows[client, step]["behavior_policy_version"] for step in (1, 2, 3)
+        ] == [0, 0, 1]
+        for step in (2, 3):
+            assert rows[client, step]["start_time"] < rows[client, step - 1]["end_time"]
+            assert rows[client, step]["policy_lag"] == 1

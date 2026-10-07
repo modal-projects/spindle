@@ -36,6 +36,7 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
     states = [{} for _ in range(config["clients"])]
     checkpoints = [None] * config["clients"]
     save_lock = asyncio.Lock()
+    preparation_slots = asyncio.Semaphore(config.get("prepared_batches", 2))
     deadline = time.monotonic() + 19 * 3600
 
     async def record(client, phase, step, **details):
@@ -47,12 +48,13 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
             **details,
         }
         report["events"].append(row)
-        states[client] = row
+        lane = "rollout" if phase in {"sampling", "rollout_ready"} else "update"
+        row["lane"] = lane
+        states[client][lane] = row
         print("GLM CLIENT", json.dumps(row), flush=True)
         async with save_lock:
             write_json(root / "status.json", {"phase": "running", "clients": states})
             write_json(root / "report.json", report)
-            await asyncio.to_thread(volume.commit)
         return row["time"]
 
     async def client_loop(client):
@@ -88,50 +90,81 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
             **config,
             "concurrency": max(1, config["concurrency"] // config["clients"]),
         }
+
+        async def collect(step, version):
+            start_time = await record(client, "sampling", step, policy_version=version)
+            offset = (step - 1) * config["groups"]
+            order = dataset["orders"][client][offset : offset + config["groups"]]
+            if len(order) != config["groups"]:
+                raise RuntimeError("Training dataset exhausted")
+            groups = await asyncio.to_thread(
+                sample_problems,
+                sampler,
+                [(client, dataset["train"][index]) for index in order],
+                local_config,
+                version,
+            )
+            ready_time = time.time()
+            await record(client, "rollout_ready", step, policy_version=version)
+            return groups, version, start_time, ready_time
+
+        pending = asyncio.create_task(collect(1, 0))
+        saving = None
+        previous_update_end = None
         try:
             for step in range(1, config["steps"] + 1):
-                started = time.monotonic()
-                start_time = await record(client, "sampling", step)
-                order = dataset["orders"][client][cursor : cursor + config["groups"]]
-                if len(order) != config["groups"]:
-                    raise RuntimeError("Training dataset exhausted")
-                jobs = [(client, dataset["train"][index]) for index in order]
-                groups = await asyncio.to_thread(
-                    sample_problems, sampler, jobs, local_config, step - 1
-                )
-                await asyncio.to_thread(
-                    save_rollouts,
-                    root / f"client{client}-train-{step:04d}.jsonl.gz",
-                    groups,
-                )
-                sampling_s = time.monotonic() - started
-                cursor += len(order)
+                groups, behavior_version, start_time, rollout_end = await pending
+                pending = None
+                # Exactly one batch ahead. Training update s consumes version
+                # s-2 after the first update; PPO uses its recorded behavior logps.
+                if step < config["steps"] and time.monotonic() < deadline:
+                    pending = asyncio.create_task(collect(step + 1, step - 1))
+                sampling_s = rollout_end - start_time
+                cursor += len(groups)
+                policy_lag = step - 1 - behavior_version
+                assert 0 <= policy_lag <= 1, "Rollout exceeded one-update policy lag"
+                await asyncio.sleep(0)  # Admit the next rollout before training.
                 if config.get("functional_validation"):
                     # Exercise nonzero gradients even when short answers truncate.
                     for group in groups:
                         for member, sample in enumerate(group["samples"]):
                             sample["truncated"] = False
                             sample["reward"] = 1.0 if member % 2 else -1.0
-                data, old_logprobs, trained_tokens = await asyncio.to_thread(
-                    training_data,
-                    groups,
-                    routing_replay=True,
+                saving = asyncio.create_task(
+                    asyncio.to_thread(
+                        save_rollouts,
+                        root / f"client{client}-train-{step:04d}.jsonl.gz",
+                        groups,
+                    )
                 )
-                await record(client, "training", step, tokens=trained_tokens)
-                t0 = time.monotonic()
-                output = await submit(
-                    OperationKind.FORWARD_BACKWARD,
-                    ForwardBackwardInput(
-                        data=data,
-                        loss_fn="ppo",
-                        loss_fn_config={
-                            "clip_low_threshold": config["clip_low"],
-                            "clip_high_threshold": config["clip_high"],
-                        },
-                    ),
-                )
-                forward_s = time.monotonic() - t0
-                del data
+                async with preparation_slots:
+                    data, old_logprobs, trained_tokens = await asyncio.to_thread(
+                        training_data,
+                        groups,
+                        routing_replay=True,
+                    )
+                    await record(
+                        client,
+                        "training",
+                        step,
+                        tokens=trained_tokens,
+                        policy_lag=policy_lag,
+                        behavior_policy_version=behavior_version,
+                    )
+                    t0 = time.monotonic()
+                    output = await submit(
+                        OperationKind.FORWARD_BACKWARD,
+                        ForwardBackwardInput(
+                            data=data,
+                            loss_fn="ppo",
+                            loss_fn_config={
+                                "clip_low_threshold": config["clip_low"],
+                                "clip_high_threshold": config["clip_high"],
+                            },
+                        ),
+                    )
+                    forward_s = time.monotonic() - t0
+                    del data
                 differences = np.concatenate(
                     [
                         np.asarray(result["logprobs"]["data"][prefix:])
@@ -142,9 +175,10 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
                     ]
                 )
                 assert np.isfinite(differences).all()
-                assert np.abs(differences).mean() < 0.5, (
-                    "Trainer/sampler logprobs disagree"
-                )
+                if policy_lag == 0:
+                    assert np.abs(differences).mean() < 0.5, (
+                        "Trainer/sampler logprobs disagree for the same policy"
+                    )
                 t0 = time.monotonic()
                 optimizer = await submit(
                     OperationKind.OPTIM_STEP,
@@ -180,13 +214,24 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
                 )
                 assert probe["meta_info"]["weight_version_start"] == step
                 publication_s = time.monotonic() - t0
+                update_end = time.time()
+                # Persistence runs alongside sampling/training, with at most one
+                # save per client retained before consuming the next batch.
+                await saving
+                saving = None
                 row = {
                     "client": client,
                     "step": step,
                     "cursor": cursor,
                     "start_time": start_time,
-                    "end_time": time.time(),
-                    "step_s": time.monotonic() - started,
+                    "end_time": update_end,
+                    "step_s": update_end - start_time,
+                    "update_interval_s": update_end
+                    - (previous_update_end or start_time),
+                    "rollout_end_time": rollout_end,
+                    "behavior_policy_version": behavior_version,
+                    "training_policy_version": step - 1,
+                    "policy_lag": policy_lag,
                     "sampling_s": sampling_s,
                     "forward_backward_s": forward_s,
                     "optimizer_s": optimizer_s,
@@ -200,11 +245,13 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
                     "train_sample_logprob_diff_max": float(np.abs(differences).max()),
                     "grad_norm": metrics["grad_norm:mean"],
                 }
+                previous_update_end = update_end
                 report["client_steps"].append(row)
                 print("GLM STEP", json.dumps(row), flush=True)
                 await record(client, "step_complete", step)
+                await asyncio.to_thread(volume.commit)
                 del groups, old_logprobs, differences, output
-                final = step == config["steps"] or time.monotonic() > deadline
+                final = pending is None
                 if not config.get("functional_validation") and (
                     step == 1 or step % config["checkpoint_every"] == 0 or final
                 ):
@@ -251,6 +298,13 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
                 client, "completed" if step == config["steps"] else "paused", step
             )
         finally:
+            for task in (pending, saving):
+                if task is not None:
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (pending, saving) if task is not None),
+                return_exceptions=True,
+            )
             await engine.unload_model(model)
 
     async with asyncio.TaskGroup() as tasks:
@@ -265,6 +319,15 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
             for b in first
             if a["client"] != b["client"]
         ), "Clients did not overlap across steps"
+        by_client = {(r["client"], r["step"]): r for r in report["client_steps"]}
+        for client in range(config["clients"]):
+            for step in range(2, config["steps"] + 1):
+                previous = by_client[client, step - 1]
+                current = by_client[client, step]
+                assert current["start_time"] < previous["end_time"], (
+                    "Client did not overlap its own rollout and update"
+                )
+                assert current["behavior_policy_version"] == step - 2
     write_json(root / "report.json", report)
     await asyncio.to_thread(volume.commit)
     return report
@@ -300,24 +363,29 @@ def train(settings, sampler, config):
             validation = {
                 **config,
                 "run_id": config["run_id"] + "-validation",
-                "steps": 2,
+                "steps": 3,
                 "groups": 1,
                 "group_size": 2,
-                "max_tokens": 64,
+                "max_tokens": 256,
                 "stagger_s": 2,
-                "concurrency": 8,
+                "concurrency": config["clients"] * 2,
                 "functional_validation": True,
             }
             await run_clients(
                 engine, sampler, validation, dataset, root / "validation", volume
             )
             print(
-                "GLM VALIDATION PASSED: gates, routing replay, publication, independent clients",
+                "GLM VALIDATION PASSED: eight-slot memory, gates, routing replay, publication, per-client async overlap",
                 flush=True,
             )
             write_json(
                 root / "validation-passed.json",
-                {"time": time.time(), "steps_per_client": 2},
+                {
+                    "time": time.time(),
+                    "steps_per_client": 3,
+                    "clients": config["clients"],
+                    "async_rl": True,
+                },
             )
             await asyncio.to_thread(volume.commit)
             if config.get("validation_only"):
