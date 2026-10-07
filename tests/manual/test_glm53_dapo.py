@@ -5,6 +5,8 @@ import asyncio
 import base64
 import struct
 import json
+import hashlib
+import uuid
 from contextlib import suppress
 from pathlib import Path
 from threading import Event
@@ -12,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock
 
 import glm53_dapo_data as data_helpers
+from spindle.deployments import DeploymentConfig, config_path, load
 
 import numpy as np
 import pytest
@@ -456,3 +459,72 @@ def test_sample_retry_is_bounded_and_does_not_hide_model_errors(monkeypatch):
     with pytest.raises(RuntimeError, match="CUDA out of memory"):
         data_helpers.request_sample(sampler, {})
     assert sampler.request.spawn.call_count == 1
+
+
+def test_long_generation_is_forced_only_in_validation():
+    requests = []
+
+    def generate(operation, payload):
+        requests.append(payload)
+        return response()
+
+    sampler = SimpleNamespace(
+        request=SimpleNamespace(
+            spawn=lambda *a: SimpleNamespace(get=lambda: generate(*a))
+        )
+    )
+    config = dict(
+        run_id="test",
+        group_size=2,
+        seed=42,
+        max_tokens=16384,
+        concurrency=2,
+        force_generation_length=True,
+        functional_validation=True,
+    )
+    jobs = [(0, {"id": 0, "tokens": [1, 2], "answer": "34"})]
+    sample_problems(sampler, jobs, config, 3)
+    assert all(p["sampling_params"]["max_new_tokens"] == 16384 for p in requests)
+    assert all(p["sampling_params"]["ignore_eos"] for p in requests)
+    with pytest.raises(AssertionError, match="validation-only"):
+        sample_problems(sampler, jobs, {**config, "functional_validation": False}, 3)
+    requests.clear()
+    sample_problems(sampler, jobs, {**config, "force_generation_length": False}, 3)
+    assert all("ignore_eos" not in p["sampling_params"] for p in requests)
+
+
+@pytest.mark.parametrize(
+    "generation,context,budget", [(8192, 16384, 16384), (16384, 32768, 32768)]
+)
+def test_generation_and_training_context_reach_both_backends(
+    generation, context, budget
+):
+    script = Path("scripts/run_glm53_dapo.py")
+    tree = ast.parse(script.read_text())
+    method = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    method.decorator_list = []
+    run = MagicMock()
+    run.spawn.return_value.object_id = "test-call"
+    env = dict(
+        DeploymentConfig=DeploymentConfig,
+        config_path=config_path,
+        load=load,
+        json=json,
+        hashlib=hashlib,
+        uuid=uuid,
+        Path=Path,
+        __file__=str(script),
+        app=SimpleNamespace(app_id="test"),
+        run=run,
+        RESULTS_VOLUME="test",
+    )
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(script), "exec"), env)
+    env["main"](max_tokens=generation, context_length=context, trainer_tokens=budget)
+    _, settings, sampler_json, experiment = run.spawn.call_args.args
+    assert settings["max_tokens_per_gpu"] == budget
+    assert settings["extra_args"] == ["--seq-length", str(context)]
+    assert json.loads(sampler_json)["context_length"] == context
+    assert experiment["context_length"] == context
+    assert experiment["max_tokens"] == generation

@@ -299,6 +299,11 @@ def sample_problems(sampler, jobs, config, version, *, evaluation=False, on_grou
                     + (0 if evaluation else 1000003 * client),
                 },
             }
+            if config.get("force_generation_length"):
+                assert config.get("functional_validation"), (
+                    "Forced length is validation-only"
+                )
+                payload["sampling_params"]["ignore_eos"] = True
             if config.get("routing_replay") and not evaluation:
                 payload.update(return_routed_experts=True, routed_experts_start_len=0)
             if version:

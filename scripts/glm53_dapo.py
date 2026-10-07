@@ -98,13 +98,27 @@ async def run_clients(engine, sampler, config, dataset, root, volume):
             order = dataset["orders"][client][offset : offset + config["groups"]]
             if len(order) != config["groups"]:
                 raise RuntimeError("Training dataset exhausted")
+            sampling_config = local_config
+            if config.get("functional_validation") and step == 1:
+                sampling_config = {
+                    **local_config,
+                    "max_tokens": config.get("validation_max_tokens", 256),
+                    "force_generation_length": config.get("validation_max_tokens", 256)
+                    > 256,
+                }
             groups = await asyncio.to_thread(
                 sample_problems,
                 sampler,
                 [(client, dataset["train"][index]) for index in order],
-                local_config,
+                sampling_config,
                 version,
             )
+            if sampling_config.get("force_generation_length"):
+                assert all(
+                    len(sample["tokens"]) == sampling_config["max_tokens"]
+                    for group in groups
+                    for sample in group["samples"]
+                ), "Long-context validation ended before the requested length"
             ready_time = time.time()
             await record(client, "rollout_ready", step, policy_version=version)
             return groups, version, start_time, ready_time
@@ -386,6 +400,10 @@ def train(settings, sampler, config):
                     "steps_per_client": 3,
                     "clients": config["clients"],
                     "async_rl": True,
+                    "first_update_generation_tokens": config.get(
+                        "validation_max_tokens", 256
+                    ),
+                    "trainer_tokens": settings["max_tokens_per_gpu"],
                 },
             )
             await asyncio.to_thread(volume.commit)

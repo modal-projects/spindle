@@ -293,6 +293,9 @@ def main(
     groups: int = 32,
     group_size: int = 8,
     max_tokens: int = 8192,
+    context_length: int = 16384,
+    trainer_tokens: int = 16384,
+    validation_max_tokens: int = 256,
     learning_rate: float = 1e-5,
     checkpoint_every: int = 5,
     eval_prompts: int = 64,
@@ -311,6 +314,9 @@ def main(
             groups,
             group_size - 1,
             max_tokens,
+            context_length,
+            trainer_tokens,
+            validation_max_tokens,
             checkpoint_every,
             eval_prompts,
             eval_every,
@@ -322,11 +328,16 @@ def main(
         not 1 <= clients <= 8
         or not 1 <= concurrency <= 32
         or not 1 <= rollout_replicas <= 4
-        or max_tokens > 8192
+        or max_tokens > 16384
+        or context_length > 32768
     ):
         raise ValueError(
-            "This recipe supports eight clients, four rollout replicas, 32 requests per replica and 8192 generated tokens"
+            "This recipe supports eight clients, four rollout replicas, 32 requests per replica, 16384 generated tokens and 32768 total context tokens"
         )
+    if max(max_tokens, validation_max_tokens) >= context_length:
+        raise ValueError("Context length must leave room for prompt tokens")
+    if trainer_tokens < context_length:
+        raise ValueError("Trainer token budget must fit a complete sequence")
     if continue_run and (
         not continue_run.startswith("glm53-dapo-") or "/" in continue_run or resume
     ):
@@ -337,7 +348,10 @@ def main(
         raise ValueError(
             "Start a fresh run for independent clients and the new adapter targets"
         )
-    config = DeploymentConfig.create(load(config_path("glm53-flash-lora-16k")))
+    recipe = load(config_path("glm53-flash-lora-16k"))
+    recipe.max_context_length = context_length
+    recipe.miles_cfg["max_tokens_per_gpu"] = trainer_tokens
+    config = DeploymentConfig.create(recipe)
     inference = dict(config.inference_settings)
     inference.update(
         quantization=None,
@@ -358,6 +372,8 @@ def main(
         "groups": groups,
         "group_size": group_size,
         "max_tokens": max_tokens,
+        "validation_max_tokens": validation_max_tokens,
+        "trainer_tokens": trainer_tokens,
         "learning_rate": learning_rate,
         "lora_rank": 16,
         "lora_alpha": 32,
@@ -384,7 +400,7 @@ def main(
         "dataset": "zhuzilin/dapo-math-17k",
         "dataset_revision": "2e65612930298bde4c5d58fd97b3f23a483aaff9",
         "results_volume": RESULTS_VOLUME,
-        "context_length": 16384,
+        "context_length": context_length,
         "dynamic_sampling": False,
         "app_id": app.app_id,
         "clip_low": 0.8,
