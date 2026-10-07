@@ -4,8 +4,6 @@ from spindle.configuration import BaseConfig
 class Config(BaseConfig):
     name = "gpt-oss-20b-lora-64k"
     model = "openai/gpt-oss-20b"
-    # SGLang LoRA MoE needs unquantized experts; this is the MXFP4 release upcast to BF16.
-    model_weights = "lmsys/gpt-oss-20b-bf16"
     max_context_length = 65536
     trainer_gpu = "H200"
     trainer_gpus_per_node = 8
@@ -46,9 +44,10 @@ class Config(BaseConfig):
         "EXPERT_LORA_COMPAT": "1",
     }
     inference_gpu = "H200"
-    inference_gpus_per_node = 4
+    # Marlin keeps the original MXFP4 experts and applies the expert LoRA updates.
+    inference_gpus_per_node = 1
     sglang_cfg = {
-        "tp_size": 4,
+        "tp_size": 1,
         "dtype": "bfloat16",
         "mem_fraction_static": 0.7,
         "max_running_requests": 32,
@@ -56,7 +55,7 @@ class Config(BaseConfig):
         "max_loaded_loras": 64,
         "max_loras_per_batch": 8,
         "schedule_policy": "lpm",
-        "moe_runner_backend": "triton",
+        "moe_runner_backend": "marlin",
     }
 
 
