@@ -31,6 +31,8 @@ def main():
     max_reserved = 0
     validation_passed = False
     terminal_failure = None
+    cancellation_isolation_passed = False
+    sample_retries = []
     validation_passed_at = None
     last_progress = time.time()
     last_status = 0
@@ -64,6 +66,10 @@ def main():
                     if line in seen:
                         continue
                     seen.add(line)
+                    if "GLM CANCELLATION ISOLATION PASSED" in line:
+                        cancellation_isolation_passed = True
+                    if "GLM SAMPLE RETRY" in line:
+                        sample_retries.append(line[-2500:])
                     if "GLM VALIDATION PASSED:" in line:
                         if not validation_passed:
                             validation_passed_at = datetime.fromisoformat(
@@ -72,7 +78,7 @@ def main():
                             clients = {}
                         validation_passed = True
                         last_progress = time.time()
-                    if "DAPO STATUS" in line and '"phase": "failed"' in line:
+                    if '"phase": "failed"' in line and '"run_id":' in line:
                         terminal_failure = line[-2500:]
                     if any(
                         s in line
@@ -175,6 +181,9 @@ def main():
                     errors=errors,
                     warnings=warnings,
                     terminal_failure=terminal_failure,
+                    cancellation_isolation_passed=cancellation_isolation_passed,
+                    sample_retry_count=len(sample_retries),
+                    recent_sample_retries=sample_retries[-10:],
                 )
                 stopped_for_oom = False
                 oom = any(
