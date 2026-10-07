@@ -5,7 +5,11 @@ import struct
 import numpy as np
 import pytest
 from tinker import types
-from tinker.lib._pydantic_conv import to_pydantic_request
+
+try:
+    from tinker.lib._pydantic_conv import to_pydantic_request
+except ImportError:  # Tinker 0.25+ sends training requests only as protobuf.
+    to_pydantic_request = None
 from tinker.proto.request_conv import forward_backward_request_to_proto
 
 from spindle.engine import Engine
@@ -110,6 +114,9 @@ def test_malformed_frames_are_rejected(body):
         decode_payload(body)
 
 
+@pytest.mark.skipif(
+    to_pydantic_request is None, reason="requires the Tinker 0.24 JSON request path"
+)
 def test_json_and_protobuf_retries_share_identity_but_changed_data_conflicts():
     async def run():
         engine = Engine(EchoExecutor())
