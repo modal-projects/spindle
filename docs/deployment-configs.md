@@ -91,6 +91,10 @@ The launcher consumes the saved settings. It does not reparse backend configurat
 | [deployment_configs.py](../src/spindle/providers/modal/deployment_configs.py) | Read saved configs and frontend platform settings |
 | [deployment_cli.py](../src/spindle/deployment_cli.py) | Deploy trainer and inference apps by calling the builders, then deploy the frontend |
 
+The experimental [GLM-5.3 Flash recipe](models/glm53-flash.md) selects separate
+trainer and inference images through `module:attribute` references. This lets a
+model use newer backend dependencies without updating other deployments.
+
 ## Multi-node Miles
 
 [qwen38_27b_lora_256k.py](../src/spindle/configs/qwen38_27b_lora_256k.py) configures two nodes with eight H200s per node, TP2 and CP8. The trainer app uses Modal's clustered launcher and RDMA. Every rank mounts the same volumes; rank 0 starts the engine, and the other ranks join Ray using the launcher merged in #39. The driver receives the Ray address. GPU counts cannot be independently overridden through Miles options.

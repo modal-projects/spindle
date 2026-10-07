@@ -13,7 +13,7 @@ from itertools import count
 from pathlib import Path
 from typing import Any
 
-from spindle.backends.miles_arguments import apply_config_overrides
+from spindle.backends.miles_arguments import configure_parser
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.errors import BackendFailed
 
@@ -109,6 +109,7 @@ class MilesRuntime:
                 num_layers=self._args.num_layers,
                 num_experts=self._args.num_experts,
                 topk=self._args.moe_router_topk,
+                moe_layer_freq=self._args.moe_layer_freq,
             )
         unit_id = next(self._unit_ids)
         method = (
@@ -225,8 +226,7 @@ class MilesRuntime:
             if self.config.cli_options:
 
                 def configure(parser):
-                    apply_config_overrides(parser, self.config.cli_options, sys.argv)
-                    return parser
+                    return configure_parser(parser, self.config.cli_options)
 
                 args = parse_args(add_custom_arguments=configure, entry="serve")
             else:

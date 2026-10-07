@@ -6,6 +6,7 @@ Boolean flags need defaults because a store_true flag cannot express False.
 """
 
 import argparse
+import sys
 
 
 def apply_config_overrides(parser, options, argv):
@@ -49,3 +50,16 @@ def apply_config_overrides(parser, options, argv):
             if isinstance(value, (dict, list, bool)):
                 raise ValueError(f"backend option {name} requires a scalar")
             argv.append(f"{flag}={value}")
+
+
+def configure_parser(parser, options):
+    """Apply overrides after Miles has registered its own arguments."""
+    parse_known_args = parser.parse_known_args
+
+    def parse_configured_args(args=None, namespace=None):
+        argv = list(sys.argv[1:] if args is None else args)
+        apply_config_overrides(parser, options, argv)
+        return parse_known_args(argv, namespace)
+
+    parser.parse_known_args = parse_configured_args
+    return parser

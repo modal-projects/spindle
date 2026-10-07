@@ -187,7 +187,10 @@ class MilesCommandBackend(Backend):
                     raise ValueError(
                         "router replay is required for every datum in a batch"
                     )
-                if "--use-rollout-routing-replay" not in self.config.extra_args:
+                if not self.config.cli_options.get(
+                    "use_rollout_routing_replay",
+                    "--use-rollout-routing-replay" in self.config.extra_args,
+                ):
                     raise ValueError(
                         "router replay requires --use-rollout-routing-replay in the Miles configuration"
                     )
@@ -411,7 +414,12 @@ class MilesCommandBackend(Backend):
         if capture_id in self._sampler_captures:
             raise ValueError(f"sampler capture already exists: {capture_id}")
         state = self.jobs[model_id]
-        path = self.capture_dir / "sampler" / capture_id
+        bulletin_root = os.environ.get("SPINDLE_BULLETIN_ROOT")
+        path = (
+            Path(bulletin_root) / ".captures" / capture_id
+            if bulletin_root
+            else self.capture_dir / "sampler" / capture_id
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         with (
             self._timer.phase(
@@ -432,6 +440,7 @@ class MilesCommandBackend(Backend):
             "model_id": model_id,
             "publish_version": requested_version,
             "path": path,
+            "consume": bool(bulletin_root),
         }
         return SamplerPublication(
             publish_version=requested_version,
@@ -465,6 +474,7 @@ class MilesCommandBackend(Backend):
                         int(capture["publish_version"]),
                     ),
                     capture["path"],
+                    consume=capture["consume"],
                 )
             if (
                 self._profiling_active

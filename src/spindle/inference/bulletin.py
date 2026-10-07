@@ -100,12 +100,22 @@ class SnapshotBulletin:
             _atomic_write(run_dir / _POINTER, ref.identity)
             return True
 
-    def publish(self, ref: VersionRef, source_dir: str | Path) -> bool:
+    def publish(
+        self, ref: VersionRef, source_dir: str | Path, *, consume: bool = False
+    ) -> bool:
+        """Publish completed files; consume transfers an owned directory by rename.
+
+        Consumed directories must be on the bulletin filesystem. A commit retry
+        can use the same source path after it has been renamed into place.
+        """
         source = Path(source_dir)
-        manifest = _manifest(ref, source)
         target = self.snapshot_dir(ref)
+        if consume and not source.exists() and target.exists():
+            manifest = _read_manifest(self.resolve(ref))
+        else:
+            manifest = _manifest(ref, source)
         with self._lock:
-            created = self._install(target, source, manifest)
+            created = self._install(target, source, manifest, consume=consume)
             if not created:
                 if _read_manifest(target) != manifest:
                     raise ImmutableSnapshotError(ref.identity)
@@ -122,10 +132,26 @@ class SnapshotBulletin:
         target: Path,
         source: Path,
         manifest: dict[str, Any],
+        *,
+        consume: bool = False,
     ) -> bool:
         if target.exists():
             return False
         target.parent.mkdir(parents=True, exist_ok=True)
+        if consume:
+            (source / _MANIFEST).write_text(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            # Cross-filesystem moves are deliberately rejected: callers opting
+            # into ownership transfer must stage directly on this volume.
+            try:
+                os.rename(source, target)
+            except OSError:
+                if not target.exists():
+                    raise
+                return False
+            return True
         temp = target.parent / f".{target.name}.{uuid.uuid4().hex}.tmp"
         try:
             temp.mkdir()

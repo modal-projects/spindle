@@ -175,6 +175,10 @@ def _load_actor(monkeypatch):
         monkeypatch, "spindle.backends.miles_runtime.replay"
     ).install_replay_hooks = lambda **kwargs: None
 
+    profiling = _module(monkeypatch, "spindle.backends.miles_runtime.profiling")
+    profiling.RankProfiler = type("RankProfiler", (), {})
+    profiling.TorchProfileConfig = type("TorchProfileConfig", (), {})
+
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(
         "spindle.backends.miles_runtime._test_actor", path
@@ -398,3 +402,23 @@ def test_sync_checkpoint_volume_fails_on_every_rank(monkeypatch) -> None:
     errors = [future.exception() for future in futures]
     assert all(isinstance(error, RuntimeError) for error in errors)
     assert all("volume commit failed" in str(error) for error in errors)
+
+
+@pytest.mark.parametrize(
+    "path,actions",
+    [("/checkpoints/adapter", ["commit"]), ("/bulletin/.captures/adapter", [])],
+)
+def test_export_commits_only_its_checkpoint_volume(monkeypatch, path, actions):
+    actor = _load_actor(monkeypatch)
+    monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", "/checkpoints")
+    exported = []
+    committed = []
+    base = actor.SpindleMilesTrainRayActor.__bases__[0]
+    monkeypatch.setattr(
+        base, "export_slot", lambda self, *args: exported.append(args), raising=False
+    )
+    monkeypatch.setattr(actor, "_sync_checkpoint_volume", committed.append)
+    worker = actor.SpindleMilesTrainRayActor()
+    worker.export_slot(0, 32, 32, path)
+    assert exported == [(0, 32, 32, path, None)]
+    assert committed == actions
