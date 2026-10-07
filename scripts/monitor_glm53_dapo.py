@@ -15,6 +15,7 @@ def main():
     parser.add_argument("app_id")
     parser.add_argument("output", type=Path)
     parser.add_argument("--env", default="kailash-dev")
+    parser.add_argument("--stop-on-oom", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     log_path = args.output / "app.log"
@@ -146,10 +147,25 @@ def main():
                     errors=errors,
                     warnings=warnings,
                 )
+                stopped_for_oom = False
+                if args.stop_on_oom and any(
+                    "OutOfMemoryError" in error or "CUDA out of memory" in error
+                    for error in errors
+                ):
+                    stopped = subprocess.run(
+                        modal
+                        + ["app", "stop", args.app_id, "--env", args.env, "--yes"],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    stopped_for_oom = stopped.returncode == 0
+                    state["stopped_for_oom"] = stopped_for_oom
+                    state["oom_stop_error"] = stopped.stderr[-2000:]
                 temp = args.output / "health.tmp"
                 temp.write_text(json.dumps(state, indent=2) + "\n")
                 temp.replace(args.output / "health.json")
-                if app is not None and app.get("stopped_at"):
+                if stopped_for_oom or (app is not None and app.get("stopped_at")):
                     break
                 time.sleep(15)
         finally:
