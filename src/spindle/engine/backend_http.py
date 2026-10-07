@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -7,7 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -23,6 +24,7 @@ from .operations import (
     parse_operation_payload,
     serialize_operation_payload,
 )
+from .training_transport import TRAINING_BATCH_CONTENT_TYPE, decode_batch, encode_batch
 
 
 class ModelBody(BaseModel):
@@ -105,21 +107,23 @@ def create_backend_app(executor: Executor) -> FastAPI:
         )
 
     @app.post("/execute_forward_backward_batch")
-    async def execute_forward_backward_batch(
-        body: ForwardBackwardBatchBody,
-    ) -> JSONResponse:
+    async def execute_forward_backward_batch(request: Request) -> JSONResponse:
+        body = await request.body()
+        if request.headers.get("content-type") == TRAINING_BATCH_CONTENT_TYPE:
+            commands = await asyncio.to_thread(decode_batch, body)
+        else:
+            parsed = ForwardBackwardBatchBody.model_validate_json(body)
+            commands = tuple(
+                Command(
+                    item.model_id,
+                    item.kind,
+                    parse_operation_payload(item.kind, item.payload),
+                )
+                for item in parsed.executions
+            )
         mark("backend.request.received", path="/execute_forward_backward_batch")
         return await run(
-            executor.execute_forward_backward_batch(
-                tuple(
-                    Command(
-                        item.model_id,
-                        item.kind,
-                        parse_operation_payload(item.kind, item.payload),
-                    )
-                    for item in body.executions
-                )
-            ),
+            executor.execute_forward_backward_batch(commands),
             path="/execute_forward_backward_batch",
         )
 
@@ -207,18 +211,11 @@ class HttpBackendClient:
         self,
         executions: tuple[Command, ...],
     ) -> tuple[object, ...]:
+        encoded = await asyncio.to_thread(encode_batch, executions)
         result = await self._post(
             "/execute_forward_backward_batch",
-            {
-                "executions": [
-                    {
-                        "model_id": item.model_id,
-                        "kind": item.kind.value,
-                        "payload": serialize_operation_payload(item.payload),
-                    }
-                    for item in executions
-                ]
-            },
+            encoded,
+            content_type=TRAINING_BATCH_CONTENT_TYPE,
         )
         return tuple(result)
 
@@ -260,20 +257,22 @@ class HttpBackendClient:
     async def shutdown_backend(self) -> None:
         await self._post("/close", {})
 
-    async def _post(self, path: str, body: dict) -> object:
+    async def _post(
+        self, path: str, body: dict | bytes, *, content_type: str = "application/json"
+    ) -> object:
         if self._transport_failed:
             raise RuntimeError("backend transport failed; checkpoint recovery required")
         telemetry.received.set(None)
         enabled = provider() is not None
         encode_started = time.perf_counter()
-        encoded = json.dumps(body).encode()
+        encoded = body if isinstance(body, bytes) else json.dumps(body).encode()
         mark(
             "engine.backend_post.encoded",
             path=path,
             bytes=len(encoded),
             encode_s=time.perf_counter() - encode_started,
         )
-        headers = {"content-type": "application/json"}
+        headers = {"content-type": content_type}
         if enabled:
             headers["x-spindle-telemetry"] = "1"
         http_started = time.perf_counter()

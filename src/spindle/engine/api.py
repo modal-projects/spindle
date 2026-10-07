@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
@@ -47,6 +47,7 @@ class Command:
     model_id: str
     kind: OperationKind
     payload: OperationPayload
+    encoded_payload: bytes | None = field(default=None, compare=False, repr=False)
 
 
 class EngineApi(Protocol):

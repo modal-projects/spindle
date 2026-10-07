@@ -610,9 +610,16 @@ def test_builder_interleaves_models() -> None:
 
 def test_batches_compatible_forward_backward_across_models() -> None:
     async def run() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
         class RecordingExecutor(EchoExecutor):
             def __init__(self) -> None:
                 self.batches = []
+
+            async def execute(self, model_id, kind, payload):
+                started.set()
+                await release.wait()
+                return await super().execute(model_id, kind, payload)
 
             async def execute_forward_backward_batch(self, executions):
                 self.batches.append(executions)
@@ -622,12 +629,17 @@ def test_batches_compatible_forward_backward_across_models() -> None:
         server = Engine(executor)
         await server.accept_model("model-a", {})
         await server.accept_model("model-b", {})
+        # Hold an earlier operation so both requests are admitted before dispatch.
+        # Concurrent submissions alone need not finish decoding at the same time.
+        await server.optim_step({"model_id": "model-a", "seq_id": 1, "adam_params": {}})
+        await started.wait()
         await asyncio.gather(
-            forward_backward(server, 1, model_id="model-a"),
+            forward_backward(server, 2, model_id="model-a"),
             forward_backward(server, 1, model_id="model-b"),
         )
 
-        for request_id in ("model-a:1", "model-b:1"):
+        release.set()
+        for request_id in ("model-a:2", "model-b:1"):
             state = await server.retrieve_future(request_id, timeout=1.0)
             assert state.status == FutureStatus.COMPLETE
         assert [[item.model_id for item in batch] for batch in executor.batches] == [

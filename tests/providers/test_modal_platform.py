@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import modal
+import pytest
 
 from spindle.providers.local import InMemoryKeyValueStore
 from spindle.providers.modal.engines import (
@@ -148,5 +149,85 @@ def test_transient_poll_errors_are_not_death_verdicts() -> None:
         assert state == "running"
         state = await probed_state(kv, RuntimeError("call outcome"))
         assert state == "dead"
+
+    asyncio.run(run())
+
+
+def test_concurrent_instance_reads_share_only_pending_liveness_check():
+    async def run():
+        platform, kv, _ = recording_platform()
+        record = EngineInstanceRecord(
+            instance_id="shared",
+            definition_id=DEFINITION,
+            revision="one",
+            state="running",
+            call_id="fc-shared",
+        )
+        await kv.put(instance_key("shared"), record.model_dump(mode="json"))
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def poll(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            raise TimeoutError
+
+        call = AsyncMock()
+        call.get.aio.side_effect = poll
+        with patch.object(modal.FunctionCall, "from_id", return_value=call):
+            first = asyncio.create_task(platform.get_instance("shared"))
+            await entered.wait()
+            second = asyncio.create_task(platform.get_instance("shared"))
+            # Yield so the second waiter joins the pending read before cancellation.
+            await asyncio.sleep(0)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            release.set()
+            assert (await second).state == "running"
+            assert calls == 1
+            # No cache survives completion; the next read must see a restart.
+            restarted = record.model_copy(update={"boot_id": "new-boot"})
+            await kv.put(instance_key("shared"), restarted.model_dump(mode="json"))
+            assert (await platform.get_instance("shared")).boot_id == "new-boot"
+            assert calls == 2
+
+    asyncio.run(run())
+
+
+def test_failed_shared_instance_read_reaches_all_waiters_and_can_retry():
+    async def run():
+        platform, kv, _ = recording_platform()
+        entered, release = asyncio.Event(), asyncio.Event()
+        failure = RuntimeError("instance store unavailable")
+
+        async def fail_read(key):
+            entered.set()
+            await release.wait()
+            raise failure
+
+        with patch.object(kv, "get", side_effect=fail_read) as get:
+            first = asyncio.create_task(platform.get_instance("shared"))
+            await entered.wait()
+            second = asyncio.create_task(platform.get_instance("shared"))
+            # Yield so both callers await the same read before it fails.
+            await asyncio.sleep(0)
+            release.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
+            assert results == [failure, failure]
+            get.assert_awaited_once_with(instance_key("shared"))
+
+        # A later read must reach the store again rather than reuse the failure.
+        record = EngineInstanceRecord(
+            instance_id="shared",
+            definition_id=DEFINITION,
+            revision="one",
+            state="running",
+            boot_id="recovered-boot",
+        )
+        await kv.put(instance_key("shared"), record.model_dump(mode="json"))
+        assert (await platform.get_instance("shared")).boot_id == "recovered-boot"
 
     asyncio.run(run())

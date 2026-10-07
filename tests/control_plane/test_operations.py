@@ -1,11 +1,12 @@
 import asyncio
 import json
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 
 from spindle.control_plane import ControlPlane, FutureResolutionStatus
-from spindle.control_plane.keys import placement_key, trainer_demand_key
+from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import PlacementRecord
 from spindle.errors import ModelLost, RecordNotFound, RecordUnavailable
 from spindle.providers.local import (
@@ -333,5 +334,25 @@ def test_sweep_keeps_empty_engine_with_unplaced_demand() -> None:
         )
         assert await plane.sweep_idle_engines() == ()
         assert not (await engines.get_instance("instance-1")).terminal
+
+    asyncio.run(run())
+
+
+def test_chunk_routes_share_pending_reads_but_recheck_closed_sessions():
+    async def run():
+        plane, _, session, model = await plane_with_model()
+        with patch.object(plane.kv, "get", wraps=plane.kv.get) as get:
+            engines = await asyncio.gather(*(plane.engine_for(model) for _ in range(8)))
+            assert all(engine is engines[0] for engine in engines)
+            calls = [call.args[0] for call in get.await_args_list]
+            assert calls.count(model_key(model)) == 1
+            assert calls.count(placement_key(model)) == 1
+            assert not plane._route_reads
+            await plane.engine_for(model)
+            calls = [call.args[0] for call in get.await_args_list]
+            assert calls.count(model_key(model)) == 2
+        await plane.close_session(session, "test")
+        with pytest.raises(RecordUnavailable, match="closed"):
+            await plane.engine_for(model)
 
     asyncio.run(run())

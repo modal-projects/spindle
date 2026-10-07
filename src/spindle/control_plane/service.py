@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
@@ -156,6 +157,8 @@ class ControlPlane:
         self.delete_checkpoint = delete_checkpoint
         self.checkpoint_root = checkpoint_root
         self.creation_error = creation_error
+        self._session_touches: dict[str, asyncio.Task] = {}
+        self._route_reads: dict[str, asyncio.Task] = {}
 
     async def create_session(
         self,
@@ -731,15 +734,28 @@ class ControlPlane:
         return request_id
 
     async def engine_for(self, model_id: str) -> EngineApi:
-        model = await self.get_model(model_id)
-        await self._touch_session(model.session_id)
-        placement = await self._placement(model_id)
+        pending = self._route_reads.get(model_id)
+        if pending is None or pending.done():
+            pending = asyncio.create_task(self._read_route(model_id))
+            self._route_reads[model_id] = pending
+        model, placement = await asyncio.shield(pending)
         if placement is None:
+            await self._touch_session(model.session_id)
             if await self._lost(model_id):
                 raise ModelLost(model_id)
             raise RecordUnavailable("model", model_id, "unplaced")
-        instance = await self._live_instance(placement)
+        _, instance = await asyncio.gather(
+            self._touch_session(model.session_id), self._live_instance(placement)
+        )
         return self.engines.client(instance.instance_id)
+
+    async def _read_route(self, model_id: str):
+        try:
+            return await asyncio.gather(
+                self.get_model(model_id), self._placement(model_id)
+            )
+        finally:
+            self._route_reads.pop(model_id, None)
 
     async def unload_model(self, model_id: str) -> str:
         model = await self._unload_model(model_id)
@@ -1518,20 +1534,33 @@ class ControlPlane:
 
     async def _touch_session(self, session_id: str) -> SessionLastSeenRecord:
         await self._open_session(session_id)
-        last_seen = SessionLastSeenRecord(
-            session_id=session_id,
-            seen_at=self.clock(),
-        )
-        await self.kv.put(
-            session_last_seen_key(session_id),
-            last_seen.model_dump(mode="json"),
-        )
-        return last_seen
+        # Only share a write that is still in flight; each caller checks the
+        # session above. No TTL or stale authorization result is cached.
+        pending = self._session_touches.get(session_id)
+        if pending is None or pending.done():
+            pending = asyncio.create_task(self._write_session_touch(session_id))
+            self._session_touches[session_id] = pending
+        return await asyncio.shield(pending)
+
+    async def _write_session_touch(self, session_id: str) -> SessionLastSeenRecord:
+        try:
+            last_seen = SessionLastSeenRecord(
+                session_id=session_id, seen_at=self.clock()
+            )
+            await self.kv.put(
+                session_last_seen_key(session_id), last_seen.model_dump(mode="json")
+            )
+            return last_seen
+        finally:
+            self._session_touches.pop(session_id, None)
 
     async def _open_session(self, session_id: str) -> SessionRecord:
-        if await self.kv.get(session_closed_key(session_id)) is not None:
+        closed, value = await asyncio.gather(
+            self.kv.get(session_closed_key(session_id)),
+            self.kv.get(session_key(session_id)),
+        )
+        if closed is not None:
             raise RecordUnavailable("session", session_id, "closed")
-        value = await self.kv.get(session_key(session_id))
         if value is None:
             raise RecordNotFound("session", session_id)
         return SessionRecord.model_validate(value)
