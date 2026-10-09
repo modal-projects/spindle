@@ -30,6 +30,9 @@ def create_app(
             timeout=3000,
             trust_env=False,
             transport=transport,
+            # SGLang owns admission. Long generations must not exhaust the
+            # HTTP pool before its configured concurrency or block control calls.
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
         )
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}

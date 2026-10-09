@@ -9,6 +9,59 @@ from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
 
 
+def test_generation_concurrency_does_not_block_health_requests(tmp_path):
+    async def scenario():
+        arrived = 0
+        all_arrived = asyncio.Event()
+        release = asyncio.Event()
+
+        async def upstream(reader, writer):
+            nonlocal arrived
+            headers = await reader.readuntil(b"\r\n\r\n")
+            for header in headers.split(b"\r\n")[1:]:
+                if header.lower().startswith(b"content-length:"):
+                    await reader.readexactly(int(header.split(b":", 1)[1]))
+            if headers.startswith(b"POST /generate "):
+                arrived += 1
+                if arrived == 128:
+                    all_arrived.set()
+                await release.wait()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 2\r\nConnection: close\r\n\r\n{}"
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        app = create_app(
+            SnapshotBulletin(tmp_path / "bulletin"), f"http://127.0.0.1:{port}"
+        )
+        async with (
+            server,
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
+            ) as client,
+        ):
+            requests = [
+                asyncio.create_task(client.post("/generate", json={"input_ids": [1]}))
+                for _ in range(128)
+            ]
+            try:
+                await asyncio.wait_for(all_arrived.wait(), 5)
+                health = await asyncio.wait_for(client.get("/health"), 2)
+                assert health.status_code == 200
+            finally:
+                release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*requests), 5)
+                assert all(response.status_code == 200 for response in responses)
+
+    asyncio.run(scenario())
+
+
 def _publish(tmp_path, version):
     source = tmp_path / f"source-{version}"
     source.mkdir()

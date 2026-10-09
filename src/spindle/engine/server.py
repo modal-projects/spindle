@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -142,7 +142,7 @@ class Engine:
         self._sampler_inflight: set[str] = set()
         self._serial_persistence_inflight: set[OperationKind] = set()
         self.draining = False
-        self._models: dict[str, _ModelState] = {}
+        self._models: OrderedDict[str, _ModelState] = OrderedDict()
         self._futures: dict[str, FutureState] = {}
         self._lock = asyncio.Lock()
         self._work = asyncio.Condition(self._lock)
@@ -818,6 +818,8 @@ class Engine:
             if queued is not operation:
                 raise RuntimeError("model operation changed before execution")
             model.next_seq += 1
+            # Give other ready clients a turn before this client's next operation.
+            self._models.move_to_end(operation.model_id)
 
     @staticmethod
     def _forward_backward_batch_key(operation: Operation) -> str:
