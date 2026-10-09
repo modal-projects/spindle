@@ -42,6 +42,9 @@ class Config(BaseConfig):
             "moe_permute_fusion": False,
             # Bounds the fp32 [tokens, vocab] logits buffer of the log-prob pass at TP1.
             "log_probs_chunk_size": 4096,
+            # Split each batch across data-parallel ranks by token count rather than
+            # round-robin, so no rank waits on a slower one at the gradient sync.
+            "balance_data": True,
             "recompute_granularity": "full",
             "recompute_method": "uniform",
             "recompute_num_layers": 1,
