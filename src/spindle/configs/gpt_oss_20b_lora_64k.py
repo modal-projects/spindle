@@ -42,9 +42,8 @@ class Config(BaseConfig):
             "moe_permute_fusion": False,
             # Bounds the fp32 [tokens, vocab] logits buffer of the log-prob pass at TP1.
             "log_probs_chunk_size": 4096,
-            "recompute_granularity": "full",
-            "recompute_method": "uniform",
-            "recompute_num_layers": 1,
+            "recompute_granularity": "selective",
+            "recompute_modules": ["core_attn", "moe_act", "layernorm"],
         },
     }
     trainer_env = {
