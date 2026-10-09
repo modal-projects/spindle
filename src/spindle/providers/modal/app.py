@@ -32,7 +32,7 @@ from .deployment_configs import (
     configs_from_env,
     platform_from_env,
 )
-from .engines import ModalEnginePlatform
+from .engines import EngineInstanceRecord, ModalEnginePlatform
 from .fft_pool import (
     FFTPoolSpec,
     deploy_pool,
@@ -62,6 +62,9 @@ from .lora_pool import (
     pool_gateway as lora_pool_gateway,
 )
 from .lora_pool import (
+    set_pool_minimum as set_lora_pool_minimum,
+)
+from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
@@ -84,6 +87,7 @@ SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
 FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
 FFT_POOL_TOUCH_INTERVAL = 60.0
 LORA_POOL_CHECK_INTERVAL = 60.0
+TRAINER_BOOT_POLL_SECONDS = 10.0
 SWEEP_PERIOD = modal.Period(seconds=SETTINGS.recipe.sweep_interval_s)
 CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
@@ -229,6 +233,75 @@ async def ensure_lora_pool(spec: dict) -> str:
         {**pool.as_dict(), "touched_at": time.time()},
     )
     return gateway
+
+
+@app.function(image=image, timeout=6 * 60 * 60)
+async def warm_lora_pool_for_training(spec: dict) -> bool:
+    """Hold the pool's training minimum once a trainer for its config has booted.
+
+    Replicas then start while the trainer loads the model instead of idling while it
+    waits for GPUs. Gives up when no training model of the config remains.
+    """
+    pool = LoraPoolSpec.from_dict(spec)
+    registry = shared_kv()
+    while pool.app_name in await _training_lora_pools(registry):
+        if await _trainer_booted(registry, pool.definition_id):
+            await ensure_lora_pool.remote.aio(pool.as_dict())
+            await _hold_training_minimum(registry, pool)
+            return True
+        await asyncio.sleep(TRAINER_BOOT_POLL_SECONDS)
+    return False
+
+
+async def _training_lora_pools(registry) -> set[str]:
+    return {
+        LoraPoolSpec(model.engine_definition_id).app_name
+        for _, value in await registry.list_items("model:")
+        for model in (ModelRecord.model_validate(value),)
+        if parameterization_for(model.engine_definition_id) == "lora"
+    }
+
+
+async def _trainer_booted(registry, definition_id: str) -> bool:
+    """Whether a trainer container for the config is up, not just queued for GPUs."""
+    return any(
+        record.definition_id == definition_id
+        and record.boot_id
+        and record.state in {"starting", "running"}
+        for _, value in await registry.list_items("engine_instance:")
+        for record in (EngineInstanceRecord.model_validate(value),)
+    )
+
+
+def _minimum_key(spec: LoraPoolSpec) -> str:
+    return f"lora_pool_minimum:{spec.app_name}"
+
+
+def _replica_minimums(definition_id: str) -> tuple[int, int]:
+    """(minimum without training, minimum while a training model is active)."""
+    try:
+        recipe = module_for(definition_id).recipe
+    except KeyError:
+        return 0, 0
+    idle = recipe.inference_min_replicas
+    return idle, max(idle, recipe.inference_training_min_replicas)
+
+
+async def _hold_training_minimum(registry, spec: LoraPoolSpec) -> None:
+    """Start every configured replica at once and keep them through training steps."""
+    idle, training = _replica_minimums(spec.definition_id)
+    if training <= idle:
+        return
+    await asyncio.to_thread(set_lora_pool_minimum, spec, training)
+    await registry.put(_minimum_key(spec), {"minimum": training})
+
+
+async def _release_training_minimum(registry, spec: LoraPoolSpec) -> None:
+    if await registry.get(_minimum_key(spec)) is None:
+        return
+    idle, _ = _replica_minimums(spec.definition_id)
+    await asyncio.to_thread(set_lora_pool_minimum, spec, idle)
+    await registry.delete(_minimum_key(spec))
 
 
 async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
@@ -468,9 +541,11 @@ def _plane():
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         else:
-            await ensure_lora_pool.spawn.aio(
-                LoraPoolSpec(model.engine_definition_id).as_dict()
-            )
+            spec = LoraPoolSpec(model.engine_definition_id).as_dict()
+            await ensure_lora_pool.spawn.aio(spec)
+            idle, training = _replica_minimums(model.engine_definition_id)
+            if training > idle:
+                await warm_lora_pool_for_training.spawn.aio(spec)
 
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
@@ -619,24 +694,26 @@ async def _cleanup_fft_pools() -> tuple[str, ...]:
 
 async def _cleanup_lora_pools() -> tuple[str, ...]:
     registry = shared_kv()
-    active = {
-        LoraPoolSpec(model.engine_definition_id).app_name
-        for _, value in await registry.list_items("model:")
-        for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "lora"
-    }
+    active = await _training_lora_pools(registry)
     stopped = []
     for key, value in await registry.list_items("lora_pool:"):
         try:
             spec = LoraPoolSpec.from_dict(value)
             if spec.app_name in active:
+                # Reapplied every sweep: a redeployment resets the override.
+                if await _trainer_booted(registry, spec.definition_id):
+                    await _hold_training_minimum(registry, spec)
+                else:
+                    await _release_training_minimum(registry, spec)
                 continue
             if float(value.get("touched_at", 0.0)) > (
                 time.time() - LORA_POOL_IDLE_TIMEOUT
             ):
+                await _release_training_minimum(registry, spec)
                 continue
             await asyncio.to_thread(stop_lora_pool, spec)
             await registry.delete(key)
+            await registry.delete(_minimum_key(spec))
             stopped.append(spec.app_name)
         except Exception:
             # One failed stop must not starve cleanup of other shared pools.

@@ -47,6 +47,9 @@ class Config(BaseConfig):
     }
     inference_gpu = "H200"
     inference_gpus_per_node = 4
+    # Start the whole pool while the trainer loads and hold it through training
+    # steps, so no update's rollouts wait for replicas to cold-start.
+    inference_training_min_replicas = 8
     sglang_cfg = {
         "tp_size": 4,
         "dtype": "bfloat16",
