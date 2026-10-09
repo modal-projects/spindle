@@ -3,6 +3,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 import httpx
@@ -378,8 +379,10 @@ def test_backend_parses_response_once_with_telemetry(monkeypatch, large, status)
     monkeypatch.setattr(backend_http, "provider", lambda: object())
     original = httpx.Response.json
     parses = []
+    caller_thread = threading.get_ident()
 
     def counted(response, **kwargs):
+        assert threading.get_ident() != caller_thread
         parses.append(response)
         return original(response, **kwargs)
 

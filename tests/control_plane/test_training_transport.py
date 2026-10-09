@@ -8,7 +8,11 @@ import numpy as np
 import pytest
 import zstandard
 from tinker import types
-from tinker.lib._pydantic_conv import to_pydantic_request
+
+try:
+    from tinker.lib._pydantic_conv import to_pydantic_request
+except ImportError:  # Tinker 0.25+ sends training requests only as protobuf.
+    to_pydantic_request = None
 from tinker.proto.request_conv import forward_backward_request_to_proto
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
@@ -18,6 +22,9 @@ from tests.control_plane.test_http import DEFINITION, DEFINITIONS, created_model
 from tests.support import EchoExecutor
 
 
+@pytest.mark.skipif(
+    to_pydantic_request is None, reason="requires the Tinker 0.24 JSON request path"
+)
 @pytest.mark.parametrize("shape", [[4], None])
 @pytest.mark.parametrize("protobuf_first", [False, True])
 def test_sdk_requests_match_through_frontend_engine_and_backend(shape, protobuf_first):

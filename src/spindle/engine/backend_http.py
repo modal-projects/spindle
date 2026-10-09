@@ -303,11 +303,7 @@ class HttpBackendClient:
             self._fence_transport_failure()
         decode_started = time.perf_counter()
         try:
-            body = (
-                await asyncio.to_thread(response.json)
-                if len(response.content) >= 65536
-                else response.json()
-            )
+            body = await asyncio.to_thread(response.json)
         except ValueError:
             if response.is_success:
                 raise
