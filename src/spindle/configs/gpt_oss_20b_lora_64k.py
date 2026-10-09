@@ -64,6 +64,9 @@ class Config(BaseConfig):
         "max_loras_per_batch": 8,
         "schedule_policy": "lpm",
         "moe_runner_backend": "triton",
+        # Multi-turn prompts are long and outputs short, so prompt chunks would
+        # otherwise run as separate steps that pause every in-flight generation.
+        "enable_mixed_chunk": True,
     }
 
 
