@@ -3,7 +3,7 @@
 from contextvars import ContextVar
 
 from stitch.service import create_app
-from stitch.sync import Reconciler
+from stitch.sync import AdmissionGate, Reconciler
 from stitch.types import VersionRef
 from starlette.responses import JSONResponse
 
@@ -54,27 +54,11 @@ async def retire_replica():
     await asyncio.Future()
 
 
-class AssignedReconciler(Reconciler):
-    async def _switch_run(self, new_run):
-        if (
-            new_run != self.run_id
-            and getattr(self.engine, "delta_update_mode", None) == "cpu"
-        ):
-            # CPU-cache reset is unsupported. Do not relabel patched weights as
-            # the new run, or call the disk-reset implementation by accident.
-            await self.commit(
-                apply=retire_replica, on_applied=lambda: None, drain_all=True
-            )
-            return
-        await super()._switch_run(new_run)
-
+class AssignedGate(AdmissionGate):
     def _rejection(self, constraint):
-        # Called under Stitch's admission/commit lock. Middleware checks alone
-        # would race a run switch between checking identity and admission.
         expected = _expected_run.get()
-        if expected is not None and (
-            self.applied is None or self.applied.run_id != expected
-        ):
+        served = self._served_version()
+        if expected is not None and (served is None or served.run_id != expected):
             return {
                 "type": "WeightRunNotReady",
                 "message": "replica has not switched to the requested model",
@@ -82,8 +66,31 @@ class AssignedReconciler(Reconciler):
         return super()._rejection(constraint)
 
 
+class AssignedReconciler(Reconciler):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.gate = AssignedGate(
+            commit_mode=self.gate.commit_mode,
+            served_version=lambda: self.applied,
+            on_reject=self._on_reject,
+        )
+
+    async def _switch_run(self, new_run):
+        if (
+            new_run != self.run_id
+            and getattr(self.engine, "delta_update_mode", None) == "cpu"
+        ):
+            # CPU-cache reset is unsupported. Do not relabel patched weights as
+            # the new run, or call the disk-reset implementation by accident.
+            await self.gate.commit(
+                apply=retire_replica, on_applied=lambda: None, drain_all=True
+            )
+            return
+        await super()._switch_run(new_run)
+
+
 def assigned_app(reconciler, engine, registry):
-    app = create_app(reconciler, engine)
+    app = create_app(reconciler.gate, reconciler, engine)
 
     @app.middleware("http")
     async def require_current_run(request, call_next):

@@ -114,14 +114,13 @@ def register_sampler(
                 max_lora_rank=1,
                 parallel_world_size=gpu_count(engine.sampler_gpu),
                 enable_lora=False,
-                enable_cpu_weight_cache=True,
+                weight_update_staging="cpu",
                 **settings,
             )
             wait_http("http://127.0.0.1:8001/health", self.sglang, 1800)
             self.sidecar = start_fft_sidecar(
                 port=8000,
                 sglang_port=8001,
-                model_path=model_path,
                 bulletin_root="/bulletin",
                 bulletin_volume=bulletin.name,
                 run_id=run_id,
