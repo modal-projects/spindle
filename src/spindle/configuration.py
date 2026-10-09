@@ -30,6 +30,8 @@ class BaseConfig:
 
     name = ""
     model = ""
+    # Hugging Face repo for base weights; defaults to ``model``.
+    model_weights = ""
     max_context_length = 16384
     parameterization = "lora"
     backend = "miles"

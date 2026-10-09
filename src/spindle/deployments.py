@@ -42,7 +42,7 @@ class DeploymentConfig(BaseModel):
         """Copy the recipe and attach backend settings."""
         pinned = BaseConfig(**_jsonable(vars(recipe)))
         trainer_settings, inference_settings = resolve_backend_settings(
-            pinned, f"/assets/{pinned.model}"
+            pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
         return cls(
             recipe=pinned,
@@ -79,8 +79,12 @@ class DeploymentConfig(BaseModel):
         return f"spindle-inference-{self.recipe.name}"
 
     @property
+    def weights_repo(self) -> str:
+        return self.recipe.model_weights or self.recipe.model
+
+    @property
     def asset_path(self) -> str:
-        return f"/assets/{self.recipe.model}"
+        return f"/assets/{self.weights_repo}"
 
     @property
     def rollout_tensor_parallel_size(self) -> int:
@@ -94,6 +98,7 @@ class DeploymentConfig(BaseModel):
         return (
             recipe.name,
             recipe.model,
+            recipe.model_weights,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -117,6 +122,7 @@ class DeploymentConfig(BaseModel):
         return (
             recipe.name,
             recipe.model,
+            recipe.model_weights,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
