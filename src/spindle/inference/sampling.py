@@ -83,7 +83,12 @@ async def sample_task(
         raise ValueError("data_parallel_size must be positive")
     request_id = str(task["request_id"])
     cache_affinity_id = _cache_affinity_id(task)
-    routing_session_id = cache_affinity_id or session_id or request_id
+    routing_session_id = (
+        cache_affinity_id
+        or session_id
+        or _conversation_affinity_id(task, prompt)
+        or request_id
+    )
     routed_dp_rank = (
         int.from_bytes(
             hashlib.sha256(routing_session_id.encode()).digest()[:8],
@@ -410,6 +415,44 @@ def _cache_affinity_id(task: dict[str, Any]) -> str | None:
         f"{sampling_session_id}\0{affinity_key}".encode()
     ).hexdigest()
     return f"affinity-{digest[:32]}"
+
+
+CONVERSATION_MARKER_TOKENS = 3
+MIN_CONVERSATION_PREFIX_TOKENS = 16
+
+
+def _conversation_affinity_id(task: dict[str, Any], prompt: list[int]) -> str | None:
+    """Route every turn after the first of a multi-turn conversation to one replica.
+
+    Without a ``cache_affinity_key``, each turn would land on a random replica and
+    recompute the whole conversation. A chat prompt ends with the template's generation
+    header (such as ``<|start|>assistant``), which also opens each earlier assistant
+    message. The prompt up to the end of that header's second occurrence therefore
+    includes the conversation's first reply: it is the same for every later turn and
+    differs between conversations. First turns and single-turn prompts, which contain
+    the header once, keep per-request routing.
+    """
+    n = CONVERSATION_MARKER_TOKENS
+    if len(prompt) < 2 * n:
+        return None
+    marker = prompt[-n:]
+    ends: list[int] = []
+    start = 0
+    while len(ends) < 2:
+        try:
+            index = prompt.index(marker[0], start)
+        except ValueError:
+            break
+        if prompt[index : index + n] == marker:
+            ends.append(index + n)
+        start = index + 1
+    if len(ends) < 2 or ends[1] < MIN_CONVERSATION_PREFIX_TOKENS:
+        return None
+    digest = hashlib.sha256(
+        f"{task['sampling_session_id']}\0{task.get('model_id')}\0".encode()
+    )
+    digest.update(b"".join(token.to_bytes(4, "little") for token in prompt[: ends[1]]))
+    return f"conversation-{digest.hexdigest()[:32]}"
 
 
 def _prompt_tokens(prompt: dict[str, Any]) -> list[int]:
