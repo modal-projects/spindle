@@ -64,7 +64,7 @@ Each parent's settings and overrides apply before its child's. Constructor field
 | `miles_cfg` | Existing `MilesBackendConfig`; `cli_options` supplies additional Miles arguments |
 | `sglang_cfg` | SGLang `ServerArgs` |
 
-LoRA sampler pools autoscale between `inference_min_replicas` and `inference_max_replicas`, targeting `inference_target_concurrency` requests per replica, and release a replica after `inference_scaledown_window_s` idle seconds. Synchronous RL leaves the pool idle for every training step, so set `inference_training_min_replicas` to start that many replicas when a training client is created and keep them until its training models are reclaimed; rollouts then never wait for a cold pool. The periodic cleaner restores `inference_min_replicas` afterwards.
+LoRA sampler pools autoscale between `inference_min_replicas` and `inference_max_replicas`, targeting `inference_target_concurrency` requests per replica, and release a replica after `inference_scaledown_window_s` idle seconds. Synchronous RL leaves the pool idle for every training step, so set `inference_training_min_replicas` to start that many replicas at once when the trainer for a training client boots (they come up while it loads the model, not while it waits for GPUs) and keep them until the config's training models are reclaimed; rollouts then never wait for a cold pool. The periodic cleaner restores `inference_min_replicas` afterwards.
 
 Modal and backend libraries validate their own options. Spindle checks integration requirements such as trainer slot capacity, supported training modes, and parallelism agreeing with allocated GPUs. It supplies managed model paths, context length and adapter settings; conflicting backend overrides are rejected.
 

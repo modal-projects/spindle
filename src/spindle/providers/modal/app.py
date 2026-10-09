@@ -32,7 +32,7 @@ from .deployment_configs import (
     configs_from_env,
     platform_from_env,
 )
-from .engines import ModalEnginePlatform
+from .engines import EngineInstanceRecord, ModalEnginePlatform
 from .fft_pool import (
     FFTPoolSpec,
     deploy_pool,
@@ -87,6 +87,7 @@ SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
 FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
 FFT_POOL_TOUCH_INTERVAL = 60.0
 LORA_POOL_CHECK_INTERVAL = 60.0
+TRAINER_BOOT_POLL_SECONDS = 10.0
 SWEEP_PERIOD = modal.Period(seconds=SETTINGS.recipe.sweep_interval_s)
 CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
@@ -224,23 +225,52 @@ async def ensure_fft_pool(spec: dict) -> str:
 
 
 @app.function(image=image, max_containers=1, timeout=20 * 60, retries=2)
-async def ensure_lora_pool(spec: dict, training: bool = False) -> str:
+async def ensure_lora_pool(spec: dict) -> str:
     pool = LoraPoolSpec.from_dict(spec)
     gateway = await asyncio.to_thread(deploy_lora_pool, pool)
-    registry = shared_kv()
-    await registry.put(
+    await shared_kv().put(
         f"lora_pool:{pool.app_name}",
         {**pool.as_dict(), "touched_at": time.time()},
     )
-    if training:
-        try:
-            await _hold_training_minimum(registry, pool)
-        except Exception:
-            # Sampling still works from demand alone; the cleaner retries the hold.
-            logging.getLogger(__name__).exception(
-                "Failed to warm LoRA pool %s", pool.app_name
-            )
     return gateway
+
+
+@app.function(image=image, timeout=6 * 60 * 60)
+async def warm_lora_pool_for_training(spec: dict) -> bool:
+    """Hold the pool's training minimum once a trainer for its config has booted.
+
+    Replicas then start while the trainer loads the model instead of idling while it
+    waits for GPUs. Gives up when no training model of the config remains.
+    """
+    pool = LoraPoolSpec.from_dict(spec)
+    registry = shared_kv()
+    while pool.app_name in await _training_lora_pools(registry):
+        if await _trainer_booted(registry, pool.definition_id):
+            await ensure_lora_pool.remote.aio(pool.as_dict())
+            await _hold_training_minimum(registry, pool)
+            return True
+        await asyncio.sleep(TRAINER_BOOT_POLL_SECONDS)
+    return False
+
+
+async def _training_lora_pools(registry) -> set[str]:
+    return {
+        LoraPoolSpec(model.engine_definition_id).app_name
+        for _, value in await registry.list_items("model:")
+        for model in (ModelRecord.model_validate(value),)
+        if parameterization_for(model.engine_definition_id) == "lora"
+    }
+
+
+async def _trainer_booted(registry, definition_id: str) -> bool:
+    """Whether a trainer container for the config is up, not just queued for GPUs."""
+    return any(
+        record.definition_id == definition_id
+        and record.boot_id
+        and record.state in {"starting", "running"}
+        for _, value in await registry.list_items("engine_instance:")
+        for record in (EngineInstanceRecord.model_validate(value),)
+    )
 
 
 def _minimum_key(spec: LoraPoolSpec) -> str:
@@ -511,9 +541,11 @@ def _plane():
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         else:
-            await ensure_lora_pool.spawn.aio(
-                LoraPoolSpec(model.engine_definition_id).as_dict(), True
-            )
+            spec = LoraPoolSpec(model.engine_definition_id).as_dict()
+            await ensure_lora_pool.spawn.aio(spec)
+            idle, training = _replica_minimums(model.engine_definition_id)
+            if training > idle:
+                await warm_lora_pool_for_training.spawn.aio(spec)
 
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
@@ -662,19 +694,17 @@ async def _cleanup_fft_pools() -> tuple[str, ...]:
 
 async def _cleanup_lora_pools() -> tuple[str, ...]:
     registry = shared_kv()
-    active = {
-        LoraPoolSpec(model.engine_definition_id).app_name
-        for _, value in await registry.list_items("model:")
-        for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "lora"
-    }
+    active = await _training_lora_pools(registry)
     stopped = []
     for key, value in await registry.list_items("lora_pool:"):
         try:
             spec = LoraPoolSpec.from_dict(value)
             if spec.app_name in active:
                 # Reapplied every sweep: a redeployment resets the override.
-                await _hold_training_minimum(registry, spec)
+                if await _trainer_booted(registry, spec.definition_id):
+                    await _hold_training_minimum(registry, spec)
+                else:
+                    await _release_training_minimum(registry, spec)
                 continue
             if float(value.get("touched_at", 0.0)) > (
                 time.time() - LORA_POOL_IDLE_TIMEOUT
