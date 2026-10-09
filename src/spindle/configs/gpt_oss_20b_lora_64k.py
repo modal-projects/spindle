@@ -50,12 +50,16 @@ class Config(BaseConfig):
     # Start the whole pool while the trainer loads and hold it through training
     # steps, so no update's rollouts wait for replicas to cold-start.
     inference_training_min_replicas = 8
+    # Agentic RL keeps hundreds of turns in flight (64 groups x 8 rollouts here). A
+    # TP4 H200 replica has KV room for far more than 32 of them, and requests over the
+    # running + queued limit are rejected with 503 and retried after a backoff.
+    inference_target_concurrency = 64
     sglang_cfg = {
         "tp_size": 4,
         "dtype": "bfloat16",
         "mem_fraction_static": 0.7,
-        "max_running_requests": 32,
-        "max_queued_requests": 8,
+        "max_running_requests": 128,
+        "max_queued_requests": 128,
         "max_loaded_loras": 64,
         "max_loras_per_batch": 8,
         "schedule_policy": "lpm",
