@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -374,7 +375,9 @@ def test_checkpoint_capture_persist_and_restore(tmp_path, monkeypatch) -> None:
     runtime = FakeMilesRuntime()
     backend = _backend(tmp_path, runtime)
     monkeypatch.setenv("SPINDLE_DEFINITION_ID", "qwen3_4b_miles_lora_2k")
-    backend.accept_model("model-a", _spec())
+    backend.accept_model(
+        "model-a", replace(_spec(), user_metadata={"renderer_name": "qwen3"})
+    )
     backend.jobs["model-a"].optimizer_step = 3
 
     backend.capture_checkpoint(
@@ -389,6 +392,7 @@ def test_checkpoint_capture_persist_and_restore(tmp_path, monkeypatch) -> None:
 
     assert metadata["miles_revision"] == runtime.revision
     assert metadata["backend"] == "miles"
+    assert metadata["user_metadata"] == {"renderer_name": "qwen3"}
     assert json.loads((Path(uri) / "miles" / "metadata.json").read_text()) == {
         "sharded_backend": "torch_dist"
     }
