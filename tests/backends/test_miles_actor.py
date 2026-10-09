@@ -407,3 +407,22 @@ def test_sync_checkpoint_volume_fails_on_every_rank(monkeypatch) -> None:
     errors = [future.exception() for future in futures]
     assert all(isinstance(error, RuntimeError) for error in errors)
     assert all("volume commit failed" in str(error) for error in errors)
+
+
+def test_sampler_export_does_not_commit_the_checkpoint_volume(monkeypatch) -> None:
+    """Sampler exports go to local scratch; volume writes commit on their own."""
+    actor = _load_actor(monkeypatch)
+    calls = []
+    parent = sys.modules["miles.backends.megatron_utils.lora.actor"]
+    monkeypatch.setattr(
+        parent.MultiLoRATrainRayActor,
+        "export_slot",
+        lambda self, **kwargs: calls.append(("export", kwargs["path"])),
+        raising=False,
+    )
+    monkeypatch.setattr(actor, "_sync_checkpoint_volume", calls.append)
+
+    trainer = actor.SpindleMilesTrainRayActor.__new__(actor.SpindleMilesTrainRayActor)
+    trainer.export_slot(slot=0, rank=32, alpha=32.0, path="/tmp/captures/sampler/a")
+
+    assert calls == [("export", "/tmp/captures/sampler/a")]

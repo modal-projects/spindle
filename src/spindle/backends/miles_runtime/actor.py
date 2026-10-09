@@ -467,11 +467,6 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         _sync_checkpoint_volume("commit")
         return result
 
-    def export_slot(self, *args, **kwargs):
-        result = super().export_slot(*args, **kwargs)
-        _sync_checkpoint_volume("commit")
-        return result
-
     def _profiled(self, operation: str, *args, **kwargs):
         with torch.profiler.record_function(f"spindle/{operation}"):
             result = getattr(super(), operation)(*args, **kwargs)
