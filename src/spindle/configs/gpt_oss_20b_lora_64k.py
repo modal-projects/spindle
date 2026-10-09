@@ -10,10 +10,17 @@ class Config(BaseConfig):
     trainer_gpu = "H200"
     trainer_gpus_per_node = 8
     trainer_max_clients_per_instance = 8
+    # The bf16 model fits on one 141 GB GPU, so each GPU holds a full replica (TP1/EP1, 8-way
+    # data parallel) and skips tensor- and expert-parallel communication. At TP1 a single
+    # sequence can be up to about 52k tokens on a 141 GB GPU; the vocabulary-sized logits of
+    # longer sequences need tensor parallelism, which shards them. TP1 does not fit on 80 GB
+    # GPUs such as H100; there, use tensor_model_parallel_size=4,
+    # expert_model_parallel_size=8 and selective recompute (recompute_granularity="selective",
+    # recompute_modules=["core_attn", "moe_act", "layernorm"]).
     miles_cfg = {
         "model_type": "gpt-oss-20b",
-        "tensor_model_parallel_size": 8,
-        "expert_model_parallel_size": 8,
+        "tensor_model_parallel_size": 1,
+        "expert_model_parallel_size": 1,
         "expert_tensor_parallel_size": 1,
         "target_modules": [
             "q_proj",
@@ -24,7 +31,7 @@ class Config(BaseConfig):
             "down_proj",
             "lm_head",
         ],
-        "max_tokens_per_gpu": 65536,
+        "max_tokens_per_gpu": 32768,
         "max_lora_slots": 8,
         "max_lora_rank": 32,
         "default_lora_alpha": 32,
@@ -33,6 +40,8 @@ class Config(BaseConfig):
             "qkv_format": "thd",
             "attention_backend": "fused",
             "moe_permute_fusion": False,
+            # Bounds the fp32 [tokens, vocab] logits buffer of the log-prob pass at TP1.
+            "log_probs_chunk_size": 4096,
             "recompute_granularity": "full",
             "recompute_method": "uniform",
             "recompute_num_layers": 1,
