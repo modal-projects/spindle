@@ -169,6 +169,81 @@ def test_multiturn_affinity_tracks_prefix_cache_hit_rate() -> None:
     assert sum(cache_hits) / sum(prompt_lengths) > 0.7
 
 
+# A chat-shaped transcript: messages end with END, assistant turns open with HEADER.
+END, START, ASSISTANT, TOOL = 200007, 200006, 173781, 99
+HEADER = [END, START, ASSISTANT]
+
+
+def conversation(question: list[int], replies: list[list[int]]) -> list[list[int]]:
+    """Prompts of each turn: system + question, then reply and tool result per turn."""
+    prompt = [7] * 20 + question + HEADER
+    prompts = [list(prompt)]
+    for reply in replies:
+        prompt += [*reply, END, START, TOOL, 42, *HEADER]
+        prompts.append(list(prompt))
+    return prompts
+
+
+def route_sessions(prompts: list[list[int]], sampling_session_id: str = "sample-a"):
+    sessions = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sessions.append(request.headers["Modal-Session-ID"])
+        return response(7)
+
+    for turn, prompt in enumerate(prompts):
+        request = task()
+        request["request_id"] = f"turn-{turn}"
+        request["sampling_session_id"] = sampling_session_id
+        request["payload"]["prompt"]["chunks"][0]["tokens"] = prompt
+        asyncio.run(
+            sample_task(
+                request, "http://rollout", transport=httpx.MockTransport(handle)
+            )
+        )
+    return sessions
+
+
+def test_conversation_turns_share_a_route_without_affinity_key() -> None:
+    first = route_sessions(conversation([1, 2], [[30, 31], [32], [33, 34]]))
+    # The same question with a different first reply is a different conversation.
+    second = route_sessions(conversation([1, 2], [[40], [32], [33, 34]]))
+
+    assert first[0] == second[0] == "turn-0"
+    assert len(set(first[1:])) == 1 and first[1].startswith("conversation-")
+    assert len(set(second[1:])) == 1 and second[1] != first[1]
+
+
+def test_conversation_route_is_namespaced_by_sampling_session() -> None:
+    prompts = conversation([1, 2], [[30], [31]])
+    assert (
+        route_sessions(prompts, "sample-a")[1:]
+        != route_sessions(prompts, "sample-b")[1:]
+    )
+
+
+def test_single_turn_prompts_keep_request_routing() -> None:
+    prompts = [[7] * 20 + [n] + HEADER for n in range(3)] + [[1, 2, 3]]
+    assert route_sessions(prompts) == ["turn-0", "turn-1", "turn-2", "turn-3"]
+
+
+def test_explicit_affinity_key_overrides_conversation_route() -> None:
+    prompt = conversation([1, 2], [[30]])[1]
+    sessions = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sessions.append(request.headers["Modal-Session-ID"])
+        return response(7)
+
+    request = task()
+    request["payload"]["cache_affinity_key"] = "trajectory-a"
+    request["payload"]["prompt"]["chunks"][0]["tokens"] = prompt
+    asyncio.run(
+        sample_task(request, "http://rollout", transport=httpx.MockTransport(handle))
+    )
+    assert sessions[0].startswith("affinity-")
+
+
 def test_affinity_route_is_namespaced_by_sampling_session_and_key() -> None:
     sessions = []
 
