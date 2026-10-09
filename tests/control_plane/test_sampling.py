@@ -9,6 +9,7 @@ from spindle.control_plane.keys import (
     sampling_session_creation_key,
     sampling_session_key,
     session_key,
+    session_last_seen_key,
 )
 from spindle.errors import RecordNotFound, RecordUnavailable, SequenceConflict
 from spindle.providers import SamplingTask
@@ -239,5 +240,43 @@ def test_sample_future_pends_and_lost_tasks_are_retryable() -> None:
         await tasks.forget(task_id)
         resolution = await plane.retrieve(request_id)
         assert resolution.status == FutureResolutionStatus.RETRYABLE
+
+    asyncio.run(run())
+
+
+class CountingStore(InMemoryKeyValueStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[str] = []
+
+    async def get(self, key: str):
+        self.reads.append(key)
+        return await super().get(key)
+
+
+def test_submit_sample_checks_the_session_once_and_records_the_touch() -> None:
+    async def run() -> None:
+        kv = CountingStore()
+        plane = ControlPlane(
+            kv,
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+            sampling_tasks=LocalSamplingTaskPlatform(TinkerStubSampler()),
+            sampling_task_stores=InMemorySessionKeyValueStores(),
+        )
+        session = await plane.create_session()
+        sampling = await plane.create_sampling_session(
+            session_id=session.session_id,
+            sampling_session_seq_id=0,
+            base_model=BASE_MODEL,
+            engine_definition_id=DEFINITION,
+        )
+        kv.reads.clear()
+        await plane.submit_sample(sample_request(sampling.sampling_session_id))
+        assert kv.reads.count(session_key(session.session_id)) == 1
+        assert await kv.get(session_last_seen_key(session.session_id)) is not None
+
+        await plane.close_session(session.session_id, "done")
+        with pytest.raises(RecordUnavailable):
+            await plane.submit_sample(sample_request(sampling.sampling_session_id, 1))
 
     asyncio.run(run())
