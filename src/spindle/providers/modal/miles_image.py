@@ -1,4 +1,8 @@
-import shlex
+import json
+import re
+import subprocess
+from importlib.metadata import distribution
+from pathlib import Path
 
 import modal
 
@@ -21,30 +25,28 @@ BASE_IMAGE = (
 MILES_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
 MILES_PATH = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"
-RELEASE_CHECK = "; ".join(
-    [
-        "import json, re, subprocess",
-        "from importlib.metadata import distribution",
-        (
-            "head = lambda path: subprocess.check_output("
-            "['git', '-C', path, 'rev-parse', 'HEAD'], text=True).strip()"
-        ),
-        f"assert head('{MILES_PATH}') == '{MILES_COMMIT}', 'Miles is not at MILES_COMMIT'",
-        f"lock = json.load(open('{MILES_PATH}/release-lock.json'))",
-        (
-            f"assert head('{MEGATRON_PATH}') == lock['megatron_commit'], "
-            "'Megatron-LM differs from release-lock.json'"
-        ),
-        f"dockerfile = open('{MILES_PATH}/docker/Dockerfile').read()",
-        "bridge = re.search(r'Megatron-Bridge[.]git@([0-9a-f]{40})', dockerfile)[1]",
-        "url = json.loads(distribution('megatron-bridge').read_text('direct_url.json'))",
-        (
-            "assert url['vcs_info']['commit_id'] == bridge, "
-            "'Megatron-Bridge differs from the Miles Dockerfile'"
-        ),
-        "print('megatron-lm', lock['megatron_commit'], 'megatron-bridge', bridge)",
-    ]
-)
+
+
+def _head(path: str) -> str:
+    return subprocess.check_output(
+        ["git", "-C", path, "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def _check_release(miles_commit: str) -> None:
+    lock = json.loads(Path(MILES_PATH, "release-lock.json").read_text())
+    dockerfile = Path(MILES_PATH, "docker", "Dockerfile").read_text()
+    bridge = re.search(r"Megatron-Bridge[.]git@([0-9a-f]{40})", dockerfile)[1]
+    installed = json.loads(distribution("megatron-bridge").read_text("direct_url.json"))
+    assert _head(MILES_PATH) == miles_commit, "Miles is not at MILES_COMMIT"
+    assert _head(MEGATRON_PATH) == lock["megatron_commit"], (
+        "Megatron-LM differs from release-lock.json"
+    )
+    assert installed["vcs_info"]["commit_id"] == bridge, (
+        "Megatron-Bridge differs from the Miles Dockerfile"
+    )
+    print("megatron-lm", lock["megatron_commit"], "megatron-bridge", bridge)
+
 
 image = (
     modal.Image.from_registry(BASE_IMAGE)
@@ -56,7 +58,6 @@ image = (
             "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }
     )
-    .run_commands(f"python -c {shlex.quote(RELEASE_CHECK)}")
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE)
     .pip_install(
         *MEGATRON_RUNTIME_PACKAGES,
@@ -67,6 +68,7 @@ image = (
         "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
         "opentelemetry-exporter-otlp-proto-http==1.43.0",
     )
+    .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
     .run_commands(
         "pip install --no-deps 'peft>=0.18.1'",
         MEGATRON_RUNTIME_CHECK,
