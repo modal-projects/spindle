@@ -24,7 +24,7 @@ from spindle.errors import (
     SequenceConflict,
 )
 from spindle.proto import tinker_public_pb2
-from spindle.proto.responses import encode_result
+from spindle.proto.responses import PROTOBUF_MEDIA_TYPE, EncodedResult, encode_result
 from spindle.providers.contracts import Parameterization
 from spindle.request_timing import enabled as request_timing_enabled
 from spindle.request_timing import mark
@@ -593,12 +593,19 @@ def create_control_plane_app(
         )
         response = None
         if resolution.status == FutureResolutionStatus.COMPLETE:
-            if "application/x-protobuf" in request.headers.get("accept", ""):
-                encoded = encode_result(resolution.result)
+            result = resolution.result
+            accepts_protobuf = PROTOBUF_MEDIA_TYPE in request.headers.get("accept", "")
+            if isinstance(result, EncodedResult):
+                if accepts_protobuf:
+                    response = Response(result.body, media_type=PROTOBUF_MEDIA_TYPE)
+                else:
+                    result = await asyncio.to_thread(result.to_json)
+            elif accepts_protobuf:
+                encoded = encode_result(result)
                 if encoded is not None:
-                    response = Response(encoded, media_type="application/x-protobuf")
+                    response = Response(encoded, media_type=PROTOBUF_MEDIA_TYPE)
             if response is None:
-                response = JSONResponse(resolution.result)
+                response = JSONResponse(result)
         if sampled:
             fields: dict[str, object] = {"status": resolution.status.value}
             if (

@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from spindle.errors import BackendFailed
@@ -24,7 +24,14 @@ from .operations import (
     parse_operation_payload,
     serialize_operation_payload,
 )
-from .training_transport import TRAINING_BATCH_CONTENT_TYPE, decode_batch, encode_batch
+from .training_transport import (
+    FORWARD_RESULTS_CONTENT_TYPE,
+    TRAINING_BATCH_CONTENT_TYPE,
+    decode_batch,
+    decode_results,
+    encode_batch,
+    encode_results,
+)
 
 
 class ModelBody(BaseModel):
@@ -59,7 +66,12 @@ def create_backend_app(executor: Executor) -> FastAPI:
         with telemetry.recording(request.headers.get("x-spindle-telemetry") == "1"):
             return await call_next(request)
 
-    async def run(action: Awaitable[object], path: str | None = None) -> JSONResponse:
+    async def run(
+        action: Awaitable[object],
+        path: str | None = None,
+        *,
+        binary_results: bool = False,
+    ) -> Response:
         def respond(content, status=200):
             measurements = telemetry.active.get()
             if measurements is not None:
@@ -75,8 +87,27 @@ def create_backend_app(executor: Executor) -> FastAPI:
                 )
             return response
 
+        async def respond_binary(results):
+            measurements = telemetry.active.get()
+            encode_started = time.perf_counter()
+            body = await asyncio.to_thread(
+                encode_results,
+                tuple(results),
+                None if measurements is None else measurements.as_dict(),
+            )
+            mark(
+                "backend.request.responded",
+                path=path,
+                status=200,
+                encode_s=time.perf_counter() - encode_started,
+            )
+            return Response(body, media_type=FORWARD_RESULTS_CONTENT_TYPE)
+
         try:
-            return respond({"result": await action})
+            result = await action
+            if binary_results:
+                return await respond_binary(result)
+            return respond({"result": result})
         except BackendFailed as exc:
             response = respond({"error": str(exc)}, status=503)
             response.headers["x-spindle-backend-failed"] = "1"
@@ -107,7 +138,7 @@ def create_backend_app(executor: Executor) -> FastAPI:
         )
 
     @app.post("/execute_forward_backward_batch")
-    async def execute_forward_backward_batch(request: Request) -> JSONResponse:
+    async def execute_forward_backward_batch(request: Request) -> Response:
         body = await request.body()
         if request.headers.get("content-type") == TRAINING_BATCH_CONTENT_TYPE:
             commands = await asyncio.to_thread(decode_batch, body)
@@ -125,6 +156,8 @@ def create_backend_app(executor: Executor) -> FastAPI:
         return await run(
             executor.execute_forward_backward_batch(commands),
             path="/execute_forward_backward_batch",
+            binary_results=FORWARD_RESULTS_CONTENT_TYPE
+            in request.headers.get("accept", ""),
         )
 
     @app.post("/capture_snapshot")
@@ -216,6 +249,7 @@ class HttpBackendClient:
             "/execute_forward_backward_batch",
             encoded,
             content_type=TRAINING_BATCH_CONTENT_TYPE,
+            accept=FORWARD_RESULTS_CONTENT_TYPE,
         )
         return tuple(result)
 
@@ -258,7 +292,12 @@ class HttpBackendClient:
         await self._post("/close", {})
 
     async def _post(
-        self, path: str, body: dict | bytes, *, content_type: str = "application/json"
+        self,
+        path: str,
+        body: dict | bytes,
+        *,
+        content_type: str = "application/json",
+        accept: str | None = None,
     ) -> object:
         if self._transport_failed:
             raise RuntimeError("backend transport failed; checkpoint recovery required")
@@ -273,6 +312,8 @@ class HttpBackendClient:
             encode_s=time.perf_counter() - encode_started,
         )
         headers = {"content-type": content_type}
+        if accept is not None:
+            headers["accept"] = accept
         if enabled:
             headers["x-spindle-telemetry"] = "1"
         http_started = time.perf_counter()
@@ -302,6 +343,18 @@ class HttpBackendClient:
         if response.headers.get("x-spindle-backend-failed") == "1":
             self._fence_transport_failure()
         decode_started = time.perf_counter()
+        if response.is_success and response.headers.get("content-type") == (
+            FORWARD_RESULTS_CONTENT_TYPE
+        ):
+            result, evidence = await asyncio.to_thread(decode_results, response.content)
+            if enabled and isinstance(evidence, dict):
+                telemetry.received.set(evidence)
+            mark(
+                "engine.backend_post.decoded",
+                path=path,
+                decode_s=time.perf_counter() - decode_started,
+            )
+            return result
         try:
             body = await asyncio.to_thread(response.json)
         except ValueError:
