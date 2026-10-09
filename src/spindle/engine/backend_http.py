@@ -293,13 +293,6 @@ class HttpBackendClient:
                 f"backend {path} transport failed ({type(exc).__name__}); "
                 "execution outcome unknown; checkpoint recovery required"
             ) from exc
-        if enabled:
-            try:
-                evidence = response.json().get("telemetry")
-                if isinstance(evidence, dict):
-                    telemetry.received.set(evidence)
-            except (ValueError, AttributeError):
-                pass
         mark(
             "engine.backend_post.responded",
             path=path,
@@ -308,14 +301,25 @@ class HttpBackendClient:
         )
         if response.headers.get("x-spindle-backend-failed") == "1":
             self._fence_transport_failure()
-        if not response.is_success:
-            try:
-                message = response.json()["error"]
-            except (ValueError, KeyError):
-                message = response.text
-            raise RuntimeError(message)
         decode_started = time.perf_counter()
-        result = response.json()["result"]
+        try:
+            body = await asyncio.to_thread(response.json)
+        except ValueError:
+            if response.is_success:
+                raise
+            raise RuntimeError(response.text) from None
+        if enabled and isinstance(body, dict):
+            evidence = body.get("telemetry")
+            if isinstance(evidence, dict):
+                telemetry.received.set(evidence)
+        if not response.is_success:
+            message = (
+                body.get("error", response.text)
+                if isinstance(body, dict)
+                else response.text
+            )
+            raise RuntimeError(message)
+        result = body["result"]
         mark(
             "engine.backend_post.decoded",
             path=path,

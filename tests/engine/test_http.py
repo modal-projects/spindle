@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+import fastapi.encoders
 import httpx
 import pytest
 from tinker import types
@@ -14,6 +15,7 @@ from spindle.engine import (
     HttpEngineClient,
     create_engine_app,
 )
+from spindle.engine.api import FutureState
 from spindle.errors import RecordNotFound, SequenceConflict
 from tests.support import EchoExecutor
 
@@ -174,5 +176,43 @@ def test_bad_token_is_rejected() -> None:
         with pytest.raises(httpx.HTTPStatusError):
             await client.accept_model("model-a", {})
         await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("status", list(FutureStatus))
+def test_future_response_preserves_json_values_without_fastapi_conversion(
+    monkeypatch, status
+):
+    result = {
+        "logprobs": [-0.0, -0.12345678901234567] * 1000,
+        "ids": [-(2**63), 2**63 - 1],
+        "metadata": {"name": "数学", "optional": None, "ok": True},
+    }
+
+    class Server:
+        async def retrieve_future(self, request_id, timeout):
+            return FutureState(status, result=result, error="example error")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("result should not pass through jsonable_encoder")
+
+    monkeypatch.setattr(fastapi.encoders, "jsonable_encoder", unexpected)
+
+    async def run():
+        async with httpx.AsyncClient(
+            base_url="http://engine",
+            transport=httpx.ASGITransport(app=create_engine_app(Server())),
+        ) as client:
+            response = await client.post(
+                "/api/v1/retrieve_future", json={"request_id": "a:1"}
+            )
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "application/json"
+            assert response.json() == {
+                "status": status.value,
+                "result": result,
+                "error": "example error",
+            }
 
     asyncio.run(run())

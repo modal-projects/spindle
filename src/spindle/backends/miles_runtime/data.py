@@ -230,7 +230,7 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
 
 
 def _tensor_values(tensor) -> list[Any]:
-    values = list(tensor.data)
+    values = tensor.data
     crow = tensor.sparse_crow_indices
     if crow is None:
         return values

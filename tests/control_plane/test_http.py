@@ -4,8 +4,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import zstandard
+from tinker.proto.response_conv import deserialize_forward_backward_output
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.control_plane import http as control_http
+from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
 from spindle.proto import tinker_public_pb2
 from spindle.providers.local import (
     InMemoryKeyValueStore,
@@ -542,5 +545,119 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
             )
             assert record.base_model == BASE_MODEL
             assert record.engine_definition_id == "isolated"
+
+    asyncio.run(run())
+
+
+def test_result_timing_counts_actual_response_bytes(monkeypatch):
+    result = {"logprobs": [-0.125] * 1000, "name": "数学", "id": 2**63 - 1}
+    marks = []
+
+    class Plane:
+        async def retrieve(self, request_id, timeout):
+            return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
+
+    monkeypatch.setattr(control_http, "request_timing_enabled", lambda: True)
+    monkeypatch.setattr(
+        control_http, "mark", lambda name, **fields: marks.append((name, fields))
+    )
+
+    async def run():
+        async with httpx.AsyncClient(
+            base_url="http://frontend",
+            transport=httpx.ASGITransport(
+                app=create_control_plane_app(Plane(), DEFINITIONS)
+            ),
+        ) as client:
+            response = await client.post(
+                "/api/v1/retrieve_future", json={"request_id": "a:1"}
+            )
+            assert response.status_code == 200
+            assert response.json() == result
+            end = next(fields for name, fields in marks if name == "cp.retrieve.end")
+            assert end["bytes"] == len(response.content)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("accept_protobuf", [False, True])
+@pytest.mark.parametrize("forward_result", [False, True])
+def test_result_negotiation_constructs_one_response_before_timing(
+    monkeypatch, accept_protobuf, forward_result
+):
+    result = (
+        {
+            "loss_fn_output_type": "ArrayRecord",
+            "loss_fn_outputs": [
+                {"logprobs": {"data": [-0.125, -0.5], "dtype": "float32", "shape": [2]}}
+            ],
+            "metrics": {"loss:sum": 0.625},
+        }
+        if forward_result
+        else {"path": "tinker://model/weights/数学"}
+    )
+    rendered = []
+    marks = []
+
+    class Plane:
+        async def retrieve(self, request_id, timeout):
+            return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
+
+    class JsonResponse(control_http.JSONResponse):
+        def render(self, content):
+            body = super().render(content)
+            rendered.append(body)
+            return body
+
+    class ProtoResponse(control_http.Response):
+        def render(self, content):
+            body = super().render(content)
+            rendered.append(body)
+            return body
+
+    def mark(name, **fields):
+        if name == "cp.retrieve.end":
+            assert len(rendered) == 1
+            marks.append(fields)
+
+    monkeypatch.setattr(control_http, "JSONResponse", JsonResponse)
+    monkeypatch.setattr(control_http, "Response", ProtoResponse)
+    monkeypatch.setattr(control_http, "request_timing_enabled", lambda: True)
+    monkeypatch.setattr(control_http, "mark", mark)
+
+    async def run():
+        async with httpx.AsyncClient(
+            base_url="http://frontend",
+            transport=httpx.ASGITransport(
+                app=create_control_plane_app(Plane(), DEFINITIONS)
+            ),
+        ) as client:
+            response = await client.post(
+                "/api/v1/retrieve_future",
+                json={"request_id": "a:1"},
+                headers={
+                    "Accept": "application/x-protobuf"
+                    if accept_protobuf
+                    else "application/json"
+                },
+            )
+            assert response.status_code == 200
+            if accept_protobuf and forward_result:
+                assert response.headers["content-type"] == "application/x-protobuf"
+                decoded = deserialize_forward_backward_output(response.content)
+                assert decoded.metrics == result["metrics"]
+                assert decoded.loss_fn_output_type == result["loss_fn_output_type"]
+                assert decoded.loss_fn_outputs[0]["logprobs"].data == [-0.125, -0.5]
+            else:
+                assert response.headers["content-type"] == "application/json"
+                assert response.json() == result
+            assert rendered == [response.content]
+            assert marks == [
+                {
+                    "request_id": "a:1",
+                    "status": "complete",
+                    "bytes": len(response.content),
+                }
+            ]
 
     asyncio.run(run())

@@ -137,18 +137,22 @@ def create_engine_app(server: EngineApi, *, token: str | None = None) -> FastAPI
         return {"request_id": request_id}
 
     @app.post("/api/v1/retrieve_future")
-    async def retrieve_future(body: RetrieveFutureBody) -> dict[str, object]:
+    async def retrieve_future(body: RetrieveFutureBody) -> JSONResponse:
         state = await server.retrieve_future(body.request_id, body.timeout)
         if state is None:
             raise HTTPException(
                 status_code=404,
                 detail={"error": "unknown_future"},
             )
-        return {
-            "status": state.status.value,
-            "result": state.result,
-            "error": state.error,
-        }
+        # Results already contain JSON values. Returning a Response avoids
+        # FastAPI walking and copying every per-token result before encoding.
+        return JSONResponse(
+            {
+                "status": state.status.value,
+                "result": state.result,
+                "error": state.error,
+            }
+        )
 
     @app.post("/api/v1/unload_model")
     async def unload_model(body: UnloadModelBody) -> dict[str, bool]:
