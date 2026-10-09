@@ -620,7 +620,9 @@ def _plane():
     volumes={CHECKPOINT_ROOT: checkpoint_volume},
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],
 )
-@modal.concurrent(max_inputs=128)
+# Each sampling client holds a long-poll per in-flight request, so busy RL clients
+# keep hundreds of inputs open; scale out well before a container's ceiling.
+@modal.concurrent(max_inputs=128, target_inputs=16)
 @modal.asgi_app(requires_proxy_auth=False)
 def server():
     return create_control_plane_app(
