@@ -102,10 +102,16 @@ def test_dense_forward_matches_upstream(token_splits, alphas):
     expected = _upstream_dense(layer, x)
     assert torch.equal(out, expected)
 
-    grads = torch.autograd.grad(out.square().sum(), _weights(layer))
-    expected_grads = torch.autograd.grad(expected.square().sum(), _weights(layer))
+    weights = _weights(layer)
+    grads = torch.autograd.grad(out.square().sum(), weights, allow_unused=True)
+    expected_grads = torch.autograd.grad(expected.square().sum(), weights)
+    single_adapter = sum(1 for count in token_splits if count) == 1
     for grad, expected_grad in zip(grads, expected_grads, strict=True):
-        assert torch.equal(grad, expected_grad)
+        # With one adapter the idle slots leave the graph instead of getting zeros.
+        if grad is None:
+            assert single_adapter and not expected_grad.any()
+        else:
+            assert torch.equal(grad, expected_grad)
 
 
 def _dispatch(token_splits, topk=2, seed=3):
@@ -160,11 +166,15 @@ def test_expert_routing_matches_upstream(token_splits):
         dispatcher, tokens_per_expert, reference.tokens_per_adapter
     )
 
-    single_adapter = sum(1 for count in token_splits if count) == 1
-    assert (routing.sort_idx is None) == single_adapter
-    if single_adapter:
+    active = [slot for slot, count in enumerate(token_splits) if count]
+    assert (routing.sort_idx is None) == (len(active) == 1)
+    if len(active) == 1:
+        slot = active[0]
+        assert routing.single_slot == slot
         assert torch.equal(sort_idx, torch.arange(sort_idx.numel()))
+        offsets = offsets[slot * EXPERTS : (slot + 1) * EXPERTS]
     else:
+        assert routing.single_slot is None
         assert torch.equal(routing.sort_idx, sort_idx)
         assert torch.equal(
             routing.inverse_idx[sort_idx], torch.arange(sort_idx.numel())
