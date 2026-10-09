@@ -22,13 +22,17 @@ constants reach the GPU:
   ``set_tokens_per_adapter_slot`` already caches for every micro-batch;
 * the per-token ``alpha / rank`` scaling is skipped when it is exactly 1.0 for
   every adapter present (the default, ``lora_alpha == rank``);
-* when a micro-batch holds a single adapter and experts are not split across
-  ranks, the expert layers skip the per-adapter sort and unsort: the
-  dispatcher's expert-major row order is already sorted by adapter;
+* when a micro-batch holds a single adapter, only that adapter's weights enter
+  the computation. Idle slots get no all-zero gradient to accumulate (Miles
+  reduces multi-LoRA gradients synchronously after the backward pass, so a slot
+  without a gradient in a micro-batch needs none), and when experts are not
+  split across ranks the expert layers also skip the per-adapter sort and
+  unsort: the dispatcher's expert-major row order is already sorted by adapter;
 * host values reach the GPU through pinned, asynchronous copies, and the GeGLU
   offset tensor is created once per value, dtype and device.
 
-Outputs and gradients match the upstream functions bit for bit. Each patch is
+Outputs and the gradients accumulated into Megatron's gradient buffers match the
+upstream functions bit for bit. Each patch is
 installed only when the upstream code is the version it mirrors: Megatron-Bridge
 at ``BRIDGE_COMMIT`` and a GeGLU function whose source hashes to
 ``GEGLU_SOURCE_SHA256``. Set ``SPINDLE_HOST_SYNC_PATCHES=0`` to keep the
@@ -39,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import itertools
 import json
 import os
 from functools import wraps
@@ -209,17 +214,26 @@ def _dense_forward(layers):
             else tokens_per_adapter.cumsum(dim=0, dtype=torch.int32)
         )
 
-        def project(inputs, stacked):
-            if single is not None:
-                # The GEMM upstream's per-slot path runs on this slot's span, which is all
-                # of `inputs`. Indexing the stack keeps every slot in the autograd graph.
-                return F.linear(inputs, stacked[single])
-            return layers._dense_multi_lora_mm(
-                inputs, stacked, token_splits=token_splits, offsets=offsets
-            )
+        if single is not None and not self._external_output_reduce:
+            # The GEMM upstream's per-slot path runs on this slot's span, which is
+            # all of the input; the other slots' weights stay out of the graph.
+            stacked_A = self.adapters[single].linear_in.weight
+            stacked_B = self.adapters[single].linear_out.weight
 
-        stacked_A = torch.stack([a.linear_in.weight for a in self.adapters])
-        stacked_B = torch.stack([a.linear_out.weight for a in self.adapters])
+            def project(inputs, weight):
+                return F.linear(inputs, weight)
+
+        else:
+            stacked_A = torch.stack([a.linear_in.weight for a in self.adapters])
+            stacked_B = torch.stack([a.linear_out.weight for a in self.adapters])
+
+            def project(inputs, stacked):
+                if single is not None:
+                    return F.linear(inputs, stacked[single])
+                return layers._dense_multi_lora_mm(
+                    inputs, stacked, token_splits=token_splits, offsets=offsets
+                )
+
         mid = project(x_flat, stacked_A)
 
         if self._external_output_reduce:
@@ -287,11 +301,16 @@ def _expert_forward():
                 f"slot routing was built for {routing.num_tokens}."
             )
 
-        stacked_A = torch.stack([a.linear_in.weight for a in self.adapters])
-        stacked_B = torch.stack([a.linear_out.weight for a in self.adapters])
-        num_groups = stacked_A.shape[0] * stacked_A.shape[1]
-        grouped_A = stacked_A.reshape(num_groups, *stacked_A.shape[2:])
-        grouped_B = stacked_B.reshape(num_groups, *stacked_B.shape[2:])
+        if routing.single_slot is not None:
+            # One group per local expert of the only slot with tokens.
+            grouped_A = self.adapters[routing.single_slot].linear_in.weight
+            grouped_B = self.adapters[routing.single_slot].linear_out.weight
+        else:
+            stacked_A = torch.stack([a.linear_in.weight for a in self.adapters])
+            stacked_B = torch.stack([a.linear_out.weight for a in self.adapters])
+            num_groups = stacked_A.shape[0] * stacked_A.shape[1]
+            grouped_A = stacked_A.reshape(num_groups, *stacked_A.shape[2:])
+            grouped_B = stacked_B.reshape(num_groups, *stacked_B.shape[2:])
 
         identity = routing.sort_idx is None
         x_sorted = x_flat if identity else x_flat.index_select(0, routing.sort_idx)
@@ -355,6 +374,8 @@ class Routing:
 
     ``sort_idx is None`` means the rows are already in (slot, expert) order.
     ``active_slots`` is None when rows may come from other ranks' micro-batches.
+    With ``single_slot`` set, every row belongs to that slot and ``group_offsets``
+    has one entry per local expert instead of one per (slot, expert).
     """
 
     __slots__ = (
@@ -364,6 +385,7 @@ class Routing:
         "slot_token_counts",
         "num_tokens",
         "active_slots",
+        "single_slot",
     )
 
     def __init__(
@@ -375,7 +397,9 @@ class Routing:
         slot_token_counts,
         num_tokens,
         active_slots,
+        single_slot=None,
     ):
+        self.single_slot = single_slot
         self.sort_idx = sort_idx
         self.inverse_idx = inverse_idx
         self.group_offsets = group_offsets
@@ -406,10 +430,7 @@ def build_routing(layers, dispatcher, tokens_per_expert, reference, device) -> R
     if active is not None and len(active) == 1 and per_expert_host is not None:
         slot = active[0]
         num_tokens = sum(per_expert_host)
-        offsets = [0] * (slot * num_local_experts)
-        for count in per_expert_host:
-            offsets.append((offsets[-1] if offsets else 0) + count)
-        offsets += [num_tokens] * ((n_adapters - slot - 1) * num_local_experts)
+        offsets = list(itertools.accumulate(per_expert_host))
         slot_counts = [0] * n_adapters
         slot_counts[slot] = num_tokens
         return Routing(
@@ -419,6 +440,7 @@ def build_routing(layers, dispatcher, tokens_per_expert, reference, device) -> R
             slot_token_counts=_to_device(slot_counts, torch.long, device),
             num_tokens=num_tokens,
             active_slots=active,
+            single_slot=slot,
         )
 
     total = sum(token_splits)
