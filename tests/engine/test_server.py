@@ -608,6 +608,44 @@ def test_builder_interleaves_models() -> None:
     asyncio.run(run())
 
 
+def test_ready_optimizer_is_not_starved_by_another_models_backlog() -> None:
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        class Executor(EchoExecutor):
+            async def execute(self, model_id, kind, payload):
+                calls.append((model_id, kind))
+                if len(calls) == 1:
+                    started.set()
+                    await release.wait()
+                return await super().execute(model_id, kind, payload)
+
+        server = Engine(Executor())
+        await server.accept_model("model-a", {})
+        await server.accept_model("model-b", {})
+        await forward_backward(server, 1, model_id="model-a")
+        await started.wait()
+        # A continually ready, earlier-registered client must not take every turn.
+        await forward_backward(server, 2, model_id="model-a")
+        await forward_backward(server, 3, model_id="model-a")
+        update = await server.optim_step(
+            {"model_id": "model-b", "seq_id": 1, "adam_params": {}}
+        )
+        release.set()
+        assert (
+            await server.retrieve_future(update, timeout=1)
+        ).status == FutureStatus.COMPLETE
+        await server.retrieve_future("model-a:3", timeout=1)
+        await server.close()
+        assert calls[:2] == [
+            ("model-a", OperationKind.FORWARD_BACKWARD),
+            ("model-b", OperationKind.OPTIM_STEP),
+        ]
+
+    asyncio.run(run())
+
+
 def test_batches_compatible_forward_backward_across_models() -> None:
     async def run() -> None:
         started, release = asyncio.Event(), asyncio.Event()
@@ -643,7 +681,7 @@ def test_batches_compatible_forward_backward_across_models() -> None:
             state = await server.retrieve_future(request_id, timeout=1.0)
             assert state.status == FutureStatus.COMPLETE
         assert [[item.model_id for item in batch] for batch in executor.batches] == [
-            ["model-a", "model-b"]
+            ["model-b", "model-a"]
         ]
         await server.close()
 
@@ -690,7 +728,7 @@ def test_batches_consecutive_forward_backward_for_one_model() -> None:
             assert state.status == FutureStatus.COMPLETE
         assert batches == [
             [("model-a", 1)],
-            [("model-a", 2), ("model-b", 1), ("model-a", 3), ("model-b", 2)],
+            [("model-b", 1), ("model-a", 2), ("model-b", 2), ("model-a", 3)],
             [("model-a", 5)],
         ]
         await server.close()
@@ -732,7 +770,7 @@ def test_forward_backward_batch_limit_splits_coalesced_work() -> None:
             state = await server.retrieve_future(request_id, timeout=1.0)
             assert state.status == FutureStatus.COMPLETE
         assert [len(batch) for batch in batches] == [1, 2, 1]
-        assert batches[1] == [("model-a", 2), ("model-b", 1)]
+        assert batches[1] == [("model-b", 1), ("model-a", 2)]
         await server.close()
 
     asyncio.run(run())

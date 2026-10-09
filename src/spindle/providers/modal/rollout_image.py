@@ -216,6 +216,199 @@ SGLANG_LORA_LIFETIME_PATCH = (
     '         """\n'
 )
 
+SGLANG_UNGATED_EXPERT_PATCH = (
+    "--- a/python/sglang/srt/lora/lora.py\n"
+    "+++ b/python/sglang/srt/lora/lora.py\n"
+    "@@ -463,7 +463,11 @@\n"
+    "         self, weight_names: List[str], weights: Dict[str, torch.Tensor]\n"
+    "     ):\n"
+    "         for weight_name in weight_names:\n"
+    '-            if "gate_proj" in weight_name:\n'
+    '+            if ".up_proj." in weight_name and self._is_non_gated_moe_weight(weight_name):\n'
+    "+                # Ungated routed experts have only one input projection.\n"
+    '+                merged_name = weight_name.replace(".up_proj.", ".gate_up_proj.")\n'
+    "+                weights[merged_name] = weights.pop(weight_name)\n"
+    '+            elif "gate_proj" in weight_name:\n'
+    '                 up_name = weight_name.replace("gate_proj", "up_proj")\n'
+    '                 gate_up_name = weight_name.replace("gate_proj", "gate_up_proj")\n'
+    "                 # PEFT can ship up_proj in two forms when there's no real\n"
+    "--- a/python/sglang/srt/lora/lora_manager.py\n"
+    "+++ b/python/sglang/srt/lora/lora_manager.py\n"
+    "@@ -723,6 +723,13 @@\n"
+    "                 # Otherwise, infer target_modules from adapter configs.\n"
+    "                 self.target_modules.update(adapter_target_modules)\n"
+    " \n"
+    "+        # Ungated dense/shared experts retain an actual up_proj module, while\n"
+    "+        # routed experts use the fused gate_up_proj buffer. Preserve both targets.\n"
+    '+        if "gate_up_proj" in self.target_modules and any(\n'
+    '+            name.endswith(".up_proj") for name, _ in self.base_model.named_modules()\n'
+    "+        ):\n"
+    '+            self.target_modules.add("up_proj")\n'
+    "+\n"
+    "         # Fusion folds wk + weights_proj into wk_weights_proj, so the modules\n"
+    "         # LoRA wraps are absent and an indexer-targeted adapter is silently dropped.\n"
+    "         indexer_targets = self.target_modules & DSA_INDEXER_LORA_NAMES\n"
+)
+
+# Normalize the target list only for embedding tensors that require filtering.
+# Repeating it for every expert tensor makes large MoE adapter loads quadratic.
+SGLANG_TARGET_FILTER_PATCH = (
+    "--- a/python/sglang/srt/lora/lora.py\n"
+    "+++ b/python/sglang/srt/lora/lora.py\n"
+    "@@ -164,10 +164,6 @@\n"
+    "     def _process_weight(self, name: str, loaded_weight: torch.Tensor):\n"
+    "         from sglang.srt.lora.utils import get_normalized_target_modules\n"
+    " \n"
+    "-        normalized_target_modules = get_normalized_target_modules(\n"
+    "-            self.config.target_modules\n"
+    "-        )\n"
+    "-\n"
+    '         # Remap PEFT "unembed_tokens" key to "lm_head" so the weight is\n'
+    "         # recognized and loaded into the correct buffer.\n"
+    '         if "unembed_tokens" in name:\n'
+    "@@ -177,6 +173,9 @@\n"
+    "         if layer_id is not None:\n"
+    "             self.layers[layer_id].weights[name] = loaded_weight.cpu()\n"
+    '         elif "embed_tokens" in name or "lm_head" in name:\n'
+    "+            normalized_target_modules = get_normalized_target_modules(\n"
+    "+                self.config.target_modules\n"
+    "+            )\n"
+    "             # Check if this module is declared in target_modules before loading.\n"
+    '             # When normalized_target_modules is {"all"} (e.g. target_modules was\n'
+    '             # "all-linear"), we allow loading since the server-level\n'
+)
+
+# Marlin must receive the EP map initialized by the token dispatcher.
+SGLANG_MARLIN_EP_PATCH = (
+    "--- a/python/sglang/srt/lora/layers.py\n"
+    "+++ b/python/sglang/srt/lora/layers.py\n"
+    "@@ -1166,6 +1166,12 @@\n"
+    " \n"
+    "         # Use pre-computed quant info (doesn't change so not sure why we need to pass it in every time)\n"
+    "         quant_info = self._quant_info\n"
+    "+        if self._lora_runner_backend.is_marlin():\n"
+    "+            # The dispatcher initializes the EP map lazily on its first dispatch.\n"
+    "+            quant_info.expert_map = base_layer.dispatcher.local_expert_mapping\n"
+    "+            quant_info.global_num_experts = (\n"
+    "+                base_layer.num_experts if quant_info.expert_map is not None else -1\n"
+    "+            )\n"
+    " \n"
+    "         # ===== TO BE REFACTORED ====\n"
+    "         if self._lora_runner_backend.is_experimental_sgl_trtllm():\n"
+)
+
+# EP sampler ranks need only their local per-expert CPU adapter tensors.
+SGLANG_CPU_EXPERT_RETENTION_PATCH = (
+    "--- a/python/sglang/srt/lora/mem_pool.py\n"
+    "+++ b/python/sglang/srt/lora/mem_pool.py\n"
+    "@@ -334,6 +334,23 @@\n"
+    "             return global_eid\n"
+    "         local = global_eid - self.moe_ep_rank * self._num_experts_local\n"
+    "         return local if 0 <= local < self._num_experts_local else None\n"
+    "+\n"
+    "+    def retain_local_expert_weights(self, adapter: LoRAAdapter) -> None:\n"
+    '+        """Keep only this rank\'s per-expert CPU weights after normalization."""\n'
+    "+        if not self.moe_use_local_expert_ids or self.experts_shared_outer_loras:\n"
+    "+            return\n"
+    "+        for layer in adapter.layers:\n"
+    "+            for name in list(layer.weights):\n"
+    '+                expert = re.search(r"\\.experts\\.(\\d+)\\.", name)\n'
+    "+                if expert and self._global_to_local_expert_id(int(expert.group(1))) is None:\n"
+    "+                    del layer.weights[name]\n"
+    "+                else:\n"
+    "+                    # Eager safetensors can expose slices of a whole-file buffer.\n"
+    "+                    # A retained local tensor must not keep that global buffer alive.\n"
+    "+                    layer.weights[name] = layer.weights[name].clone()\n"
+    "+        for weights in (adapter.embedding_layers, adapter.added_tokens_embeddings):\n"
+    "+            for name in weights:\n"
+    "+                weights[name] = weights[name].clone()\n"
+    " \n"
+    "     def _iter_local_expert_weights(\n"
+    "         self,\n"
+    "--- a/python/sglang/srt/lora/lora_manager.py\n"
+    "+++ b/python/sglang/srt/lora/lora_manager.py\n"
+    "@@ -784,6 +784,8 @@\n"
+    "             base_model=self.base_model,\n"
+    "         )\n"
+    "         lora_adapter.initialize_weights()\n"
+    '+        if hasattr(self, "memory_pool"):\n'
+    "+            self.memory_pool.retain_local_expert_weights(lora_adapter)\n"
+    " \n"
+    "         self.loras[lora_ref.lora_id] = lora_adapter\n"
+    " \n"
+    "@@ -802,6 +804,8 @@\n"
+    "             base_model=self.base_model,\n"
+    "         )\n"
+    "         lora_adapter.initialize_weights_from_tensors(tensors)\n"
+    '+        if hasattr(self, "memory_pool"):\n'
+    "+            self.memory_pool.retain_local_expert_weights(lora_adapter)\n"
+    "         self.loras[lora_ref.lora_id] = lora_adapter\n"
+    " \n"
+    "     def load_lora_adapter_from_tensors(\n"
+    "@@ -874,6 +878,9 @@\n"
+    "             strict_loading=self.lora_strict_loading,\n"
+    "             enable_lora_overlap_loading=self.enable_lora_overlap_loading,\n"
+    "         )\n"
+    "+\n"
+    "+        for adapter in self.loras.values():\n"
+    "+            self.memory_pool.retain_local_expert_weights(adapter)\n"
+    " \n"
+    "         # Initializing memory pool with base model\n"
+    "         self.fetch_new_loras({None})\n"
+)
+
+# FP8 expert weights/scales must match gated versus ungated projections.
+SGLANG_UNGATED_FP8_PATCH = (
+    "--- a/python/sglang/srt/layers/quantization/fp8.py\n"
+    "+++ b/python/sglang/srt/layers/quantization/fp8.py\n"
+    "@@ -1155,7 +1155,7 @@\n"
+    "         w13_up_dim, w2_up_dim, weight_padded = get_moe_weight_sizes(\n"
+    "             intermediate_size_per_partition,\n"
+    "             is_aiter_moe=_use_aiter,\n"
+    "-            is_concat=True,\n"
+    "+            is_concat=layer.moe_runner_config.is_gated,\n"
+    "             is_packed=False,\n"
+    "         )\n"
+    " \n"
+    "@@ -1306,7 +1306,8 @@\n"
+    "             w13_weight_scale = torch.nn.Parameter(\n"
+    "                 scale_init(\n"
+    "                     num_experts,\n"
+    "-                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),\n"
+    "+                    (2 if layer.moe_runner_config.is_gated else 1)\n"
+    "+                    * ((intermediate_size_per_partition + block_n - 1) // block_n),\n"
+    "                     (hidden_size + block_k - 1) // block_k,\n"
+    "                     dtype=scale_dtype,\n"
+    "                 ),\n"
+    "@@ -1330,10 +1331,15 @@\n"
+    '             assert quant_config.activation_scheme == "dynamic"\n'
+    " \n"
+    "         else:\n"
+    "-            # Allocate 2 scales for w1 and w3 respectively.\n"
+    "+            # Allocate one scale per projection (gate/up or ungated up).\n"
+    "             # They will be combined to a single scale after weight loading.\n"
+    "             w13_weight_scale = torch.nn.Parameter(\n"
+    "-                torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False\n"
+    "+                torch.ones(\n"
+    "+                    num_experts,\n"
+    "+                    2 if layer.moe_runner_config.is_gated else 1,\n"
+    "+                    dtype=torch.float32,\n"
+    "+                ),\n"
+    "+                requires_grad=False,\n"
+    "             )\n"
+    "             w2_weight_scale = torch.nn.Parameter(\n"
+    "                 torch.ones(num_experts, dtype=torch.float32), requires_grad=False\n"
+    "@@ -2155,7 +2161,7 @@\n"
+    "             max_w13_scales = layer.w13_weight_scale.max(dim=1).values\n"
+    "             for expert_id in range(layer.num_local_experts):\n"
+    "                 start = 0\n"
+    "-                for shard_id in range(2):\n"
+    "+                for shard_id in range(layer.w13_weight_scale.shape[1]):\n"
+    "                     dq_weight = per_tensor_dequantize(\n"
+    "                         layer.w13_weight[expert_id][start : start + shard_size, :],\n"
+    "                         layer.w13_weight_scale[expert_id][shard_id],\n"
+)
+
 image = (
     modal.Image.from_registry(SGLANG_IMAGE)
     .entrypoint([])
@@ -230,6 +423,21 @@ image = (
         + "PATCH\n",
         "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
         + SGLANG_LORA_LIFETIME_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SGLANG_UNGATED_EXPERT_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SGLANG_TARGET_FILTER_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SGLANG_MARLIN_EP_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SGLANG_CPU_EXPERT_RETENTION_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SGLANG_UNGATED_FP8_PATCH
         + "PATCH\n",
         "rm -rf /sgl-workspace/sglang/python/sglang"
         " && cp -a /tmp/stitch-sglang-overlay/python/. /sgl-workspace/sglang/python/"

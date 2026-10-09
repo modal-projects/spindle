@@ -69,7 +69,6 @@ SGLANG_MANAGED = {
     "encoder_only",
     "use_ray",
     "disaggregation_mode",
-    "skip_tokenizer_init",
 }
 
 
