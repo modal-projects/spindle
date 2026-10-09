@@ -296,7 +296,7 @@ def test_builtin_config_keeps_the_model_path():
 def test_deploy_reads_platform_overrides_from_config_file(tmp_path, deployed):
     path = tmp_path / "model.py"
     path.write_text(
-        "from spindle.configs.gpt_oss_20b_lora_64k import Config as Parent\n"
+        "from spindle.configs.gpt_oss_20b_lora_32k import Config as Parent\n"
         "class Config(Parent):\n"
         "    overrides = {\n"
         '        "platform.frontend": "research",\n'
