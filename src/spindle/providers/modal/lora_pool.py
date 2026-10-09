@@ -85,6 +85,11 @@ def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
     return pool.gateway_url()
 
 
+def set_pool_minimum(spec: LoraPoolSpec, minimum: int) -> None:
+    """Override the pool's minimum replica count until its next deployment."""
+    ModalFlashPool(spec.app_name, "Server").scale(min=minimum)
+
+
 def stop_pool(spec: LoraPoolSpec) -> None:
     modal_cli = shutil.which("modal")
     if modal_cli is None:

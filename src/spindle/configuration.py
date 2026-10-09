@@ -52,6 +52,9 @@ class BaseConfig:
     inference_cpu = 8
     inference_memory_mib = 32768
     inference_min_replicas = 0
+    # LoRA pools: replicas held while a training model of this config is active, so
+    # rollouts never wait for a cold pool between training steps. 0 disables it.
+    inference_training_min_replicas = 0
     inference_max_replicas = 8
     inference_target_concurrency = 16
     inference_scaledown_window_s = 300

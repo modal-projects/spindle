@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import json
 import subprocess
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -916,3 +917,112 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+def test_prepare_model_warms_lora_pool_for_training(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    spawned = []
+
+    async def prepare(definition_id: str) -> None:
+        return None
+
+    async def spawn(*args) -> None:
+        spawned.append(args)
+
+    monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "ensure_lora_pool",
+        SimpleNamespace(spawn=SimpleNamespace(aio=spawn)),
+    )
+    model = SimpleNamespace(
+        engine_definition_id=LORA_DEFINITION, model_id="session:train:0", spec={}
+    )
+
+    asyncio.run(modal_app._plane().prepare_model(model))
+    assert spawned == [(LoraPoolSpec(LORA_DEFINITION).as_dict(), True)]
+
+
+@pytest.mark.parametrize(("training_minimum", "held"), [(6, [6]), (0, [])])
+def test_training_lora_pool_holds_its_minimum(
+    monkeypatch, training_minimum, held
+) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spec = LoraPoolSpec(LORA_DEFINITION)
+    minimums = []
+    recipe = modal_app.module_for(LORA_DEFINITION).recipe
+    monkeypatch.setattr(recipe, "inference_training_min_replicas", training_minimum)
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "deploy_lora_pool", lambda pool: "https://gateway")
+    monkeypatch.setattr(
+        modal_app,
+        "set_lora_pool_minimum",
+        lambda pool, minimum: minimums.append(minimum),
+    )
+
+    asyncio.run(modal_app.ensure_lora_pool.local(spec.as_dict(), True))
+    asyncio.run(modal_app.ensure_lora_pool.local(spec.as_dict()))
+
+    assert minimums == held
+    record = asyncio.run(registry.get(f"lora_pool_minimum:{spec.app_name}"))
+    assert record == ({"minimum": held[0]} if held else None)
+
+
+def test_cleanup_holds_and_releases_training_minimum(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spec = LoraPoolSpec(LORA_DEFINITION)
+    minimums = []
+    stopped = []
+    recipe = modal_app.module_for(LORA_DEFINITION).recipe
+    monkeypatch.setattr(recipe, "inference_training_min_replicas", 6)
+    monkeypatch.setattr(recipe, "inference_min_replicas", 1)
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(
+        modal_app,
+        "set_lora_pool_minimum",
+        lambda pool, minimum: minimums.append(minimum),
+    )
+    monkeypatch.setattr(
+        modal_app, "stop_lora_pool", lambda pool: stopped.append(pool.app_name)
+    )
+    model = ModelRecord(
+        model_id="model-a",
+        session_id="session",
+        model_seq_id=0,
+        engine_definition_id=LORA_DEFINITION,
+        spec={},
+        created_at=1.0,
+    )
+    pool_key = f"lora_pool:{spec.app_name}"
+    minimum_key = f"lora_pool_minimum:{spec.app_name}"
+
+    async def run() -> None:
+        await registry.put(model_key(model.model_id), model.model_dump(mode="json"))
+        await registry.put(pool_key, {**spec.as_dict(), "touched_at": time.time()})
+        # While a training model is active, every sweep reapplies the minimum.
+        assert await modal_app._cleanup_lora_pools() == ()
+        assert minimums == [6]
+        assert await registry.get(minimum_key) == {"minimum": 6}
+        # Training ended but the pool still serves: back to the configured minimum.
+        await registry.delete(model_key(model.model_id))
+        assert await modal_app._cleanup_lora_pools() == ()
+        assert minimums == [6, 1]
+        assert await registry.get(minimum_key) is None
+        assert await modal_app._cleanup_lora_pools() == ()
+        assert minimums == [6, 1]
+        # An idle pool is stopped and leaves no override behind.
+        await registry.put(minimum_key, {"minimum": 6})
+        await registry.put(pool_key, {**spec.as_dict(), "touched_at": 0.0})
+        assert await modal_app._cleanup_lora_pools() == (spec.app_name,)
+        assert await registry.get(minimum_key) is None
+
+    asyncio.run(run())
+    assert stopped == [spec.app_name]

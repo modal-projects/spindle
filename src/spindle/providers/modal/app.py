@@ -62,6 +62,9 @@ from .lora_pool import (
     pool_gateway as lora_pool_gateway,
 )
 from .lora_pool import (
+    set_pool_minimum as set_lora_pool_minimum,
+)
+from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
@@ -221,14 +224,54 @@ async def ensure_fft_pool(spec: dict) -> str:
 
 
 @app.function(image=image, max_containers=1, timeout=20 * 60, retries=2)
-async def ensure_lora_pool(spec: dict) -> str:
+async def ensure_lora_pool(spec: dict, training: bool = False) -> str:
     pool = LoraPoolSpec.from_dict(spec)
     gateway = await asyncio.to_thread(deploy_lora_pool, pool)
-    await shared_kv().put(
+    registry = shared_kv()
+    await registry.put(
         f"lora_pool:{pool.app_name}",
         {**pool.as_dict(), "touched_at": time.time()},
     )
+    if training:
+        try:
+            await _hold_training_minimum(registry, pool)
+        except Exception:
+            # Sampling still works from demand alone; the cleaner retries the hold.
+            logging.getLogger(__name__).exception(
+                "Failed to warm LoRA pool %s", pool.app_name
+            )
     return gateway
+
+
+def _minimum_key(spec: LoraPoolSpec) -> str:
+    return f"lora_pool_minimum:{spec.app_name}"
+
+
+def _replica_minimums(definition_id: str) -> tuple[int, int]:
+    """(minimum without training, minimum while a training model is active)."""
+    try:
+        recipe = module_for(definition_id).recipe
+    except KeyError:
+        return 0, 0
+    idle = recipe.inference_min_replicas
+    return idle, max(idle, recipe.inference_training_min_replicas)
+
+
+async def _hold_training_minimum(registry, spec: LoraPoolSpec) -> None:
+    """Start every configured replica at once and keep them through training steps."""
+    idle, training = _replica_minimums(spec.definition_id)
+    if training <= idle:
+        return
+    await asyncio.to_thread(set_lora_pool_minimum, spec, training)
+    await registry.put(_minimum_key(spec), {"minimum": training})
+
+
+async def _release_training_minimum(registry, spec: LoraPoolSpec) -> None:
+    if await registry.get(_minimum_key(spec)) is None:
+        return
+    idle, _ = _replica_minimums(spec.definition_id)
+    await asyncio.to_thread(set_lora_pool_minimum, spec, idle)
+    await registry.delete(_minimum_key(spec))
 
 
 async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
@@ -469,7 +512,7 @@ def _plane():
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         else:
             await ensure_lora_pool.spawn.aio(
-                LoraPoolSpec(model.engine_definition_id).as_dict()
+                LoraPoolSpec(model.engine_definition_id).as_dict(), True
             )
 
     async def ensure_pool(session) -> None:
@@ -630,13 +673,17 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
         try:
             spec = LoraPoolSpec.from_dict(value)
             if spec.app_name in active:
+                # Reapplied every sweep: a redeployment resets the override.
+                await _hold_training_minimum(registry, spec)
                 continue
             if float(value.get("touched_at", 0.0)) > (
                 time.time() - LORA_POOL_IDLE_TIMEOUT
             ):
+                await _release_training_minimum(registry, spec)
                 continue
             await asyncio.to_thread(stop_lora_pool, spec)
             await registry.delete(key)
+            await registry.delete(_minimum_key(spec))
             stopped.append(spec.app_name)
         except Exception:
             # One failed stop must not starve cleanup of other shared pools.
