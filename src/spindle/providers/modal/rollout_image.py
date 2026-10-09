@@ -10,7 +10,7 @@ from .image_dependencies import (
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
 SGLANG_BRANCH = "stitch-sglang-v0.5.21"
-SGLANG_REVISION = "ffbaf2cf907e050015242a60a2eb2955b3dfe46f"
+SGLANG_REVISION = "1d420cc80ae48717e553bac60f56330628a8c075"
 
 # Reference-lifetime fix for the pinned SGLang revision. git apply fails the build
 # if an upstream update changes this context; keep until the fix is upstream.
