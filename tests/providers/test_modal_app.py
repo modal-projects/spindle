@@ -1,9 +1,11 @@
 import asyncio
 import importlib
 import json
+import os
 import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -168,7 +170,7 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
         await plane.prepare_model(model(FULL_DEFINITION, {}))
 
     asyncio.run(run())
-    assert prepared == [FULL_DEFINITION, FULL_DEFINITION]
+    assert prepared == [FULL_DEFINITION]
     assert spawned == [
         FFTPoolSpec(
             FULL_DEFINITION,
@@ -182,27 +184,126 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
     ]
 
 
-def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
+def test_prepare_model_assets_validates_snapshot_before_commit(
+    tmp_path, monkeypatch
+) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
+    root = tmp_path / "assets"
+    checkpoint = root / "org" / "model"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "config.json").write_text("{}")
     events = []
 
     def download(*, repo_id: str, local_dir: str) -> None:
         events.append(("download", repo_id, local_dir))
+        os.makedirs(local_dir, exist_ok=True)
 
+    monkeypatch.setattr(modal_app, "MODEL_ASSET_ROOT", str(root))
+    monkeypatch.setattr(
+        modal_app,
+        "module_for",
+        lambda _definition_id: SimpleNamespace(
+            model="org/model", asset_path=str(checkpoint)
+        ),
+    )
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
+    ready = checkpoint / ".spindle-assets-ready"
     monkeypatch.setattr(
         modal_app,
         "model_assets",
-        SimpleNamespace(commit=lambda: events.append(("commit",))),
+        SimpleNamespace(commit=lambda: events.append(("commit", ready.is_file()))),
     )
 
     modal_app.prepare_model_assets.local(FULL_DEFINITION)
+    modal_app.prepare_model_assets.local(FULL_DEFINITION)
 
-    definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
-        ("download", definition.model, definition.asset_path),
-        ("commit",),
+        ("download", "org/model", str(checkpoint)),
+        ("commit", True),
     ]
+    assert ready.read_text(encoding="utf-8") == "ready\n"
+
+
+@pytest.mark.parametrize("failure", ["download", "commit"])
+def test_prepare_model_assets_retries_after_failure(tmp_path, monkeypatch, failure):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    checkpoint = tmp_path / "org" / "model"
+    checkpoint.mkdir(parents=True)
+    download = Mock()
+    commit = Mock()
+    failed_operation = download if failure == "download" else commit
+    failed_operation.side_effect = [OSError("interrupted"), None]
+    monkeypatch.setattr(modal_app, "MODEL_ASSET_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        modal_app,
+        "module_for",
+        lambda _: SimpleNamespace(model="org/model", asset_path=str(checkpoint)),
+    )
+    monkeypatch.setattr(modal_app, "snapshot_download", download)
+    monkeypatch.setattr(modal_app, "model_assets", SimpleNamespace(commit=commit))
+
+    with pytest.raises(OSError, match="interrupted"):
+        modal_app.prepare_model_assets.local(FULL_DEFINITION)
+    ready = checkpoint / ".spindle-assets-ready"
+    assert not ready.exists()
+    if failure == "download":
+        commit.assert_not_called()
+
+    modal_app.prepare_model_assets.local(FULL_DEFINITION)
+    assert download.call_count == 2
+    assert ready.read_text(encoding="utf-8") == "ready\n"
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_prepare_model_shares_base_assets_across_definitions(monkeypatch, fail_first):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    monkeypatch.setattr(
+        modal_app.module_for(FULL_DEFINITION).recipe,
+        "model",
+        modal_app.module_for(LORA_DEFINITION).model,
+    )
+    prepared = []
+
+    async def prepare(definition_id):
+        prepared.append(definition_id)
+        await asyncio.sleep(0)
+        if fail_first and len(prepared) == 1:
+            raise OSError("interrupted")
+
+    async def spawn(spec):
+        return None
+
+    monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    for pool in ("ensure_fft_pool", "ensure_lora_pool"):
+        monkeypatch.setattr(
+            modal_app, pool, SimpleNamespace(spawn=SimpleNamespace(aio=spawn))
+        )
+    models = [
+        SimpleNamespace(engine_definition_id=definition, model_id="trained", spec={})
+        for definition in (FULL_DEFINITION, LORA_DEFINITION)
+    ]
+
+    async def run():
+        plane = modal_app._plane()
+        results = await asyncio.gather(
+            *(plane.prepare_model(model) for model in models), return_exceptions=True
+        )
+        if fail_first:
+            assert isinstance(results[0], OSError)
+            assert results[1] is None
+        else:
+            assert results == [None, None]
+        for model in models:
+            await plane.prepare_model(model)
+
+    asyncio.run(run())
+    assert len(prepared) == (2 if fail_first else 1)
 
 
 def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) -> None:
@@ -210,6 +311,10 @@ def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) ->
     kv = InMemoryKeyValueStore()
     registry = InMemoryKeyValueStore()
     deployed = []
+    prepared = []
+
+    async def prepare(definition_id: str) -> None:
+        prepared.append(definition_id)
 
     async def ensure(spec: dict) -> str:
         deployed.append(spec)
@@ -219,6 +324,11 @@ def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) ->
     monkeypatch.setattr(modal_app, "shared_kv", lambda: kv)
     monkeypatch.setattr(modal_app, "fft_pool_kv", lambda: registry)
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
     monkeypatch.setattr(
         modal_app,
         "ensure_fft_pool",
@@ -250,6 +360,7 @@ def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) ->
         await plane.ensure_sampling_pool(session(False, 3))
 
     asyncio.run(run())
+    assert prepared == [FULL_DEFINITION]
     assert deployed == [
         FFTPoolSpec(
             FULL_DEFINITION, model_id, True, 0, min_containers=2, max_containers=8
@@ -811,10 +922,15 @@ def test_lora_readiness_does_not_cache_errors_or_deploy_on_network_failure(monke
 def test_sampling_session_readiness_reuses_cached_pool(monkeypatch):
     modal_app = importlib.import_module("spindle.providers.modal.app")
     lookups = []
+    prepared = []
 
     async def lookup(spec):
         lookups.append(spec)
         return "https://gateway"
+
+    async def prepare(definition_id: str) -> None:
+        prepared.append(definition_id)
+        await asyncio.sleep(0)
 
     async def deploy(record):
         pytest.fail("Warm session creation should not use serialized deployment")
@@ -825,19 +941,33 @@ def test_sampling_session_readiness_reuses_cached_pool(monkeypatch):
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
     monkeypatch.setattr(
         modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    monkeypatch.setattr(
+        modal_app,
         "ensure_lora_pool",
         SimpleNamespace(remote=SimpleNamespace(aio=deploy)),
     )
-    session = SimpleNamespace(
+    trained = SimpleNamespace(
         engine_definition_id=LORA_DEFINITION, model_id="existing-model"
     )
+    base = SimpleNamespace(engine_definition_id=LORA_DEFINITION, model_id=None)
 
     async def run():
         plane = modal_app._plane()
-        await asyncio.gather(*(plane.ensure_sampling_pool(session) for _ in range(6)))
+        await asyncio.gather(
+            *(
+                plane.ensure_sampling_pool(session)
+                for session in (trained, base)
+                for _ in range(6)
+            )
+        )
+        await plane.ensure_sampling_pool(base)
         await modal_app._ready_lora_pool(LoraPoolSpec(LORA_DEFINITION))
 
     asyncio.run(run())
+    assert prepared == [LORA_DEFINITION]
     assert lookups == [LoraPoolSpec(LORA_DEFINITION)]
 
 
