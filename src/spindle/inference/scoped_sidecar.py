@@ -56,8 +56,6 @@ async def retire_replica():
 
 class AssignedGate(AdmissionGate):
     def _rejection(self, constraint):
-        # Called under Stitch's admission/commit lock. Middleware checks alone
-        # would race a run switch between checking identity and admission.
         expected = _expected_run.get()
         served = self._served_version()
         if expected is not None and (served is None or served.run_id != expected):

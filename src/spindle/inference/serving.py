@@ -98,7 +98,6 @@ def start_sglang(
     if trust_remote_code:
         command.append("--trust-remote-code")
     if weight_update_staging is not None:
-        # Staged updates count versions from the boot checkpoint at v0.
         command.extend(
             ["--weight-update-staging", weight_update_staging, "--weight-version", "0"]
         )
