@@ -689,7 +689,6 @@ class ControlPlane:
         sampling_session_id = str(request["sampling_session_id"])
         seq_id = int(request["seq_id"])
         session = await self.get_sampling_session(sampling_session_id)
-        await self._touch_session(session.session_id)
         mark = fingerprint("sample", request)
         request_id = request_id_for(sampling_session_id, seq_id)
         key = sample_task_key(sampling_session_id, seq_id)
@@ -701,16 +700,19 @@ class ControlPlane:
             fingerprint=mark,
             created_at=self.clock(),
         )
-        inserted = await task_store.put_if_absent(
-            key,
-            candidate.model_dump(mode="json"),
+        # get_sampling_session just checked the session, so record the touch
+        # alongside the task instead of re-reading the session for each step.
+        inserted, _ = await asyncio.gather(
+            task_store.put_if_absent(key, candidate.model_dump(mode="json")),
+            self._share_session_touch(session.session_id),
         )
         stored = SampleTaskRecord.model_validate(inserted.value)
         if stored.fingerprint != mark:
             raise SequenceConflict(sampling_session_id, seq_id)
         if stored.task_id is not None:
             return request_id
-        await self._ensure_sampling_pool(session)
+        if self.ensure_sampling_pool is not None:
+            await self.ensure_sampling_pool(session)
         task_id = await self.sampling_tasks.submit(
             SamplingTask(
                 request_id=request_id,
@@ -1534,8 +1536,11 @@ class ControlPlane:
 
     async def _touch_session(self, session_id: str) -> SessionLastSeenRecord:
         await self._open_session(session_id)
+        return await self._share_session_touch(session_id)
+
+    async def _share_session_touch(self, session_id: str) -> SessionLastSeenRecord:
         # Only share a write that is still in flight; each caller checks the
-        # session above. No TTL or stale authorization result is cached.
+        # session first. No TTL or stale authorization result is cached.
         pending = self._session_touches.get(session_id)
         if pending is None or pending.done():
             pending = asyncio.create_task(self._write_session_touch(session_id))
