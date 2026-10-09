@@ -104,6 +104,8 @@ def _load_actor(monkeypatch):
     _module(monkeypatch, "torch.distributed")
     megatron_bridge = _module(monkeypatch, "megatron.bridge")
     megatron_bridge.AutoBridge = type("AutoBridge", (), {})
+    _module(monkeypatch, "megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model")
+    _module(monkeypatch, "miles_plugins.models.qwen3_vl")
     _module(monkeypatch, "megatron.core").dist_checkpointing = types.ModuleType(
         "megatron.core.dist_checkpointing"
     )
@@ -174,6 +176,9 @@ def _load_actor(monkeypatch):
     _module(
         monkeypatch, "spindle.backends.miles_runtime.replay"
     ).install_replay_hooks = lambda **kwargs: None
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.qwen3_vl_cp"
+    ).install_qwen3_vl_cp_position_ids = lambda **kwargs: None
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(
