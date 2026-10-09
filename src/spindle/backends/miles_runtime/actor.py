@@ -30,7 +30,7 @@ from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
-from . import expert_lora_compat
+from . import expert_lora_compat, host_syncs
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
@@ -189,6 +189,9 @@ install_replay_hooks(
 install_qwen3_vl_cp_position_ids(
     bridge_model=qwen3_vl_model, miles_qwen3_vl=miles_qwen3_vl
 )
+
+# Before any model is built: the MoE slot-routing hooks are created at build time.
+host_syncs.install()
 
 
 def _checkpoint_volume_path(path: Path) -> str | None:
