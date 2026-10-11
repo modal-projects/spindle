@@ -14,8 +14,9 @@ The router uses rendezvous hashing of the model ID to establish a stable orderin
 of replicas. Successive versions of an adapter therefore prefer the same homes.
 Within a set of warm replicas, request/conversation affinity breaks ties.
 
-For each replica, estimated load is the larger of its reported active requests
-and this worker's local reservations. A replica is eligible when its load is
+For each replica, estimated load adds new local reservations to reported active
+requests, subtracting reservations already present at observation time to avoid
+counting them twice. It is at least the local outstanding count. A replica is eligible when its load is
 below `1.25 * minimum_pool_load + max(1, target_concurrency / replica_count)`.
 This lets a hot adapter spread across the pool and lets small workloads use idle
 GPUs. Among eligible replicas the router prefers the exact adapter version already
@@ -59,7 +60,7 @@ or evictions.
 The workload and tools live in `scripts/benchmarks/lora_routing/`. The flat
 `deployment.py` recipe defines each arm; `LORA_ROUTING_MODE` selects `naive` or
 `affinity`. Adapt its deployment names, Modal environment, volumes, and secret
-names to your account. `deploy.py` permits the eight-GPU trainer to use any US
+names to your account. `deploy.py` permits the eight-GPU trainer to use any available GPU
 region while the inference pool remains in the frontend's region.
 
 Each client has a distinct rank-32 adapter and independently submits sampling,

@@ -54,6 +54,7 @@ class LoraRouter:
         self.refresh_interval, self.stale_after = refresh_interval, stale_after
         self.replicas: dict[str, Replica] = {}
         self.local: dict[str, Counter] = {}
+        self.observed_local: dict[str, int] = {}
         self.failed_until: dict[str, float] = {}
         self.updated = 0.0
         self.next_refresh = 0.0
@@ -70,6 +71,7 @@ class LoraRouter:
             await asyncio.shield(self.pending)
 
     async def _refresh(self):
+        local_at_observation = {h: c.total() for h, c in self.local.items()}
         try:
             # Bound even the initial control-plane lookup; generation can fall
             # back to Flash if discovery or a replica is slow.
@@ -80,6 +82,7 @@ class LoraRouter:
             )
             return
         self.replicas = {r.replica_id: r for r in replicas}
+        self.observed_local = local_at_observation
         self.updated = time.monotonic()
         self.failed_until = {
             h: t for h, t in self.failed_until.items() if t > self.updated
@@ -96,10 +99,14 @@ class LoraRouter:
         if not hosts:
             return None
         rank = _ranking(model, hosts)
-        loads = {
-            h: max(self.replicas[h].active, self.local.get(h, Counter()).total())
-            for h in hosts
-        }
+        loads = {}
+        for host in hosts:
+            local = self.local.get(host, Counter()).total()
+            # Add arrivals since observation. max(reported, local) alone would
+            # hide every new local request until local exceeded a busy replica's
+            # entire reported load. Existing reservations must not count twice.
+            arrivals = max(0, local - self.observed_local.get(host, 0))
+            loads[host] = max(self.replicas[host].active + arrivals, local)
         # An adapter may occupy additional replicas when its home becomes busy.
         # Share the additive allowance across the pool so a small workload
         # can use idle GPUs. At high load the relative bound allows locality

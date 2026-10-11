@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -174,5 +175,22 @@ def test_exact_selection_overrides_shared_client_affinity_headers():
                 task(), "https://gateway", client=client, lora_router=pool
             )
             assert client.headers["Modal-Session-ID"] == "legacy"
+
+    asyncio.run(run())
+
+
+def test_new_reservations_add_to_observed_load_without_double_counting_old_ones():
+    async def run():
+        pool = router(
+            [Replica("a", active=100, recent=("m/v1",)), Replica("b", active=100)],
+            target=16,
+        )
+        # These requests existed before the replica observation and are already
+        # represented in its active count.
+        pool.local["a"] = Counter({"m/v1": 50})
+        await pool._refresh()
+        routes = [pool.acquire("m", "m/v1", str(i)) for i in range(34)]
+        assert routes[:33] == ["a"] * 33
+        assert routes[33] == "b"
 
     asyncio.run(run())
