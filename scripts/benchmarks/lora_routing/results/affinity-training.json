@@ -1,0 +1,1041 @@
+{
+  "clients": 16,
+  "updates": 64,
+  "output_tokens": 11984417,
+  "elapsed_seconds": 1390.5764701366425,
+  "measured_start": 1791702763.5530167,
+  "measured_end": 1791704154.1294868,
+  "output_tokens_per_second_including_training": 8618.308491026295,
+  "step_mean_seconds": 323.00664979219437,
+  "step_p50_seconds": 311.5034419298172,
+  "step_p95_seconds": 507.55935311317444,
+  "rollout_mean_seconds": 198.7579666338861,
+  "rollout_p50_seconds": 195.8476425409317,
+  "rollout_p95_seconds": 344.96025371551514,
+  "cross_client_progress": true,
+  "mixed_reward_groups": 65,
+  "nonzero_gradient_updates": 43,
+  "clients_with_nonzero_gradients": 16,
+  "clients_sampling_updated_policies": 16,
+  "group_p50_seconds": 111.56477844715118,
+  "group_p95_seconds": 240.3195607662201,
+  "config": {
+    "model": "Qwen/Qwen3.8-27B",
+    "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "updates": 4,
+    "rank": 32,
+    "seed": 4242,
+    "thinking": false,
+    "context_tokens": 8192,
+    "max_tokens": 1536,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "groups_per_update": 16,
+    "samples_per_group": 8,
+    "max_candidate_groups": 256,
+    "learning_rate": 1e-05,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "eps": 1e-12,
+    "grad_clip_norm": 1.0,
+    "clip_low": 0.8,
+    "clip_high": 1.28,
+    "warmup_samples": 8,
+    "warmup_max_tokens": 128,
+    "dynamic_group_filtering": false,
+    "prompt_suffix": "\nKeep the solution concise: at most 350 words. End with the final numerical answer in \\boxed{}."
+  },
+  "workload_hashes": [
+    "4816d6020f7fff051c66c1b398d77ef28b04ff743ffc57ef26cb67ca123e00ec",
+    "cb14820b8322a29addc6d1357497c4f79cbc3e93e5d110f21ba50152e35e16bf",
+    "57c1b3bbaf38abb049eb1474805d7f7427b93392ef99279161b2a41988e26d42"
+  ],
+  "per_client": [
+    {
+      "client": "client-00",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        185.08328294754028,
+        212.3094024658203,
+        179.08252596855164,
+        253.1731288433075
+      ],
+      "rollout_seconds": [
+        47.615192890167236,
+        150.85979175567627,
+        90.47007918357849,
+        197.79722476005554
+      ],
+      "train_seconds": [
+        124.00436496734619,
+        31.556233882904053,
+        82.64711141586304,
+        43.23560690879822
+      ],
+      "publication_seconds": [
+        6.884965896606445,
+        13.45700740814209,
+        29.88210940361023,
+        5.952251672744751,
+        12.131827354431152
+      ],
+      "reward": [
+        0.015625,
+        0.0,
+        0.0,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002488367725163698
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002515970030799508
+        }
+      ]
+    },
+    {
+      "client": "client-01",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        221.92676949501038,
+        219.00557780265808,
+        160.87014150619507,
+        283.93503522872925
+      ],
+      "rollout_seconds": [
+        51.50432801246643,
+        127.52207946777344,
+        95.62976884841919,
+        253.89974451065063
+      ],
+      "train_seconds": [
+        147.2545530796051,
+        20.2864990234375,
+        64.66308331489563,
+        18.954139947891235
+      ],
+      "publication_seconds": [
+        5.53945255279541,
+        23.160913944244385,
+        28.30098032951355,
+        0.5682508945465088,
+        11.06983757019043
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0020995328668504953
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004346488043665886
+        }
+      ]
+    },
+    {
+      "client": "client-02",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        224.2531988620758,
+        288.3153941631317,
+        313.5920717716217,
+        290.009890794754
+      ],
+      "rollout_seconds": [
+        90.53698825836182,
+        126.34582185745239,
+        251.21274423599243,
+        209.78061628341675
+      ],
+      "train_seconds": [
+        114.6673686504364,
+        129.19206738471985,
+        34.85213613510132,
+        58.144901275634766
+      ],
+      "publication_seconds": [
+        7.0462868213653564,
+        19.037283420562744,
+        25.412232160568237,
+        27.51827621459961,
+        22.074560165405273
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0078125,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.00454940227791667
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.00179190537892282
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002319422783330083
+        }
+      ]
+    },
+    {
+      "client": "client-03",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        224.4708287715912,
+        277.93282103538513,
+        291.49168729782104,
+        406.0257225036621
+      ],
+      "rollout_seconds": [
+        92.15731143951416,
+        156.94396209716797,
+        198.71914672851562,
+        317.7370810508728
+      ],
+      "train_seconds": [
+        107.59274387359619,
+        108.45165014266968,
+        74.52452254295349,
+        76.6598539352417
+      ],
+      "publication_seconds": [
+        5.710548162460327,
+        24.712308645248413,
+        12.527293682098389,
+        18.23953366279602,
+        11.619256258010864
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.015625,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0025474531576037407
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004319020081311464
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0030731011647731066
+        }
+      ]
+    },
+    {
+      "client": "client-04",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        356.5987768173218,
+        542.1675429344177,
+        349.0189983844757,
+        309.4148120880127
+      ],
+      "rollout_seconds": [
+        201.77965331077576,
+        415.3058774471283,
+        218.3869616985321,
+        200.50490736961365
+      ],
+      "train_seconds": [
+        132.0620265007019,
+        104.55605268478394,
+        107.73975419998169,
+        95.45636916160583
+      ],
+      "publication_seconds": [
+        5.852613925933838,
+        22.750191688537598,
+        22.29553771018982,
+        22.881035566329956,
+        13.444857835769653
+      ],
+      "reward": [
+        0.046875,
+        0.0078125,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003379952162504196
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0034574142191559076
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004501787014305592
+        }
+      ]
+    },
+    {
+      "client": "client-05",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        228.33749079704285,
+        187.63910245895386,
+        344.61415696144104,
+        296.8518137931824
+      ],
+      "rollout_seconds": [
+        165.69415712356567,
+        113.14263391494751,
+        272.04512119293213,
+        193.89806032180786
+      ],
+      "train_seconds": [
+        26.31338334083557,
+        64.80664134025574,
+        58.143547773361206,
+        79.14820861816406
+      ],
+      "publication_seconds": [
+        5.756781339645386,
+        36.323076009750366,
+        9.679708242416382,
+        14.413251161575317,
+        23.796611785888672
+      ],
+      "reward": [
+        0.03125,
+        0.0078125,
+        0.015625,
+        0.0
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003604282159358263
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0019010689575225115
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0028507993556559086
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        }
+      ]
+    },
+    {
+      "client": "client-06",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        323.3305494785309,
+        185.37120962142944,
+        395.0137333869934,
+        368.2873947620392
+      ],
+      "rollout_seconds": [
+        170.17384552955627,
+        133.16469359397888,
+        238.84917664527893,
+        225.4460608959198
+      ],
+      "train_seconds": [
+        133.98033213615417,
+        31.45585608482361,
+        142.98379635810852,
+        121.38237953186035
+      ],
+      "publication_seconds": [
+        5.596354722976685,
+        19.169159412384033,
+        0.7631740570068359,
+        13.168042421340942,
+        21.450230360031128
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0035347924567759037
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002511695958673954
+        }
+      ]
+    },
+    {
+      "client": "client-07",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        338.2016842365265,
+        492.01493215560913,
+        382.56045842170715,
+        320.6231997013092
+      ],
+      "rollout_seconds": [
+        217.49797415733337,
+        330.0846848487854,
+        252.3949921131134,
+        170.58880424499512
+      ],
+      "train_seconds": [
+        97.7320568561554,
+        144.28682923316956,
+        108.43431663513184,
+        127.27847862243652
+      ],
+      "publication_seconds": [
+        5.374600172042847,
+        22.963582038879395,
+        17.634071588516235,
+        21.713549375534058,
+        22.74706506729126
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0038723391480743885
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003504170337691903
+        }
+      ]
+    },
+    {
+      "client": "client-08",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        505.15563440322876,
+        412.4693260192871,
+        407.42355394363403,
+        246.58834552764893
+      ],
+      "rollout_seconds": [
+        329.2246642112732,
+        191.965167760849,
+        239.986483335495,
+        77.78537130355835
+      ],
+      "train_seconds": [
+        157.1623408794403,
+        183.80567908287048,
+        133.17484402656555,
+        71.7594587802887
+      ],
+      "publication_seconds": [
+        209.99715304374695,
+        18.76046633720398,
+        36.688671827316284,
+        34.25302743911743,
+        7.397942066192627
+      ],
+      "reward": [
+        0.0390625,
+        0.0078125,
+        0.0,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003377022221684456
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0023180432617664337
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002951487898826599
+        }
+      ]
+    },
+    {
+      "client": "client-09",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        500.29604506492615,
+        411.1373462677002,
+        331.86577439308167,
+        274.8022572994232
+      ],
+      "rollout_seconds": [
+        310.6658639907837,
+        289.0273039340973,
+        158.2368004322052,
+        176.8378701210022
+      ],
+      "train_seconds": [
+        177.89885187149048,
+        99.75063014030457,
+        136.36412405967712,
+        88.90288496017456
+      ],
+      "publication_seconds": [
+        91.80356574058533,
+        11.71786642074585,
+        22.348618030548096,
+        37.255866289138794,
+        9.052719116210938
+      ],
+      "reward": [
+        0.0390625,
+        0.0,
+        0.0078125,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0035475005861371756
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0017861240776255727
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0023480826057493687
+        }
+      ]
+    },
+    {
+      "client": "client-10",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        505.65750002861023,
+        386.20779824256897,
+        341.8410134315491,
+        284.43039989471436
+      ],
+      "rollout_seconds": [
+        344.96025371551514,
+        241.41642999649048,
+        174.9548466205597,
+        172.64877367019653
+      ],
+      "train_seconds": [
+        147.26746726036072,
+        122.39183068275452,
+        135.05526423454285,
+        93.43670201301575
+      ],
+      "publication_seconds": [
+        90.6025390625,
+        13.421473979949951,
+        22.390885591506958,
+        31.82112693786621,
+        18.335883140563965
+      ],
+      "reward": [
+        0.03125,
+        0.0078125,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002339030150324106
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002321956679224968
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0038382469210773706
+        }
+      ]
+    },
+    {
+      "client": "client-11",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        507.55935311317444,
+        404.3310110569,
+        218.94805145263672,
+        204.36536049842834
+      ],
+      "rollout_seconds": [
+        312.8622155189514,
+        236.78349328041077,
+        168.89004826545715,
+        90.04275608062744
+      ],
+      "train_seconds": [
+        177.34027934074402,
+        155.89297151565552,
+        36.396888732910156,
+        82.38220024108887
+      ],
+      "publication_seconds": [
+        91.40550518035889,
+        17.34942126274109,
+        11.643327951431274,
+        13.652347803115845,
+        31.9319109916687
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004702600184828043
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002596975304186344
+        }
+      ]
+    },
+    {
+      "client": "client-12",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 4,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        317.69097805023193,
+        433.4738013744354,
+        533.6237258911133,
+        178.5818645954132
+      ],
+      "rollout_seconds": [
+        285.96792244911194,
+        223.02049326896667,
+        394.96865010261536,
+        68.78696513175964
+      ],
+      "train_seconds": [
+        19.426705360412598,
+        209.50884747505188,
+        121.25541925430298,
+        32.1717209815979
+      ],
+      "publication_seconds": [
+        91.43624448776245,
+        12.289588212966919,
+        0.935124397277832,
+        17.38842749595642,
+        7.763069152832031
+      ],
+      "reward": [
+        0.0234375,
+        0.0078125,
+        0.015625,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0033470469061285257
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0017921116668730974
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003777929116040468
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0033367332071065903
+        }
+      ]
+    },
+    {
+      "client": "client-13",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 4,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        338.93950486183167,
+        300.24416399002075,
+        307.81499433517456,
+        246.7845652103424
+      ],
+      "rollout_seconds": [
+        251.79104471206665,
+        179.5080485343933,
+        178.74522185325623,
+        104.76806354522705
+      ],
+      "train_seconds": [
+        65.3169059753418,
+        92.42578387260437,
+        104.2009551525116,
+        101.02653789520264
+      ],
+      "publication_seconds": [
+        239.3301284313202,
+        21.82396674156189,
+        28.29997420310974,
+        24.858054161071777,
+        16.69510531425476
+      ],
+      "reward": [
+        0.03125,
+        0.0078125,
+        0.0078125,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0031341752037405968
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0023073500487953424
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0017546945018693805
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0025455604773014784
+        }
+      ]
+    },
+    {
+      "client": "client-14",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        554.1089916229248,
+        373.2966411113739,
+        271.583181142807,
+        128.17091178894043
+      ],
+      "rollout_seconds": [
+        365.966023683548,
+        217.88780522346497,
+        193.1383514404297,
+        61.46597719192505
+      ],
+      "train_seconds": [
+        153.77332830429077,
+        129.52194738388062,
+        62.83457922935486,
+        31.091842889785767
+      ],
+      "publication_seconds": [
+        237.61447072029114,
+        34.362446784973145,
+        25.87765645980835,
+        15.599812269210815,
+        18.641526699066162
+      ],
+      "reward": [
+        0.0390625,
+        0.0,
+        0.0,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002741697244346142
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0026588994078338146
+        }
+      ]
+    },
+    {
+      "client": "client-15",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        342.18077301979065,
+        388.95212030410767,
+        297.61154651641846,
+        264.76571679115295
+      ],
+      "rollout_seconds": [
+        205.0237295627594,
+        239.12072134017944,
+        150.64692878723145,
+        105.72608971595764
+      ],
+      "train_seconds": [
+        98.18435978889465,
+        95.78356099128723,
+        117.58660078048706,
+        102.6787633895874
+      ],
+      "publication_seconds": [
+        239.1188097000122,
+        38.964707136154175,
+        54.03532862663269,
+        29.369399547576904,
+        15.12599802017212
+      ],
+      "reward": [
+        0.03125,
+        0.0078125,
+        0.0,
+        0.0
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.00373412505723536
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0019091259455308318
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        }
+      ]
+    }
+  ],
+  "replica_observations": {
+    "adapter_registrations": 292,
+    "peak_observed_active_requests": 1451,
+    "peak_active_adapters_on_one_replica": 9,
+    "mean_active_adapters_on_busy_replicas": 3.9562794856763674,
+    "fraction_busy_replica_time_over_adapter_slots": 0.0016380799729477566,
+    "measurement": "Active includes queued requests. Registrations are CPU loads, not GPU transfer counts."
+  },
+  "run": "affinity-full-v3"
+}

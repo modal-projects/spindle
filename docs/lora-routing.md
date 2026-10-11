@@ -4,9 +4,16 @@ LoRA sampling workers choose replicas locally. Each worker maintains a periodica
 refreshed snapshot of the pool and counts its own in-flight generations. There is
 no shared scheduler, distributed lock, or routing RPC on a warm request's path.
 
+See the [measured training results](lora-routing-results.md) for the completed
+16-adapter, 27B-model comparison and its limitations.
+
 `inference_lora_routing = "affinity"` enables routing; `"naive"` keeps the existing
 adapter-independent Flash behavior for comparisons. Base-model sampling and FFT
 routing keep their existing paths.
+
+When upgrading an existing deployment, refresh its inference sidecars with
+`spindle deploy config.py --refresh-inference CONFIG_NAME`. Pools without the
+`/routing-state` endpoint continue using Flash's ordinary routing until refreshed.
 
 ## Placement and load
 
@@ -16,8 +23,9 @@ Within a set of warm replicas, request/conversation affinity breaks ties.
 
 For each replica, estimated load adds new local reservations to reported active
 requests, subtracting reservations already present at observation time to avoid
-counting them twice. It is at least the local outstanding count. A replica is eligible when its load is
-below `1.25 * minimum_pool_load + max(1, target_concurrency / replica_count)`.
+counting them twice. It is at least the local outstanding count. A replica is
+eligible when its load is below
+`1.25 * minimum_pool_load + max(1, target_concurrency / replica_count)`.
 This lets a hot adapter spread across the pool and lets small workloads use idle
 GPUs. Among eligible replicas the router prefers the exact adapter version already
 active or recently used. Cold placement prefers a replica whose active adapter
@@ -60,8 +68,8 @@ or evictions.
 The workload and tools live in `scripts/benchmarks/lora_routing/`. The flat
 `deployment.py` recipe defines each arm; `LORA_ROUTING_MODE` selects `naive` or
 `affinity`. Adapt its deployment names, Modal environment, volumes, and secret
-names to your account. `deploy.py` permits the eight-GPU trainer to use any available GPU
-region while the inference pool remains in the frontend's region.
+names to your account. `deploy.py` permits the eight-GPU trainer to use any
+available GPU region while the inference pool remains in the frontend's region.
 
 Each client has a distinct rank-32 adapter and independently submits sampling,
 PPO forward/backward, optimizer, and publication operations through the Tinker SDK.
@@ -71,7 +79,7 @@ rows, tokenizer revision, prompts, sampling parameters, and seeds are hashed int
 each client's manifest. Dynamic group filtering is disabled to hold work fixed.
 
 After deploying both arms, launch `supervise.py` against each frontend with
-`--clients 16 --stagger-seconds 5 --hours 0.5 --config config.json`, separate output
+`--clients 16 --stagger-seconds 5 --hours 0.75 --config config.json`, separate output
 directories, and the exact deployment app names in `--owned-apps`. Set
 `TINKER_API_KEY` in the environment. The supervisor bounds runtime, detects client
 failure, records GPU lifetimes, and stops its owned apps on completion or failure.
@@ -84,3 +92,22 @@ publication. Use `--require-learning` to reject runs without mixed rewards and
 nonzero gradients, and `--baseline PATH` to compare matching workloads.
 `observe.py` records replica observations during the run through the same exact
 Flash routing path.
+
+For example, after collecting both runs and the replica observations:
+
+```bash
+python scripts/benchmarks/lora_routing/report.py RESULTS/affinity \
+  --validate-pilot --require-learning --baseline RESULTS/naive \
+  --observations RESULTS/observations.jsonl --pool-app YOUR_AFFINITY_POOL \
+  --output RESULTS/affinity-report.json
+```
+
+`replay.py` supplements the training comparison with an inference-only replay of
+the same saved adapters and prompts on two fresh, identical pools. It loads two
+published versions from a completed 16-client run, uses eight independent router
+caches, and submits four waves of 1,024 sequences, capped at 512 tokens. It checks
+exact versions and finite aligned logprobs and stops both supplied pools in a
+`finally` block. The pools must share the training run's bulletin/checkpoint
+volumes. Pass `--pools NAIVE_POOL AFFINITY_POOL --output RESULTS/replay.json` and
+the completed training output directory as the positional argument. This replay
+has fixed wave barriers and must not be presented as training throughput.

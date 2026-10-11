@@ -132,6 +132,8 @@ def summarize(root, require_independence=False):
         "updates": len(all_steps),
         "output_tokens": tokens,
         "elapsed_seconds": elapsed,
+        "measured_start": min(starts),
+        "measured_end": max(ends),
         "output_tokens_per_second_including_training": tokens / elapsed,
         "step_mean_seconds": statistics.mean(all_steps),
         "step_p50_seconds": statistics.median(all_steps),
@@ -156,6 +158,53 @@ def summarize(root, require_independence=False):
     }
 
 
+def summarize_replicas(paths, app_name, start, end, slots=8):
+    rows = sorted(
+        (row for path in paths for row in events(path) if row["app"] == app_name),
+        key=lambda row: row["time"],
+    )
+    before, after = {}, {}
+    busy_seconds = overloaded_seconds = active_adapter_seconds = 0.0
+    peak_requests = peak_adapters = 0
+    for index, row in enumerate(rows):
+        if row["time"] > end:
+            break
+        for replica in row["replicas"]:
+            if "error" in replica:
+                continue
+            after[replica["replica"]] = replica["adapter_loads"]
+            if row["time"] < start:
+                before[replica["replica"]] = replica["adapter_loads"]
+        if row["time"] < start:
+            continue
+        next_time = rows[index + 1]["time"] if index + 1 < len(rows) else end
+        seconds = max(0, min(next_time, end) - row["time"])
+        valid = [r for r in row["replicas"] if "error" not in r]
+        peak_requests = max(peak_requests, sum(r["active"] for r in valid))
+        for replica in valid:
+            adapters = len(replica["adapters"])
+            peak_adapters = max(peak_adapters, adapters)
+            if replica["active"]:
+                busy_seconds += seconds
+                active_adapter_seconds += adapters * seconds
+                overloaded_seconds += (adapters > slots) * seconds
+    return {
+        "adapter_registrations": sum(
+            n - before.get(replica, 0) for replica, n in after.items()
+        ),
+        "peak_observed_active_requests": peak_requests,
+        "peak_active_adapters_on_one_replica": peak_adapters,
+        "mean_active_adapters_on_busy_replicas": active_adapter_seconds / busy_seconds
+        if busy_seconds
+        else None,
+        "fraction_busy_replica_time_over_adapter_slots": overloaded_seconds
+        / busy_seconds
+        if busy_seconds
+        else None,
+        "measurement": "Active includes queued requests. Registrations are CPU loads, not GPU transfer counts.",
+    }
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("root", type=Path)
@@ -163,8 +212,19 @@ def main():
     p.add_argument("--output", type=Path)
     p.add_argument("--require-learning", action="store_true")
     p.add_argument("--baseline", type=Path)
+    p.add_argument("--observations", nargs="*", type=Path, default=[])
+    p.add_argument("--pool-app")
     args = p.parse_args()
     result = summarize(args.root, args.validate_pilot)
+    if args.observations:
+        if not args.pool_app:
+            p.error("--observations requires --pool-app")
+        result["replica_observations"] = summarize_replicas(
+            args.observations,
+            args.pool_app,
+            result["measured_start"],
+            result["measured_end"],
+        )
     if args.require_learning and not (
         result["mixed_reward_groups"] and result["nonzero_gradient_updates"]
     ):
