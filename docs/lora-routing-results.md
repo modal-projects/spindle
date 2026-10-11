@@ -83,7 +83,9 @@ gradient, and policy-version measurements:
 ## Correctness and iteration
 
 The routing, sampling, sidecar, provider, and configuration checks passed 211
-tests locally. One native-SGLang module was skipped locally because SGLang was
+tests locally. After the idle-burst fix, the affected routing/sampling/sidecar
+suite passed 95 tests, including the new idle-burst regression. One native-SGLang
+module was skipped locally because SGLang was
 unavailable; all 32 of its tests passed inside the actual rollout image on CPU.
 A live two-replica Flash probe delivered 40/40 concurrent requests to their exact
 selected replica, and a stale upstream returned 503.
@@ -97,6 +99,13 @@ without discarding completed work. An initial affinity run exposed load
 under-counting when new local arrivals were hidden behind an existing replica
 load; the router now adds arrivals since observation, with a regression test.
 Only the completed reruns above enter the comparison.
+
+The independent training comparison used the placement algorithm from commit
+`59d00d1`. A later review of the fixed-wave replay found that stale observations
+could send an entire post-idle burst through naive fallback. The final router
+coalesces those requests behind one three-second-bounded refresh, then falls back
+if observations remain stale. Fresh requests remain nonblocking. The supplemental
+replay tests this final behavior; the training numbers above precede that fix.
 
 A CPU microbenchmark of 100,000 acquire/release pairs measured 15.21 microseconds
 per request with eight replicas and 52.38 microseconds with 32 replicas. This

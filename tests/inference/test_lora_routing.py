@@ -194,3 +194,34 @@ def test_new_reservations_add_to_observed_load_without_double_counting_old_ones(
         assert routes[33] == "b"
 
     asyncio.run(run())
+
+
+def test_burst_after_idle_waits_for_one_refresh_and_failed_discovery_falls_back():
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def discover():
+            started.set()
+            await release.wait()
+            return [Replica("warm", recent=("m/v1",))]
+
+        pool = LoraRouter(discover)
+        pool.replicas = {"old": Replica("old")}
+        pool.updated = time.monotonic() - 20
+        waiting = [asyncio.create_task(pool.refresh()) for _ in range(16)]
+        await started.wait()
+        assert all(not task.done() for task in waiting)
+        pending = pool.pending
+        release.set()
+        await asyncio.gather(*waiting)
+        assert pool.pending is pending
+        assert pool.acquire("m", "m/v1", "r") == "warm"
+        pool.release("warm", "m/v1")
+
+        pool.updated -= 20
+        pool.next_refresh = 0
+        pool.discover = AsyncMock(side_effect=TimeoutError)
+        await pool.refresh()
+        assert pool.acquire("m", "m/v1", "r") is None
+
+    asyncio.run(run())

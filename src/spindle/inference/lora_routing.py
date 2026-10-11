@@ -65,9 +65,12 @@ class LoraRouter:
         if now >= self.next_refresh and (self.pending is None or self.pending.done()):
             self.next_refresh = now + self.refresh_interval
             self.pending = asyncio.create_task(self._refresh())
-        # Only the first discovery waits. Later calls use the last snapshot while
-        # a single background refresh runs. Cold pools fall back to Flash.
-        if not self.updated and self.pending is not None:
+        # Fresh snapshots never block. After an idle interval, coalesce the new
+        # burst behind one bounded refresh instead of routing the entire burst
+        # naively before observations arrive. Failed discovery falls back to Flash.
+        if (
+            not self.updated or now - self.updated > self.stale_after
+        ) and self.pending is not None:
             await asyncio.shield(self.pending)
 
     async def _refresh(self):

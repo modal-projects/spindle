@@ -46,9 +46,11 @@ affinity remains in the generation payload and data-parallel rank selection.
 
 Pool membership is cached for five seconds. Active sampling workers refresh
 replica observations at most once per second, coalescing concurrent refreshes.
-Warm requests use the last snapshot while refresh runs in the background. Initial
-discovery is bounded to three seconds; missing or ten-second-old observations
-fall back to Flash. Transport failures, unavailable upstreams, and mismatched
+Fresh requests use the last snapshot while refresh runs in the background.
+Initial discovery and bursts after ten seconds of idle observations share one
+refresh, bounded to three seconds. Missing or still-stale observations then fall
+back to Flash. This avoids sending an entire post-idle batch through naive routing
+while its refresh is pending. Transport failures, unavailable upstreams, and mismatched
 replica identities invalidate routes temporarily. Every physical attempt releases
 its local reservation, including cancellation.
 

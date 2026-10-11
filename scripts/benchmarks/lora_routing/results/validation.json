@@ -23,6 +23,11 @@
     "tests-final.log": "640c2aad1c4dd974093016d516fec446c38ceb333048621afa744dcf545f8982",
     "sglang-tests.log": "b29d4ed763333f5f7783de93b2fbe390a09450f4b764a0de382753edda177f6e",
     "probe-flash-final.log": "e8c844a3e7b494163a32cea59a0e3f704dca6274f6c525addb4103f81dd79bcc",
-    "router-cpu.txt": "406750bbe8b8781b8d72ea76df3a816cf866049c40394e1e1eff2b8b5d1d9ed5"
+    "router-cpu.txt": "406750bbe8b8781b8d72ea76df3a816cf866049c40394e1e1eff2b8b5d1d9ed5",
+    "tests-post-idle-fix.log": "fed6c5c9ea040a409af05611c1067414463057b9553f09b95c20b1af3e0abdea"
+  },
+  "post_idle_fix_affected_tests": {
+    "passed": 95,
+    "skipped": 1
   }
 }
