@@ -341,8 +341,14 @@ class Client:
                     self.event("publish_enqueued", update=update)
                 result = forward.result(timeout=1800)
                 opt = optimizer.result(timeout=1800)
-                if not all(math.isfinite(float(v)) for v in result.metrics.values()):
-                    raise RuntimeError("Nonfinite training metrics")
+                if not all(
+                    math.isfinite(float(v))
+                    for metrics in (result.metrics, opt.metrics)
+                    for v in metrics.values()
+                ):
+                    raise RuntimeError("Nonfinite training or optimizer metrics")
+                if opt.metrics.get("update_successful:mean", 1) != 1:
+                    raise RuntimeError("Optimizer update was skipped")
                 self.event(
                     "train_done",
                     update=update,
@@ -361,14 +367,21 @@ class Client:
                 )
         self.event("completed", updates=cfg["updates"], seconds=time.time() - started)
         if self.base_url:
-            response = httpx.post(
-                self.base_url + "/api/v1/unload_model",
-                headers={"x-api-key": os.environ["TINKER_API_KEY"]},
-                json={"model_id": self.trainer.model_id},
-                timeout=120,
-            )
-            response.raise_for_status()
-            self.event("unloaded")
+            # The supervisor owns final deployment cleanup. A timed-out unload
+            # may still finish on the engine; it must not abort other clients'
+            # valid training after this client has completed all its updates.
+            try:
+                response = httpx.post(
+                    self.base_url + "/api/v1/unload_model",
+                    headers={"x-api-key": os.environ["TINKER_API_KEY"]},
+                    json={"model_id": self.trainer.model_id},
+                    timeout=120,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                self.event("cleanup_warning", error=str(exc))
+            else:
+                self.event("unloaded")
 
 
 def main():

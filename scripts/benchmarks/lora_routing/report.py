@@ -58,9 +58,16 @@ def summarize(root, require_independence=False):
         if len(updates) != manifest["config"]["updates"]:
             raise ValueError("Missing updates")
         if not all(
-            math.isfinite(float(v)) for r in trains for v in r["metrics"].values()
+            math.isfinite(float(v))
+            for r in trains
+            for kind in ("metrics", "optimizer_metrics")
+            for v in r[kind].values()
         ):
-            raise ValueError("Nonfinite training metrics")
+            raise ValueError("Nonfinite training or optimizer metrics")
+        if any(
+            r["optimizer_metrics"].get("update_successful:mean", 1) != 1 for r in trains
+        ):
+            raise ValueError("An optimizer update was skipped")
         rollout_starts = {
             r["update"]: r["time"] for r in trace if r["event"] == "rollout_start"
         }
@@ -83,6 +90,10 @@ def summarize(root, require_independence=False):
                 "client": folder.name,
                 "updates": len(updates),
                 "independent_prefetch": independent,
+                "nonzero_gradient_updates": sum(
+                    r["optimizer_metrics"].get("grad_norm:mean", 0) > 0 for r in trains
+                ),
+                "sampled_policy_versions": [r["policy_version"] for r in rollouts],
                 "step_seconds": steps,
                 "rollout_seconds": [r["seconds"] for r in rollouts],
                 "train_seconds": [r["seconds"] for r in trains],
@@ -131,6 +142,12 @@ def summarize(root, require_independence=False):
         "cross_client_progress": cross_client_progress,
         "mixed_reward_groups": mixed_groups,
         "nonzero_gradient_updates": nonzero_updates,
+        "clients_with_nonzero_gradients": sum(
+            c["nonzero_gradient_updates"] > 0 for c in clients
+        ),
+        "clients_sampling_updated_policies": sum(
+            max(c["sampled_policy_versions"]) > 0 for c in clients
+        ),
         "group_p50_seconds": statistics.median(group_seconds),
         "group_p95_seconds": percentile(group_seconds, 0.95),
         "config": cfg,

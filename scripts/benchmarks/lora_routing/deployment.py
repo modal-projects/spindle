@@ -4,10 +4,11 @@ import os
 from spindle.configs.qwen38_27b_lora_16k import Config as Parent
 
 MODE = os.environ.get("LORA_ROUTING_MODE", "naive")
+RUN = os.environ.get("LORA_ROUTING_RUN", "1011b")
 
 
 class Config(Parent):
-    name = f"routing27-{MODE}-1011b"
+    name = f"routing27-{MODE}-{RUN}"
     max_context_length = 8192
     trainer_gpu = "H100"
     trainer_gpus_per_node = 8
@@ -29,7 +30,7 @@ class Config(Parent):
         "miles_cfg.tensor_model_parallel_size": 2,
         "miles_cfg.max_lora_slots": 16,
         "miles_cfg.max_tokens_per_gpu": 8192,
-        "platform.frontend": f"spindle-routing27-{MODE}-1011b",
+        "platform.frontend": f"spindle-routing27-{MODE}-{RUN}",
         "platform.modal.environment": "lilo-deploy",
         "platform.modal.region": "us-west",
         "platform.secrets.api": "spindle-swe-staggered-api",
