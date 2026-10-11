@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import os
+import time
 import uuid
+from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -34,6 +37,11 @@ def create_app(
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
+        app.state.active_adapters = Counter()
+        app.state.recent_adapters = OrderedDict()
+        app.state.active = 0
+        app.state.adapter_loads = 0
+        app.state.adapter_load_seconds = 0.0
         try:
             yield
         finally:
@@ -45,6 +53,30 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.get("/routing-state")
+    async def routing_state():
+        return {
+            "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "active": app.state.active,
+            "adapters": dict(app.state.active_adapters),
+            # Recent use is a residency estimate, not a GPU-cache assertion.
+            "recent": list(app.state.recent_adapters),
+            "adapter_loads": app.state.adapter_loads,
+            "adapter_load_seconds": app.state.adapter_load_seconds,
+        }
+
+    @app.post("/generate")
+    async def generate(request: Request) -> Response:
+        app.state.active += 1
+        try:
+            response = await generate_response(request)
+            response.headers["x-spindle-replica"] = os.environ.get(
+                "MODAL_TASK_ID", "local"
+            )
+            return response
+        finally:
+            app.state.active -= 1
+
     @app.get("/health")
     async def health() -> Response:
         response = await app.state.client.get("/health")
@@ -54,8 +86,7 @@ def create_app(
             media_type=response.headers.get("content-type"),
         )
 
-    @app.post("/generate")
-    async def generate(request: Request) -> Response:
+    async def generate_response(request: Request) -> Response:
         payload = await request.json()
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
@@ -80,7 +111,18 @@ def create_app(
                     status_code=409,
                 )
 
-        response = await _post_generate(app.state.client, request, payload)
+        adapter = payload.get("lora_path", "base")
+        app.state.active_adapters[adapter] += 1
+        try:
+            response = await _post_generate(app.state.client, request, payload)
+        finally:
+            app.state.active_adapters[adapter] -= 1
+            if not app.state.active_adapters[adapter]:
+                del app.state.active_adapters[adapter]
+            app.state.recent_adapters[adapter] = time.monotonic()
+            app.state.recent_adapters.move_to_end(adapter)
+            while len(app.state.recent_adapters) > 32:
+                app.state.recent_adapters.popitem(last=False)
         if response is None:
             return Response(status_code=499)
         try:
@@ -148,6 +190,7 @@ async def _prepare_adapter(
                     if resolved.identity in app.state.registered_adapters:
                         return resolved, None
                     path = await asyncio.to_thread(bulletin.resolve, resolved)
+                started = time.monotonic()
                 response = await app.state.client.post(
                     "/load_lora_adapter",
                     json={
@@ -158,6 +201,8 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
+                app.state.adapter_loads += 1
+                app.state.adapter_load_seconds += time.monotonic() - started
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 

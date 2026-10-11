@@ -533,3 +533,74 @@ def test_exact_version_refreshes_only_when_snapshot_is_missing(tmp_path):
             assert response.status_code == 200
             assert response.json()["meta_info"]["weight_version_start"] == 21
     assert refreshes == [True]
+
+
+def test_concurrent_models_with_same_version_keep_distinct_adapters_and_load_counts(
+    tmp_path,
+):
+    bulletin = SnapshotBulletin(tmp_path / "bulletin")
+    refs = [VersionRef("model-a", 1), VersionRef("model-b", 1)]
+    for ref in refs:
+        source = tmp_path / ref.run_id
+        source.mkdir()
+        (source / "adapter_model.safetensors").write_bytes(ref.run_id.encode())
+        (source / "adapter_config.json").write_text('{"r":8}')
+        bulletin.publish(ref, source)
+
+    async def run():
+        loaded = []
+        release, started = asyncio.Event(), asyncio.Event()
+        requests = 0
+
+        async def upstream(request):
+            nonlocal requests
+            payload = json.loads(request.content)
+            if request.url.path == "/load_lora_adapter":
+                loaded.append(payload["lora_name"])
+                return httpx.Response(200, json={"success": True})
+            requests += 1
+            if requests == 2:
+                started.set()
+            await release.wait()
+            return httpx.Response(
+                200, json={"adapter": payload["lora_path"], "meta_info": {}}
+            )
+
+        app = create_app(
+            bulletin, "http://sglang", transport=httpx.MockTransport(upstream)
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+            ) as client,
+        ):
+            pending = [
+                asyncio.create_task(
+                    client.post(
+                        "/generate",
+                        json={
+                            "input_ids": [1],
+                            "weight_run_id": ref.run_id,
+                            "weight_version": {"exact_version": 1},
+                        },
+                    )
+                )
+                for ref in refs
+            ]
+            await asyncio.wait_for(started.wait(), 2)
+            state = (await client.get("/routing-state")).json()
+            assert state["active"] == 2
+            assert state["adapters"] == {ref.identity: 1 for ref in refs}
+            release.set()
+            results = await asyncio.gather(*pending)
+            assert [r.json()["adapter"] for r in results] == [
+                ref.identity for ref in refs
+            ]
+            state = (await client.get("/routing-state")).json()
+            assert state["active"] == 0 and state["adapters"] == {}
+            assert state["adapter_loads"] == 2
+            assert len(loaded) == len(set(loaded)) == 2
+            assert all(r.headers["x-spindle-replica"] == "local" for r in results)
+
+    asyncio.run(run())

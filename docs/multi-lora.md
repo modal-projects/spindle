@@ -56,6 +56,14 @@ results = await asyncio.gather(*(
 ))
 ```
 
+## Routing rollouts to warm adapters
+
+LoRA sampling uses replica load and adapter-version observations to choose a warm
+replica without a centralized routing service. Hot adapters can spill onto more
+replicas as load grows. Set `inference_lora_routing = "naive"` in the deployment
+recipe to compare against adapter-independent routing. See [LoRA routing](lora-routing.md)
+for the algorithm, Flash integration, failure behavior, and DAPO benchmark tools.
+
 ## Adapter publication via the Bulletin
 
 Unlike the FFT case, sampler publication is done with full-weights adapters, such that using the same rollout pool for both monotonic min-weight versioning and exact versioning is cheap. The entire rollout pool supports arbitrary weight-version sampling, using SGLang's LRU-based eviction mechanism per container. The amount of concurrent LoRAs cached in-container CPU and on GPU can be tuned via `ROLLOUT_MAX_LOADED_LORAS` (which corresponds to sglang's `--max-loaded-loras`) and `ROLLOUT_MAX_LORAS_PER_BATCH` (which corresponds to sglang's `--max-loras-per-batch`) respectively. 

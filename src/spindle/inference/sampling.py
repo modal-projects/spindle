@@ -10,6 +10,9 @@ from typing import Any
 
 import httpx
 from stitch.publish import constrain_request
+from stitch.types import VersionRef
+
+from .lora_routing import LoraRouter
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -52,6 +55,7 @@ async def sample_task(
     stats: dict[str, Any] | None = None,
     session_id: str | None = None,
     on_event: Callable[[dict], None] | None = None,
+    lora_router: LoraRouter | None = None,
 ) -> dict[str, Any]:
     request = task["payload"]
     prompt = _prompt_tokens(request["prompt"])
@@ -115,6 +119,8 @@ async def sample_task(
         )
     )
     async with client_context as active_client:
+        if lora_router is not None:
+            await lora_router.refresh()
         outputs = await asyncio.gather(
             *(
                 _sample_one(
@@ -140,6 +146,7 @@ async def sample_task(
                     trace_attrs=trace_attrs,
                     base_headers=headers,
                     request_timeout=timeout,
+                    lora_router=lora_router,
                 )
                 for index in range(num_samples)
             )
@@ -207,6 +214,7 @@ async def _sample_one(
     trace_attrs: dict | None = None,
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
+    lora_router: LoraRouter | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -239,6 +247,9 @@ async def _sample_one(
     rejected: set[str] = set()
     waiting_logged = False
     physical_attempt = 0
+    adapter = (
+        VersionRef(model_id, int(version)).identity if model_id is not None else "base"
+    )
     while True:
         cause: httpx.TransportError | None = None
         resolved = (
@@ -279,6 +290,25 @@ async def _sample_one(
                 latest=int(version) if latest else None,
                 exact=None if latest else int(version),
             )
+        upstream = None
+        if lora_router is not None:
+            await lora_router.refresh()
+            upstream = lora_router.acquire(
+                model_id or "base", adapter, cache_affinity_id or routing_session_id
+            )
+            if upstream is not None:
+                # Flash affinity headers take precedence over exact upstreams.
+                # Keep logical conversation affinity in the payload/DP rank,
+                # but send only the exact replica selector to the proxy.
+                headers = {
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower()
+                    not in {"modal-session-id", "modal-routing-affinity-key"}
+                }
+                headers["Modal-Flash-Upstream"] = lora_router.replicas[
+                    upstream
+                ].upstream
         physical_attempt += 1
         observation = SampleAttempt(
             on_event,
@@ -287,20 +317,26 @@ async def _sample_one(
                 "sequence_index": index,
                 "attempt_number": physical_attempt,
                 "routed_dp_rank": routed_dp_rank,
-                "upstream": gateway_url,
+                "upstream": upstream or gateway_url,
                 "prompt_tokens": len(prompt),
             },
         )
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
-            response = await client.post(
+            request = client.build_request(
+                "POST",
                 f"{gateway_url}/generate",
                 json=body,
                 headers=headers,
                 timeout=request_timeout,
                 extensions={"trace": HTTPTrace(attempt_result).record},
             )
+            if upstream is not None:
+                # Also remove competing defaults on a caller-provided client.
+                request.headers.pop("Modal-Session-ID", None)
+                request.headers.pop("Modal-Routing-Affinity-Key", None)
+            response = await client.send(request)
         except httpx.TransportError as exc:
             attempt_result["error_type"] = type(exc).__name__
             cause = exc
@@ -318,8 +354,16 @@ async def _sample_one(
             )
         else:
             attempt_result["http_status"] = response.status_code
+            actual_replica = response.headers.get("x-spindle-replica")
+            if upstream is not None and actual_replica and actual_replica != upstream:
+                # An older proxy may ignore exact routing. Preserve weight
+                # guarantees, and invalidate the misleading route observation.
+                attempt_result["route_mismatch"] = True
+            if actual_replica:
+                attempt_result["upstream"] = actual_replica
             retryable = (
                 response.status_code == 409
+                or (response.status_code in {404, 408, 429} and lora_router is not None)
                 or response.status_code >= 500
                 or (response.status_code == 404 and not isinstance(gateway, str))
             )
@@ -342,6 +386,7 @@ async def _sample_one(
                 )
                 if version_error is not None:
                     reason = version_error
+                    attempt_result["version_error"] = version_error
                     if not isinstance(gateway, str):
                         rejected.add(gateway_url)
                     reroute_attempt += 1
@@ -357,7 +402,7 @@ async def _sample_one(
                     attempt_result["ok"] = True
                     if stats is not None:
                         stats["reroutes"] = stats.get("reroutes", 0) + reroute_attempt
-                        stats["upstream"] = gateway_url
+                        stats["upstream"] = attempt_result["upstream"]
                     return result
             else:
                 reason = f"HTTP {response.status_code}: {response.text[:500]}"
@@ -374,6 +419,16 @@ async def _sample_one(
                             flush=True,
                         )
         finally:
+            if lora_router is not None:
+                lora_router.release(
+                    upstream,
+                    adapter,
+                    failed=cause is not None
+                    or attempt_result.get("route_mismatch", False)
+                    or "version_error" in attempt_result
+                    or attempt_result.get("http_status", 200) >= 500
+                    or attempt_result.get("http_status", 200) in {404, 408, 429},
+                )
             observation.finish()
         remaining = deadline - loop.time()
         if remaining <= 0:
