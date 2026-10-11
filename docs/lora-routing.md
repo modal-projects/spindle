@@ -4,8 +4,8 @@ LoRA sampling workers choose replicas locally. Each worker maintains a periodica
 refreshed snapshot of the pool and counts its own in-flight generations. There is
 no shared scheduler, distributed lock, or routing RPC on a warm request's path.
 
-See the [measured training results](lora-routing-results.md) for the completed
-16-adapter, 27B-model comparison and its limitations.
+See the [measured results](lora-routing-results.md) for the completed 16-adapter,
+27B-model training comparison, matched inference replay, and their limitations.
 
 `inference_lora_routing = "affinity"` enables routing; `"naive"` keeps the existing
 adapter-independent Flash behavior for comparisons. Base-model sampling and FFT
@@ -113,3 +113,5 @@ exact versions and finite aligned logprobs and stops both supplied pools in a
 volumes. Pass `--pools NAIVE_POOL AFFINITY_POOL --output RESULTS/replay.json` and
 the completed training output directory as the positional argument. This replay
 has fixed wave barriers and must not be presented as training throughput.
+Summarize its output with `report_replay.py RAW_REPLAY.json --output SUMMARY.json
+--groups-csv GROUPS.csv`.

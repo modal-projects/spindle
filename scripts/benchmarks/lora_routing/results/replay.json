@@ -1,0 +1,118 @@
+{
+  "naive": {
+    "output_tokens": 2096733,
+    "measured_seconds": 328.613776637,
+    "output_tokens_per_second": 6380.538945925373,
+    "group_mean_seconds": 44.337642173011716,
+    "group_p95_seconds": 76.17005397800001,
+    "workload_sha256": "747696acef09ed2c9958a682525063a2ea4d12ec40da9e30bc6e3d5348d641ea",
+    "waves": [
+      {
+        "wave": 0,
+        "versions": [
+          4
+        ],
+        "seconds": 78.328455264,
+        "tokens": 524263,
+        "tokens_per_second": 6693.135952100832,
+        "group_mean_seconds": 45.506595093921874,
+        "group_p95_seconds": 68.03041820000001
+      },
+      {
+        "wave": 1,
+        "versions": [
+          7
+        ],
+        "seconds": 96.814151022,
+        "tokens": 523894,
+        "tokens_per_second": 5411.337025317203,
+        "group_mean_seconds": 47.71972507476563,
+        "group_p95_seconds": 83.09557076899999
+      },
+      {
+        "wave": 2,
+        "versions": [
+          4
+        ],
+        "seconds": 76.85683736200002,
+        "tokens": 524288,
+        "tokens_per_second": 6821.618192934144,
+        "group_mean_seconds": 42.22800835257812,
+        "group_p95_seconds": 74.68000186
+      },
+      {
+        "wave": 3,
+        "versions": [
+          7
+        ],
+        "seconds": 76.61433298899999,
+        "tokens": 524288,
+        "tokens_per_second": 6843.210396092274,
+        "group_mean_seconds": 41.896240170781255,
+        "group_p95_seconds": 65.16411295700004
+      }
+    ]
+  },
+  "affinity": {
+    "output_tokens": 2097143,
+    "measured_seconds": 264.13344542699997,
+    "output_tokens_per_second": 7939.710159043827,
+    "group_mean_seconds": 42.4047467973711,
+    "group_p95_seconds": 63.629865687,
+    "workload_sha256": "747696acef09ed2c9958a682525063a2ea4d12ec40da9e30bc6e3d5348d641ea",
+    "waves": [
+      {
+        "wave": 0,
+        "versions": [
+          4
+        ],
+        "seconds": 68.419000641,
+        "tokens": 524288,
+        "tokens_per_second": 7662.900584458714,
+        "group_mean_seconds": 45.867668816843754,
+        "group_p95_seconds": 67.100741215
+      },
+      {
+        "wave": 1,
+        "versions": [
+          7
+        ],
+        "seconds": 63.19109931099999,
+        "tokens": 524288,
+        "tokens_per_second": 8296.864680572737,
+        "group_mean_seconds": 43.30300423439063,
+        "group_p95_seconds": 62.82321296299999
+      },
+      {
+        "wave": 2,
+        "versions": [
+          4
+        ],
+        "seconds": 72.714006721,
+        "tokens": 524288,
+        "tokens_per_second": 7210.275208897053,
+        "group_mean_seconds": 41.48478477892188,
+        "group_p95_seconds": 62.605334927
+      },
+      {
+        "wave": 3,
+        "versions": [
+          7
+        ],
+        "seconds": 59.80933875400001,
+        "tokens": 524279,
+        "tokens_per_second": 8765.838427948454,
+        "group_mean_seconds": 38.96352935932813,
+        "group_p95_seconds": 59.610794732000016
+      }
+    ]
+  },
+  "affinity_vs_naive_ratios": {
+    "output_tokens_per_second": 1.2443635602466065,
+    "group_mean_seconds": 0.9564050932591727,
+    "group_p95_seconds": 0.8353658999031042,
+    "measured_seconds": 0.8037808035016512
+  },
+  "raw_replay_sha256": "98e4a1ddf087a02fae6d9cc737863779f87ca9d7ac9454c0b350b916ba07cedb",
+  "router_commit": "25192e7"
+}

@@ -1,9 +1,55 @@
 # LoRA routing benchmark — 2026-10-11
 
-The completed independent-training comparison reduced mean rollout latency by
-27.7% and p95 rollout latency by 25.5%. End-to-end training throughput did not
-improve: it was 2.0% lower. Training/publication queueing differed between arms,
-so the training experiment alone does not isolate the router's contribution.
+The final router delivered **24.4% higher inference throughput** and **16.5% lower
+p95 request-group latency** in a matched replay of trained adapters. All four
+waves improved throughput. The independent-training comparison also observed
+27.7% lower mean rollout latency, but end-to-end training throughput was 2.0%
+lower. Training/publication queueing differed between arms, so those training
+numbers alone do not isolate the router's contribution.
+
+## Matched inference replay
+
+Both arms replayed the same 16 adapters from the completed naive training run,
+with identical immutable snapshot manifests, prompts, seeds, and per-wave
+submissions. Each arm used eight H200 replicas and eight independent router
+caches in a four-CPU replay worker. All eight replicas had to pass readiness,
+then each adapter received a short warmup before timing began. Four waves each
+submitted 1,024 generations capped at 512 tokens. Snapshot versions alternated
+4, 7, 4, 7: the first two post-training publications in this run.
+
+| Metric | Naive | Affinity | Change |
+| --- | ---: | ---: | ---: |
+| Output tokens | 2,096,733 | 2,097,143 | +0.02% |
+| Total measured wave time | 328.6 s | 264.1 s | -19.6% |
+| Output tokens/s | 6,381 | 7,940 | **+24.4%** |
+| Mean request-group latency | 44.34 s | 42.40 s | -4.4% |
+| p95 request-group latency | 76.17 s | 63.63 s | **-16.5%** |
+
+Throughput is total generated tokens divided by the sum of all measured wave
+durations. Group latency covers all eight generations in a request; p95 is
+computed over all 512 groups per arm. Startup, warmup, and training are excluded.
+Discovery refreshes and adapter registrations during measured requests remain
+included. The wave barrier belongs to this inference-only replay and is not used
+in the independent training benchmark.
+
+| Wave / snapshot | Naive tokens/s | Affinity tokens/s | Gain |
+| --- | ---: | ---: | ---: |
+| 0 / 4 | 6,693 | 7,663 | +14.5% |
+| 1 / 7 | 5,411 | 8,297 | +53.3% |
+| 2 / 4 | 6,822 | 7,210 | +5.7% |
+| 3 / 7 | 6,843 | 8,766 | +28.1% |
+
+This is one paired experiment with four waves, not a confidence interval or a
+claim across all workloads. The varying per-wave gains are retained rather than
+selecting the best wave. Both arms completed every group with exact-version
+checks and finite, aligned output logprobs. The final router revision was
+`25192e7`. The workload hash is identical across arms.
+
+- [Replay summary and hashes](../scripts/benchmarks/lora_routing/results/replay.json)
+- [Every measured request group](../scripts/benchmarks/lora_routing/results/replay-groups.csv)
+
+`report_replay.py RAW_REPLAY.json --output SUMMARY.json --groups-csv GROUPS.csv`
+recomputes these results from `replay.py` output.
 
 ## Workload and resources
 
@@ -107,10 +153,23 @@ coalesces those requests behind one three-second-bounded refresh, then falls bac
 if observations remain stale. Fresh requests remain nonblocking. The supplemental
 replay tests this final behavior; the training numbers above precede that fix.
 
+The first replay attempt correctly rejected guessed, nonexistent snapshot
+versions. The harness now discovers and checks immutable manifests before running.
+A second attempt stopped when one pool missed the five-minute readiness limit;
+the limit is now ten minutes, with a thirty-minute function deadline. Neither
+attempt contributes performance data. The final replay reused initialized GPU
+pools when refreshing CPU workers for the idle-burst fix.
+
 A CPU microbenchmark of 100,000 acquire/release pairs measured 15.21 microseconds
 per request with eight replicas and 52.38 microseconds with 32 replicas. This
 measures local selection/reservation, excluding asynchronous observation traffic,
 HTTP, tokenization, and generation. Run `benchmark_router.py` to reproduce it.
+
+Task-level resource auditing, including interrupted trials and replay attempts,
+recorded a peak of **32 allocated GPUs**, below the requested 48-GPU limit. All
+benchmark GPUs were released at completion. The final
+[resource audit](../scripts/benchmarks/lora_routing/results/resource-audit.json)
+records zero active GPUs.
 
 See [the routing design and reproduction guide](lora-routing.md) for deployment,
 independent training clients, observation collection, and report commands.

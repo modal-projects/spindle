@@ -1,7 +1,8 @@
 """Controlled inference replay of adapters from a completed training run.
 
 This supplements the independent training benchmark; it does not measure training
-throughput. Both arms receive identical prompts, weights, seeds and arrivals.
+throughput. Both arms receive identical prompts, weights, seeds and per-wave
+submissions.
 """
 
 import argparse
