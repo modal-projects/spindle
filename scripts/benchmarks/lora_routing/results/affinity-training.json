@@ -111,7 +111,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002515970030799508
         }
-      ]
+      ],
+      "first_rollout_at": 1791702763.5530167,
+      "completed_at": 1791703305.698223,
+      "training_run_seconds": 542.145206451416
     },
     {
       "client": "client-01",
@@ -172,7 +175,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.004346488043665886
         }
-      ]
+      ],
+      "first_rollout_at": 1791702795.2178013,
+      "completed_at": 1791703396.7208617,
+      "training_run_seconds": 601.5030603408813
     },
     {
       "client": "client-02",
@@ -233,7 +239,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002319422783330083
         }
-      ]
+      ],
+      "first_rollout_at": 1791702798.9370377,
+      "completed_at": 1791703564.4239116,
+      "training_run_seconds": 765.4868738651276
     },
     {
       "client": "client-03",
@@ -294,7 +303,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0030731011647731066
         }
-      ]
+      ],
+      "first_rollout_at": 1791702802.2359269,
+      "completed_at": 1791703656.1075487,
+      "training_run_seconds": 853.8716218471527
     },
     {
       "client": "client-04",
@@ -355,7 +367,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.004501787014305592
         }
-      ]
+      ],
+      "first_rollout_at": 1791702820.464967,
+      "completed_at": 1791703965.3798053,
+      "training_run_seconds": 1144.9148383140564
     },
     {
       "client": "client-05",
@@ -416,7 +431,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0
         }
-      ]
+      ],
+      "first_rollout_at": 1791702820.5267806,
+      "completed_at": 1791703668.2862582,
+      "training_run_seconds": 847.7594776153564
     },
     {
       "client": "client-06",
@@ -477,7 +495,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002511695958673954
         }
-      ]
+      ],
+      "first_rollout_at": 1791702850.5606334,
+      "completed_at": 1791703781.0411072,
+      "training_run_seconds": 930.4804737567902
     },
     {
       "client": "client-07",
@@ -538,7 +559,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.003504170337691903
         }
-      ]
+      ],
+      "first_rollout_at": 1791702853.7971132,
+      "completed_at": 1791703974.4321518,
+      "training_run_seconds": 1120.635038614273
     },
     {
       "client": "client-08",
@@ -599,7 +623,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002951487898826599
         }
-      ]
+      ],
+      "first_rollout_at": 1791703058.1625066,
+      "completed_at": 1791704065.9523258,
+      "training_run_seconds": 1007.7898192405701
     },
     {
       "client": "client-09",
@@ -660,7 +687,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0023480826057493687
         }
-      ]
+      ],
+      "first_rollout_at": 1791703063.5096762,
+      "completed_at": 1791704096.2668533,
+      "training_run_seconds": 1032.7571771144867
     },
     {
       "client": "client-10",
@@ -721,7 +751,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0038382469210773706
         }
-      ]
+      ],
+      "first_rollout_at": 1791703058.7312198,
+      "completed_at": 1791704104.519225,
+      "training_run_seconds": 1045.7880051136017
     },
     {
       "client": "client-11",
@@ -782,7 +815,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002596975304186344
         }
-      ]
+      ],
+      "first_rollout_at": 1791703063.935495,
+      "completed_at": 1791703986.862574,
+      "training_run_seconds": 922.9270792007446
     },
     {
       "client": "client-12",
@@ -843,7 +879,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0033367332071065903
         }
-      ]
+      ],
+      "first_rollout_at": 1791703061.9459894,
+      "completed_at": 1791704144.5115783,
+      "training_run_seconds": 1082.5655889511108
     },
     {
       "client": "client-13",
@@ -904,7 +943,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0025455604773014784
         }
-      ]
+      ],
+      "first_rollout_at": 1791703247.722891,
+      "completed_at": 1791704104.5786538,
+      "training_run_seconds": 856.855762720108
     },
     {
       "client": "client-14",
@@ -965,7 +1007,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0026588994078338146
         }
-      ]
+      ],
+      "first_rollout_at": 1791703248.94043,
+      "completed_at": 1791704154.1294868,
+      "training_run_seconds": 905.1890568733215
     },
     {
       "client": "client-15",
@@ -1026,7 +1071,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0
         }
-      ]
+      ],
+      "first_rollout_at": 1791703245.080323,
+      "completed_at": 1791704104.6661377,
+      "training_run_seconds": 859.5858147144318
     }
   ],
   "replica_observations": {
@@ -1037,5 +1085,8 @@
     "fraction_busy_replica_time_over_adapter_slots": 0.0016380799729477566,
     "measurement": "Active includes queued requests. Registrations are CPU loads, not GPU transfer counts."
   },
-  "run": "affinity-full-v3"
+  "run": "affinity-full-v3",
+  "throughput_measurement": "First client rollout to last client completion; includes later clients' initialization and startup staggering. Not steady-state throughput.",
+  "first_rollout_spread_seconds": 485.3874132633209,
+  "client_training_run_mean_seconds": 907.5159309208393
 }

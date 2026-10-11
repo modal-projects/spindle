@@ -3,9 +3,10 @@
 The final router delivered **24.4% higher inference throughput** and **16.5% lower
 p95 request-group latency** in a matched replay of trained adapters. All four
 waves improved throughput. The independent-training comparison also observed
-27.7% lower mean rollout latency, but end-to-end training throughput was 2.0%
-lower. Training/publication queueing differed between arms, so those training
-numbers alone do not isolate the router's contribution.
+27.7% lower mean rollout latency, but output tokens per experiment wall-clock
+second were 2.0% lower. That denominator includes unequal initialization of later
+clients: their first-rollout spread was 485 s with affinity versus 139 s with
+naive routing. This is not a measured steady-state training regression or gain.
 
 ## Matched inference replay
 
@@ -70,11 +71,16 @@ include queued work and must not be read as simultaneous GPU sequences.
 
 The frozen dataset rows, tokenizer revision, prompt suffix, sampling seeds and
 parameters match across arms; the three workload hashes are recorded in the
-machine-readable results. Measured intervals exclude deployment and client
-initialization, start at the first training rollout, and end after the last
+machine-readable results. Measured intervals start at the first training rollout,
+after the first client's initialization, and end after the last
 client's final updated sampling policy is ready. Per-client step timing includes
 rollout, training queueing, optimizer work, and publication. It may overlap other
 steps because clients prefetch independently.
+
+Later clients initialize while earlier clients are already training. Their
+creation, initial publication, and warmup therefore remain inside the global
+measurement window. Earlier descriptions incorrectly said client initialization
+was excluded without this qualification.
 
 Pools were deployed in advance, but the training harness did not gate on all
 eight replicas becoming healthy. The baseline's first eight-replica observation
@@ -88,7 +94,9 @@ another reason to keep the training result separate from the fully warmed replay
 | Completed optimizer updates | 64 | 64 | — |
 | Generated output tokens | 11,972,813 | 11,984,417 | +0.1% |
 | Measured elapsed time | 1,361.4 s | 1,390.6 s | +2.1% |
-| Output tokens/s including training | 8,794 | 8,618 | -2.0% |
+| Output tokens/s including training and later-client initialization | 8,794 | 8,618 | -2.0% |
+| First-to-last client rollout start | 139.4 s | 485.4 s | +346.0 s |
+| Mean per-client four-update duration, from its own first rollout | 1,138.5 s | 907.5 s | -20.3% |
 | Mean rollout batch latency | 274.9 s | 198.8 s | -27.7% |
 | Median rollout batch latency | 274.7 s | 195.8 s | -28.7% |
 | p95 rollout batch latency | 462.8 s | 345.0 s | -25.5% |
@@ -114,11 +122,33 @@ updates; affinity had 65 and 43. Output logprobs were finite and aligned to toke
 exact adapter/version response checks remained enabled. These short runs validate
 real learning operations, not convergence or identical model quality.
 
-Mean client-observed training spans were 47.6 s (naive) and 99.2 s (affinity);
-publication spans were 9.0 s and 32.9 s. These spans include queueing. Consequently,
+The first rollout finished after 94.8 s with naive routing and 47.6 s with
+affinity. Client launches continued until about 79 s in both arms. In the affinity
+run, training thus began before the later clients had initialized. The first
+backend forward/backward took 117.8 s versus 82.6 s in the naive run. Model
+acceptance and forward/backward execute in the same
+[engine work loop](../src/spindle/engine/server.py#L438), so a running training
+operation delays subsequent model acceptance. Several later affinity clients
+waited 91–120 s for creation and 91–239 s for initial publication. Initial
+publication took approximately 4–6 s per client in the naive run.
+
+These timestamps and the execution path explain an initialization/queueing
+interaction; they do not prove steady-state trainer compute became slower.
+Mean client-observed training spans were 47.6 s (naive) and 99.2 s (affinity).
+Publication spans **after optimizer updates**, excluding the initial publication,
+were 10.0 s and 20.2 s. The previously reported 9.0 s and 32.9 s included initial
+publication and should not be read as post-update publication costs. These spans
+include queueing. Consequently,
 different training timing also changed inference arrivals. Treat the latency
 comparison as an observed system result, not a controlled causal estimate or a
 claim of improved end-to-end training throughput.
+
+Per-client four-update duration was 20.3% lower on average, but clients also
+experienced different concurrency; that number is not a replacement throughput
+claim. A controlled training comparison must initialize clients and warm the
+trainer before measurement, then retain the same staggered, independent training
+loops without cross-client step barriers. Such a training rerun has not yet been
+performed.
 
 The summaries retain every client's rollout, step, training, publication, reward,
 gradient, and policy-version measurements:

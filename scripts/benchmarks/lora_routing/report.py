@@ -88,6 +88,10 @@ def summarize(root, require_independence=False):
         clients.append(
             {
                 "client": folder.name,
+                "first_rollout_at": min(rollout_starts.values()),
+                "completed_at": complete[-1]["time"],
+                "training_run_seconds": complete[-1]["time"]
+                - min(rollout_starts.values()),
                 "updates": len(updates),
                 "independent_prefetch": independent,
                 "nonzero_gradient_updates": sum(
@@ -135,6 +139,12 @@ def summarize(root, require_independence=False):
         "measured_start": min(starts),
         "measured_end": max(ends),
         "output_tokens_per_second_including_training": tokens / elapsed,
+        "throughput_measurement": "First client rollout to last client completion; includes later clients' initialization and startup staggering. Not steady-state throughput.",
+        "first_rollout_spread_seconds": max(c["first_rollout_at"] for c in clients)
+        - min(c["first_rollout_at"] for c in clients),
+        "client_training_run_mean_seconds": statistics.mean(
+            c["training_run_seconds"] for c in clients
+        ),
         "step_mean_seconds": statistics.mean(all_steps),
         "step_p50_seconds": statistics.median(all_steps),
         "step_p95_seconds": percentile(all_steps, 0.95),

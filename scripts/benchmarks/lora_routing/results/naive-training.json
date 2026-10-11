@@ -111,7 +111,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.00388296227902174
         }
-      ]
+      ],
+      "first_rollout_at": 1791703247.1806617,
+      "completed_at": 1791704367.9351492,
+      "training_run_seconds": 1120.7544875144958
     },
     {
       "client": "client-01",
@@ -172,7 +175,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.006207724567502737
         }
-      ]
+      ],
+      "first_rollout_at": 1791703283.3470037,
+      "completed_at": 1791704367.931541,
+      "training_run_seconds": 1084.584537267685
     },
     {
       "client": "client-02",
@@ -233,7 +239,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0044883550144732
         }
-      ]
+      ],
+      "first_rollout_at": 1791703283.2737324,
+      "completed_at": 1791704192.5238354,
+      "training_run_seconds": 909.2501029968262
     },
     {
       "client": "client-03",
@@ -294,7 +303,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.004124375060200691
         }
-      ]
+      ],
+      "first_rollout_at": 1791703287.1948755,
+      "completed_at": 1791704265.4531984,
+      "training_run_seconds": 978.2583229541779
     },
     {
       "client": "client-04",
@@ -355,7 +367,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.002148882718756795
         }
-      ]
+      ],
+      "first_rollout_at": 1791703296.5363128,
+      "completed_at": 1791704522.250011,
+      "training_run_seconds": 1225.7136981487274
     },
     {
       "client": "client-05",
@@ -416,7 +431,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.003376147011294961
         }
-      ]
+      ],
+      "first_rollout_at": 1791703341.5353203,
+      "completed_at": 1791704567.8746457,
+      "training_run_seconds": 1226.339325428009
     },
     {
       "client": "client-06",
@@ -477,7 +495,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.004123431630432606
         }
-      ]
+      ],
+      "first_rollout_at": 1791703367.3946493,
+      "completed_at": 1791704595.0129755,
+      "training_run_seconds": 1227.6183261871338
     },
     {
       "client": "client-07",
@@ -538,7 +559,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0030160839669406414
         }
-      ]
+      ],
+      "first_rollout_at": 1791703335.1788704,
+      "completed_at": 1791704465.5574782,
+      "training_run_seconds": 1130.378607749939
     },
     {
       "client": "client-08",
@@ -599,7 +623,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.006603021640330553
         }
-      ]
+      ],
+      "first_rollout_at": 1791703341.9571345,
+      "completed_at": 1791704521.0738378,
+      "training_run_seconds": 1179.1167032718658
     },
     {
       "client": "client-09",
@@ -660,7 +687,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.005439611617475748
         }
-      ]
+      ],
+      "first_rollout_at": 1791703340.7805889,
+      "completed_at": 1791704299.801258,
+      "training_run_seconds": 959.020669221878
     },
     {
       "client": "client-10",
@@ -721,7 +751,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0026530432514846325
         }
-      ]
+      ],
+      "first_rollout_at": 1791703344.9298623,
+      "completed_at": 1791704538.8742244,
+      "training_run_seconds": 1193.9443621635437
     },
     {
       "client": "client-11",
@@ -782,7 +815,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0
         }
-      ]
+      ],
+      "first_rollout_at": 1791703336.4309137,
+      "completed_at": 1791704465.4250517,
+      "training_run_seconds": 1128.9941380023956
     },
     {
       "client": "client-12",
@@ -843,7 +879,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.005759852938354015
         }
-      ]
+      ],
+      "first_rollout_at": 1791703341.5589502,
+      "completed_at": 1791704522.1427093,
+      "training_run_seconds": 1180.5837590694427
     },
     {
       "client": "client-13",
@@ -904,7 +943,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0
         }
-      ]
+      ],
+      "first_rollout_at": 1791703346.4049723,
+      "completed_at": 1791704567.7404692,
+      "training_run_seconds": 1221.3354969024658
     },
     {
       "client": "client-14",
@@ -965,7 +1007,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.004615250043570995
         }
-      ]
+      ],
+      "first_rollout_at": 1791703386.55315,
+      "completed_at": 1791704608.592871,
+      "training_run_seconds": 1222.0397210121155
     },
     {
       "client": "client-15",
@@ -1026,7 +1071,10 @@
           "update_successful:mean": 1.0,
           "grad_norm:mean": 0.0
         }
-      ]
+      ],
+      "first_rollout_at": 1791703381.1336074,
+      "completed_at": 1791704608.5970576,
+      "training_run_seconds": 1227.4634501934052
     }
   ],
   "replica_observations": {
@@ -1037,5 +1085,8 @@
     "fraction_busy_replica_time_over_adapter_slots": 0.17564397581316324,
     "measurement": "Active includes queued requests. Registrations are CPU loads, not GPU transfer counts."
   },
-  "run": "naive-full-v4"
+  "run": "naive-full-v4",
+  "throughput_measurement": "First client rollout to last client completion; includes later clients' initialization and startup staggering. Not steady-state throughput.",
+  "first_rollout_spread_seconds": 139.37248826026917,
+  "client_training_run_mean_seconds": 1138.4622317552567
 }
