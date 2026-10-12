@@ -190,7 +190,6 @@ install_qwen3_vl_cp_position_ids(
     bridge_model=qwen3_vl_model, miles_qwen3_vl=miles_qwen3_vl
 )
 
-# Before any model is built: the MoE slot-routing hooks are created at build time.
 host_syncs.install()
 
 
