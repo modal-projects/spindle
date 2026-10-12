@@ -218,10 +218,12 @@ class FFTSnapshotStore(Store):
         self._check_run(ref)
         self.bulletin.advance(ref)
 
-    def claim(self, run_id: str) -> None:
-        if run_id != self.run_id:
-            raise ValueError(f"store is scoped to run {self.run_id!r}, got {run_id!r}")
-        self.bulletin.claim(run_id)
+    def claim(self, boot: VersionRef) -> None:
+        if boot.run_id != self.run_id:
+            raise ValueError(f"store is scoped to run {self.run_id!r}, got {boot!r}")
+        if boot.version != 0:
+            raise ValueError(f"FFT runs boot at version 0, got {boot!r}")
+        self.bulletin.claim(boot.run_id)
 
     def read_manifest(self, ref: VersionRef) -> VersionManifest:
         self._check_run(ref)

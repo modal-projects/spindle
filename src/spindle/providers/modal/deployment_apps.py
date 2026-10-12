@@ -265,7 +265,6 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     if lora
                     else start_fft_sidecar(
                         **kwargs,
-                        model_path=deployment.asset_path,
                         run_id=pool.model_id,
                         pinned_version=None if pool.latest else pool.version,
                     )

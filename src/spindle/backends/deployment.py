@@ -54,7 +54,8 @@ SGLANG_MANAGED = {
     "enable_lora",
     "max_lora_rank",
     "lora_target_modules",
-    "enable_cpu_weight_cache",
+    "weight_update_staging",
+    "weight_version",
     "api_key",
     "pp_size",
     "lora_paths",
@@ -154,5 +155,5 @@ def resolve_backend_settings(spec, asset_path):
         inference.setdefault("max_loaded_loras", 64)
         inference.setdefault("max_loras_per_batch", 8)
     else:
-        inference["enable_cpu_weight_cache"] = True
+        inference.update(weight_update_staging="cpu", weight_version="0")
     return trainer, inference
