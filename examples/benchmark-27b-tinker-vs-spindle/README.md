@@ -157,11 +157,9 @@ For TP2 inference experiments, change `inference_gpus_per_node` and
 `sglang_cfg.tp_size` together, and update admission limits as appropriate. The
 original TP2 stage never completed and contributed no numbers to the table.
 
-CPU checks (no GPU jobs or paid requests):
+Validate the deployment recipe locally before deploying:
 
 ```bash
-uv pip install --python .venv-bench-spindle/bin/python pytest
-.venv-bench-spindle/bin/python -m pytest -q examples/benchmark-27b-tinker-vs-spindle/tests
 .venv-bench-spindle/bin/python -m spindle.deployment_cli config validate \
   examples/benchmark-27b-tinker-vs-spindle/deployment.py
 ```
