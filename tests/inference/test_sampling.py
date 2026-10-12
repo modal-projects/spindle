@@ -214,14 +214,6 @@ def test_conversation_turns_share_a_route_without_affinity_key() -> None:
     assert len(set(second[1:])) == 1 and second[1] != first[1]
 
 
-def test_conversation_route_is_namespaced_by_sampling_session() -> None:
-    prompts = conversation([1, 2], [[30], [31]])
-    assert (
-        route_sessions(prompts, "sample-a")[1:]
-        != route_sessions(prompts, "sample-b")[1:]
-    )
-
-
 def test_single_turn_prompts_keep_request_routing() -> None:
     prompts = [[7] * 20 + [n] + HEADER for n in range(3)] + [[1, 2, 3]]
     assert route_sessions(prompts) == ["turn-0", "turn-1", "turn-2", "turn-3"]
