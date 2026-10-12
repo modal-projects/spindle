@@ -205,7 +205,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         raise ValueError("pool does not match deployment")
     app = modal.App(pool.app_name)
     options = deployment.inference_settings
-    minimum = recipe.inference_min_replicas
+    minimum = 0 if lora else recipe.inference_min_replicas
     maximum = recipe.inference_max_replicas
     window = recipe.inference_scaledown_window_s
     if isinstance(pool, FFTPoolSpec):

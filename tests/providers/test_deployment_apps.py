@@ -420,7 +420,7 @@ def test_declared_compute_settings_reach_modal(builders):
         45000,
         90,
     )
-    assert (server["min_containers"], server["max_containers"]) == (1, 3)
+    assert (server["min_containers"], server["max_containers"]) == (0, 3)
 
 
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):

@@ -6,6 +6,7 @@ class Config(Parent):
     overrides = {
         "max_context_length": 65536,
         "miles_cfg.tensor_model_parallel_size": 2,
+        "inference_min_replicas": 8,
     }
 
 

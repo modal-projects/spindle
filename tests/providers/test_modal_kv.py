@@ -162,3 +162,17 @@ def test_lora_pool_registry_supports_publication_and_cleanup():
         assert await routed.list_items("lora_pool:") == ()
 
     asyncio.run(run())
+
+
+def test_lora_pool_minimum_is_a_separate_key_family():
+    async def run():
+        stores = {name: InMemoryKeyValueStore() for name in kv.STORE_NAMES}
+        routed = kv.RoutedKeyValueStore(stores)
+        await routed.put("lora_pool:spindle-test", {"definition_id": "test"})
+        await routed.put("lora_pool_minimum:spindle-test", {"minimum": 8})
+        assert await routed.get("lora_pool_minimum:spindle-test") == {"minimum": 8}
+        assert [key for key, _ in await routed.list_items("lora_pool:")] == [
+            "lora_pool:spindle-test"
+        ]
+
+    asyncio.run(run())
