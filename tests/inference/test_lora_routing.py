@@ -22,7 +22,10 @@ def test_hot_adapter_stays_local_and_hot_load_spills_without_losing_reservations
     pool = router(
         [Replica("a", recent=("model/weight_v000001",)), Replica("b")], target=4
     )
-    routes = [pool.acquire("model", "model/weight_v000001", str(i)) for i in range(12)]
+    routes = [
+        pool.select_destination("model", "model/weight_v000001", str(i))
+        for i in range(12)
+    ]
     assert routes[:2] == ["a"] * 2
     assert routes[2] == "b"
     assert set(routes) == {"a", "b"}
@@ -36,40 +39,40 @@ def test_rendezvous_is_independent_of_worker_and_discovery_order():
     replicas = [Replica(str(i)) for i in range(8)]
     left, right = router(replicas), router(replicas[::-1])
     for i in range(50):
-        assert left.acquire(str(i), f"{i}/v1", "request") == right.acquire(
+        assert left.select_destination(
             str(i), f"{i}/v1", "request"
-        )
+        ) == right.select_destination(str(i), f"{i}/v1", "request")
 
 
 def test_full_working_set_is_avoided_on_cold_placement():
     pool = router([Replica("a"), Replica("b")], slots=1)
-    home = pool.acquire("model", "new", "request")
+    home = pool.select_destination("model", "new", "request")
     pool.release(home, "new")
     pool.replicas[home].adapters = {"other": 1}
-    assert pool.acquire("model", "new", "request") != home
+    assert pool.select_destination("model", "new", "request") != home
 
 
 def test_versions_and_models_do_not_share_warmth():
     pool = router([Replica("a"), Replica("b")])
-    home = pool.acquire("model", "model/v2", "request")
+    home = pool.select_destination("model", "model/v2", "request")
     pool.release(home, "model/v2")
     other = "a" if home == "b" else "b"
     pool.replicas[other].recent = ("another-model/v2", "model/v1")
-    assert pool.acquire("model", "model/v2", "request") == home
+    assert pool.select_destination("model", "model/v2", "request") == home
 
 
 def test_stale_or_failed_replicas_fall_back_and_refresh_removes_departed_nodes():
     async def run():
         pool = router([Replica("a")])
-        chosen = pool.acquire("m", "v1", "r")
+        chosen = pool.select_destination("m", "v1", "r")
         pool.release(chosen, "v1", failed=True)
-        assert pool.acquire("m", "v1", "r") is None
+        assert pool.select_destination("m", "v1", "r") is None
         pool.replicas = {"b": Replica("b")}
         pool.updated -= 20
-        assert pool.acquire("m", "v1", "r") is None
+        assert pool.select_destination("m", "v1", "r") is None
         pool.discover.return_value = [Replica("c")]
         await pool._refresh()
-        assert pool.acquire("m", "v1", "r") == "c"
+        assert pool.select_destination("m", "v1", "r") == "c"
 
     asyncio.run(run())
 
@@ -96,7 +99,7 @@ def test_refresh_is_coalesced_and_does_not_block_warm_requests():
         pool.next_refresh = 0
         release.clear()
         await asyncio.wait_for(pool.refresh(), 0.1)
-        assert pool.acquire("m", "v", "r") == "a"
+        assert pool.select_destination("m", "v", "r") == "a"
         release.set()
         await pool.pending
 
@@ -189,7 +192,7 @@ def test_new_reservations_add_to_observed_load_without_double_counting_old_ones(
         # represented in its active count.
         pool.local["a"] = Counter({"m/v1": 50})
         await pool._refresh()
-        routes = [pool.acquire("m", "m/v1", str(i)) for i in range(34)]
+        routes = [pool.select_destination("m", "m/v1", str(i)) for i in range(34)]
         assert routes[:33] == ["a"] * 33
         assert routes[33] == "b"
 
@@ -215,13 +218,13 @@ def test_burst_after_idle_waits_for_one_refresh_and_failed_discovery_falls_back(
         release.set()
         await asyncio.gather(*waiting)
         assert pool.pending is pending
-        assert pool.acquire("m", "m/v1", "r") == "warm"
+        assert pool.select_destination("m", "m/v1", "r") == "warm"
         pool.release("warm", "m/v1")
 
         pool.updated -= 20
         pool.next_refresh = 0
         pool.discover = AsyncMock(side_effect=TimeoutError)
         await pool.refresh()
-        assert pool.acquire("m", "m/v1", "r") is None
+        assert pool.select_destination("m", "m/v1", "r") is None
 
     asyncio.run(run())

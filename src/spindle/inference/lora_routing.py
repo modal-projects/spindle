@@ -92,7 +92,8 @@ class LoraRouter:
         }
         self.local = {h: c for h, c in self.local.items() if c or h in self.replicas}
 
-    def acquire(self, model: str, adapter: str, affinity: str) -> str | None:
+    def select_destination(self, model: str, adapter: str, affinity: str) -> str | None:
+        """Choose a replica and reserve its load until release() is called."""
         now = time.monotonic()
         if now - self.updated > self.stale_after:
             return None

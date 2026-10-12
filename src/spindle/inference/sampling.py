@@ -293,7 +293,7 @@ async def _sample_one(
         upstream = None
         if lora_router is not None:
             await lora_router.refresh()
-            upstream = lora_router.acquire(
+            upstream = lora_router.select_destination(
                 model_id or "base", adapter, cache_affinity_id or routing_session_id
             )
             if upstream is not None:

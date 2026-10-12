@@ -59,7 +59,7 @@ def test_flash_discovery_preserves_port_auth_and_checks_actual_replica(monkeypat
         discover.assert_awaited_once()
         incorrect_proxy = True
         await router._refresh()
-        assert router.acquire("model", "adapter", "affinity") is None
+        assert router.select_destination("model", "adapter", "affinity") is None
 
     asyncio.run(run())
 
@@ -72,6 +72,6 @@ def test_zero_replica_discovery_does_not_prevent_flash_cold_start(monkeypatch):
         monkeypatch.setattr(lora_routing, "proxy_auth_headers", lambda: {})
         pool = lora_routing.create_router("app", "https://gateway", target=16, slots=8)
         await pool.refresh()
-        assert pool.acquire("m", "v1", "r") is None
+        assert pool.select_destination("m", "v1", "r") is None
 
     asyncio.run(run())

@@ -23,11 +23,11 @@ def main():
         for i in range(count):
             model = f"model-{i % 16}"
             adapter = model + "/v1"
-            route = router.acquire(model, adapter, f"request-{i}")
+            route = router.select_destination(model, adapter, f"request-{i}")
             router.release(route, adapter)
         elapsed = time.perf_counter() - started
         print(
-            f"{replicas} replicas: {count} acquire/release pairs, {elapsed / count * 1e6:.2f} us/request"
+            f"{replicas} replicas: {count} selection/release pairs, {elapsed / count * 1e6:.2f} us/request"
         )
 
 
