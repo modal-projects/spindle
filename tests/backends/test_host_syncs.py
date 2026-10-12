@@ -234,6 +234,13 @@ def test_install_skips_unpinned_bridge_and_honors_flag(monkeypatch):
     assert host_syncs.install() == {"multi_lora": False, "geglu": False}
 
 
+def test_flag_is_forwarded_to_the_trainer(monkeypatch):
+    from spindle.providers.modal.deployment import trainer_deployment_env
+
+    monkeypatch.setenv(host_syncs.ENV_FLAG, "0")
+    assert trainer_deployment_env()[host_syncs.ENV_FLAG] == "0"
+
+
 def _fused():
     calls = []
 
