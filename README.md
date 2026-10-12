@@ -66,7 +66,7 @@ The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/w
 Create one, export the printed `Modal-Key` and `Modal-Secret`, and allow it in your environment:
 
 ```bash
-modal workspace proxy-tokens create --name spindle
+modal workspace proxy-tokens create
 export MODAL_PROXY_TOKEN_ID='<Modal-Key>'
 export MODAL_PROXY_TOKEN_SECRET='<Modal-Secret>'
 modal workspace proxy-tokens allow "$MODAL_PROXY_TOKEN_ID" "$MODAL_ENVIRONMENT"
