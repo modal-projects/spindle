@@ -422,16 +422,7 @@ MIN_CONVERSATION_PREFIX_TOKENS = 16
 
 
 def _conversation_affinity_id(task: dict[str, Any], prompt: list[int]) -> str | None:
-    """Route every turn after the first of a multi-turn conversation to one replica.
-
-    Without a ``cache_affinity_key``, each turn would land on a random replica and
-    recompute the whole conversation. A chat prompt ends with the template's generation
-    header (such as ``<|start|>assistant``), which also opens each earlier assistant
-    message. The prompt up to the end of that header's second occurrence therefore
-    includes the conversation's first reply: it is the same for every later turn and
-    differs between conversations. First turns and single-turn prompts, which contain
-    the header once, keep per-request routing.
-    """
+    """Route every turn after the first of a multi-turn conversation to one replica."""
     n = CONVERSATION_MARKER_TOKENS
     if len(prompt) < 2 * n:
         return None
