@@ -19,10 +19,12 @@ from tinker.types.encoded_text_chunk import EncodedTextChunk
 from tinker.types.forward_backward_input import ForwardBackwardInput
 
 from spindle.encoding import canonical_json
+from spindle.proto.responses import EncodedResult, encode_forward_backward_exact
 
 from .api import Command, OperationKind
 
 TRAINING_BATCH_CONTENT_TYPE = "application/vnd.spindle.training.v1"
+FORWARD_RESULTS_CONTENT_TYPE = "application/vnd.spindle.forward-results.v1"
 _MAGIC = b"SPND1\0"
 _SIZE = struct.Struct("<Q")
 
@@ -204,3 +206,33 @@ def decode_batch(body: bytes) -> tuple[Command, ...]:
         )
         for i in range(0, len(parts), 2)
     )
+
+
+def encode_results(results: tuple[object, ...], telemetry: dict | None = None) -> bytes:
+    """Frame forward/backward results: protobuf where it is exact, JSON otherwise."""
+    kinds, bodies = [], []
+    for result in results:
+        encoded = encode_forward_backward_exact(result)
+        if encoded is None:
+            kinds.append("json")
+            bodies.append(json.dumps(result).encode())
+        else:
+            kinds.append("protobuf")
+            bodies.append(encoded.body)
+    metadata = json.dumps({"kinds": kinds, "telemetry": telemetry}).encode()
+    return _bundle((metadata, *bodies))
+
+
+def decode_results(body: bytes) -> tuple[tuple[object, ...], dict | None]:
+    parts = _parts(body)
+    if not parts:
+        raise ValueError("missing result metadata")
+    metadata = json.loads(bytes(parts[0]))
+    kinds = metadata["kinds"]
+    if len(kinds) != len(parts) - 1:
+        raise ValueError("result count does not match result metadata")
+    results = tuple(
+        EncodedResult(bytes(part)) if kind == "protobuf" else json.loads(bytes(part))
+        for kind, part in zip(kinds, parts[1:], strict=True)
+    )
+    return results, metadata.get("telemetry")
