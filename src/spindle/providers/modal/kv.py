@@ -42,6 +42,7 @@ KEY_STORES = {
     "trainer_demand": "models",
     "engine_instance": "engines",
     "lora_pool": "engines",
+    "lora_pool_minimum": "engines",
     "deployment_failure": "engines",
     "engine_call": "engines",
     "engine_current": "engines",
