@@ -50,6 +50,8 @@ def _check_release(miles_commit: str) -> None:
 
 
 # The release validator assumes gated experts; ungated MLPs have no gate_proj.
+# Backport until the pinned Miles revision includes this upstream fix:
+# https://github.com/radixark/miles/pull/4032
 MILES_UNGATED_EXPERT_PATCH = (
     "--- a/miles/backends/megatron_utils/lora/bridge.py\n"
     "+++ b/miles/backends/megatron_utils/lora/bridge.py\n"

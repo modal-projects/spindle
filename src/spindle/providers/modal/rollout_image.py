@@ -229,18 +229,23 @@ SGLANG_LORA_LIFETIME_PATCH = (
     '         """\n'
 )
 
+# Backport until the pinned SGLang revision includes this upstream fix:
+# https://github.com/sgl-project/sglang/pull/43916
 SGLANG_UNGATED_EXPERT_PATCH = (
     "--- a/python/sglang/srt/lora/lora.py\n"
     "+++ b/python/sglang/srt/lora/lora.py\n"
-    "@@ -463,7 +463,11 @@\n"
+    "@@ -463,7 +463,14 @@\n"
     "         self, weight_names: List[str], weights: Dict[str, torch.Tensor]\n"
     "     ):\n"
     "         for weight_name in weight_names:\n"
     '-            if "gate_proj" in weight_name:\n'
     '+            if ".up_proj." in weight_name and self._is_non_gated_moe_weight(weight_name):\n'
-    "+                # Ungated routed experts have only one input projection.\n"
-    '+                merged_name = weight_name.replace(".up_proj.", ".gate_up_proj.")\n'
-    "+                weights[merged_name] = weights.pop(weight_name)\n"
+    '+                gate_name = weight_name.replace(".up_proj.", ".gate_proj.")\n'
+    "+                if weight_name in weights and gate_name not in weights:\n"
+    "+                    # Non-gated experts can export their single input projection\n"
+    "+                    # as up_proj. The fused MoE buffer still calls it gate_up_proj.\n"
+    '+                    merged_name = weight_name.replace(".up_proj.", ".gate_up_proj.")\n'
+    "+                    weights[merged_name] = weights.pop(weight_name)\n"
     '+            elif "gate_proj" in weight_name:\n'
     '                 up_name = weight_name.replace("gate_proj", "up_proj")\n'
     '                 gate_up_name = weight_name.replace("gate_proj", "gate_up_proj")\n'
@@ -251,8 +256,8 @@ SGLANG_UNGATED_EXPERT_PATCH = (
     "                 # Otherwise, infer target_modules from adapter configs.\n"
     "                 self.target_modules.update(adapter_target_modules)\n"
     " \n"
-    "+        # Ungated dense/shared experts retain an actual up_proj module, while\n"
-    "+        # routed experts use the fused gate_up_proj buffer. Preserve both targets.\n"
+    "+        # Normalization maps up_proj to gate_up_proj for fused MoE weights.\n"
+    "+        # Keep standalone dense/shared-expert up_proj modules eligible too.\n"
     '+        if "gate_up_proj" in self.target_modules and any(\n'
     '+            name.endswith(".up_proj") for name, _ in self.base_model.named_modules()\n'
     "+        ):\n"
