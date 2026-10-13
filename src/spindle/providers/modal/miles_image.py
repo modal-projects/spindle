@@ -1,6 +1,5 @@
 import json
 import re
-import shlex
 import subprocess
 from importlib.metadata import distribution
 from pathlib import Path
@@ -171,14 +170,15 @@ MILES_ADAPTER_SNAPSHOT_CPU_PATCH = (
 
 # The release has the DSA backend hooks but omits the TileLang implementation.
 # Upstream #5049 adds the kernels and their packed/context-parallel tests.
+# Fetching the commit by hash pins its exact contents, unlike a generated .diff.
 DSA_KERNEL_COMMIT = "4f657171b150510cafc48f429673fb1b2c4c098d"
-DSA_KERNEL_SHA256 = "416f29e8b9456a9377707066963bd924f68f38a155e8c9474bcaabb658dac182"
 DSA_KERNEL_INSTALL = (
-    "import hashlib, subprocess, urllib.request; "
-    f"url = 'https://github.com/NVIDIA/Megatron-LM/commit/{DSA_KERNEL_COMMIT}.diff'; "
-    "patch = urllib.request.urlopen(url, timeout=60).read(); "
-    f"assert hashlib.sha256(patch).hexdigest() == '{DSA_KERNEL_SHA256}'; "
-    f"subprocess.run(['git', '-C', '{MEGATRON_PATH}', 'apply', '-'], input=patch, check=True)"
+    f"git -C {MEGATRON_PATH} fetch --depth=2 --no-tags"
+    f" https://github.com/NVIDIA/Megatron-LM.git {DSA_KERNEL_COMMIT}"
+    f" && git -C {MEGATRON_PATH} diff --binary {DSA_KERNEL_COMMIT}^ {DSA_KERNEL_COMMIT}"
+    " > /tmp/dsa-kernels.diff"
+    f" && git -C {MEGATRON_PATH} apply /tmp/dsa-kernels.diff"
+    " && rm /tmp/dsa-kernels.diff"
 )
 
 
@@ -227,6 +227,6 @@ image = (
         + MILES_ADAPTER_SNAPSHOT_CPU_PATCH
         + "PATCH\n",
     )
-    .run_commands(f"python -c {shlex.quote(DSA_KERNEL_INSTALL)}")
+    .run_commands(DSA_KERNEL_INSTALL)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )
