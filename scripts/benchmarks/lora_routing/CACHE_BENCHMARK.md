@@ -1,7 +1,9 @@
 # Fixed-work LoRA and KV cache comparison
 
 The measured results and plots are in [the Notion report](https://app.notion.com/p/3f71e7f1694981628893fea0f75f2711?pvs=204)
-and [the repository results](../../../docs/lora-cache-routing-results.md).
+and [the current KV baseline comparison](../../../docs/lora-kv-training-replay-results.md).
+The [original three-policy comparison](../../../docs/lora-cache-routing-results.md)
+describes an earlier router.
 
 This benchmark compares the existing default Flash path, the current LoRA-aware
 router, and native Flash affinity using a stable conversation key. It does not
@@ -95,7 +97,10 @@ are saved with their error and cause a nonzero exit.
 
 Each arm produces JSON containing every request, physical attempt, output hash,
 version check, periodic replica observation, and initial/final counters. The
-report writes `summary.json`, `requests.csv`, and six PNG/PDF figures.
+report writes `summary.json`, `requests.csv`, and PNG/PDF figures for caches,
+latency, throughput, replica load, reconstructed engine occupancy, and (for
+DAPO replay) client rollouts and adapter working sets. Native prefix lookup
+count, failures, and mean/maximum duration are included when recorded.
 
 - KV hit ratio is total cached prompt tokens divided by total prompt tokens.
 - Hot-LoRA hit ratio is first-prefill GPU-resident requests divided by physical

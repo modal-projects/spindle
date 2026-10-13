@@ -4,8 +4,9 @@ LoRA sampling workers choose replicas locally. Each worker maintains a periodica
 refreshed snapshot of the pool and counts its own in-flight generations. There is
 no shared scheduler, distributed lock, or routing RPC on a warm request's path.
 
-See the [measured results](lora-routing-results.md) for the completed 16-adapter,
-27B-model training comparison, matched inference replay, and their limitations.
+See the [native KV baseline comparison](lora-kv-training-replay-results.md) for
+the current policy's mixed DAPO replay and its limitations. The earlier
+[training comparison](lora-routing-results.md) measured a preceding policy.
 
 `inference_lora_routing = "affinity"` enables routing; `"naive"` keeps the existing
 adapter-independent Flash behavior for comparisons. Base-model sampling and FFT

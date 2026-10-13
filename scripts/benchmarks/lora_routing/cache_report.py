@@ -190,6 +190,8 @@ def summarize(data):
     for row in rows:
         key = (row["adapter_index"], row.get("conversation", row["client"]))
         prefix_placements.setdefault(key, set()).add(row["stats"]["upstream"])
+    lookups = data.get("lookup_metrics", [])
+    lookup_count = sum(m["count"] for m in lookups)
     return {
         "requests": expected,
         "physical_attempts": attempts,
@@ -303,6 +305,12 @@ def summarize(data):
             np.mean([len(v) for v in prefix_placements.values()])
         ),
         "frontend_containers": len(set(data.get("frontends", []))),
+        "prefix_lookup_count": lookup_count,
+        "prefix_lookup_failures": sum(m["failures"] for m in lookups),
+        "prefix_lookup_mean_s": sum(m["seconds"] for m in lookups) / lookup_count
+        if lookup_count
+        else None,
+        "prefix_lookup_max_s": max((m["max_seconds"] for m in lookups), default=0),
         "rollout_mean_s": float(np.mean([r["seconds"] for r in data["rollouts"]]))
         if data.get("rollouts")
         else None,
