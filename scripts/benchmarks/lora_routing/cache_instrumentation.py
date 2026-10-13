@@ -103,6 +103,7 @@ def instrument(sglang_root, sidecar):
     @app.post("/benchmark-flush-cache")
     async def benchmark_flush_cache():
         response = await app.state.client.post("/flush_cache")
+        app.state.prefixes.clear()
         return Response(content=response.content, status_code=response.status_code)
 
     @app.get("/routing-state")

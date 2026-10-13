@@ -31,10 +31,15 @@ def totals(states):
 def summarize(data):
     assert data.get("error") is None, data.get("error")
     rows, config = data["requests"], data["config"]
-    expected = 32 * config["streams"] * config["turns"]
+    training = config.get("workload") == "dapo"
+    expected = (
+        config["expected_requests"]
+        if training
+        else 32 * config["streams"] * config["turns"]
+    )
     assert len(rows) == len({r["id"] for r in rows}) == expected
     assert all(
-        r["prompt_tokens"] == config["prompt_tokens"]
+        (training or r["prompt_tokens"] == config["prompt_tokens"])
         and r["decode_tokens"] == config["decode_tokens"]
         for r in rows
     )
@@ -79,8 +84,8 @@ def summarize(data):
         sum(r["prompt_tokens"] for r in rows),
     )
     repeats = [r for r in rows if r["turn"] > 0]
-    warm = sum(r["cached_tokens"] for r in repeats) / sum(
-        r["prompt_tokens"] for r in repeats
+    warm = sum(r["cached_tokens"] for r in repeats) / max(
+        1, sum(r["prompt_tokens"] for r in repeats)
     )
     registrations = sum(s["adapter_loads"] for s in data["final"]) - sum(
         s["adapter_loads"] for s in data["baseline"]
@@ -118,7 +123,8 @@ def summarize(data):
         o
         for o in data["observations"]
         if "replicas" in o
-        and sum(s["active"] for s in o["replicas"]) >= expected / config["turns"] / 2
+        and sum(s["active"] for s in o["replicas"])
+        >= (config["max_concurrency"] if training else expected / config["turns"]) / 2
     ]
     load_cv = [
         float(
@@ -127,9 +133,10 @@ def summarize(data):
         )
         for o in loaded
     ]
+    active_sets = [len(s["adapters"]) for o in loaded for s in o["replicas"]]
     placements = {
         i: {r["stats"]["upstream"] for r in rows if r["adapter_index"] == i}
-        for i in range(32)
+        for i in {r["adapter_index"] for r in rows}
     }
     prefix_placements = {}
     for row in rows:
@@ -174,12 +181,29 @@ def summarize(data):
         "mean_load_cv_while_half_clients_active": float(np.mean(load_cv))
         if load_cv
         else None,
+        "mean_active_adapter_versions_per_replica": float(np.mean(active_sets))
+        if active_sets
+        else None,
+        "fraction_loaded_replica_observations_over_8_adapters": float(
+            np.mean(np.array(active_sets) > 8)
+        )
+        if active_sets
+        else None,
         "mean_replicas_per_adapter": float(
             np.mean([len(v) for v in placements.values()])
         ),
         "mean_replicas_per_prefix_group": float(
             np.mean([len(v) for v in prefix_placements.values()])
         ),
+        "frontend_containers": len(set(data.get("frontends", []))),
+        "rollout_mean_s": float(np.mean([r["seconds"] for r in data["rollouts"]]))
+        if data.get("rollouts")
+        else None,
+        "rollout_p95_s": float(
+            np.quantile([r["seconds"] for r in data["rollouts"]], 0.95)
+        )
+        if data.get("rollouts")
+        else None,
         **counters,
     }
 
@@ -379,6 +403,45 @@ def plots(runs, summary, output):
     )
     ax.legend()
     save(fig, output, "latency-cdf")
+
+    if all(data.get("rollouts") for data in runs.values()):
+        fig, axes = plt.subplots(
+            len(runs), 1, figsize=(11, 3.8 * len(runs)), squeeze=False, sharex=True
+        )
+        for ax, (arm, data) in zip(axes[:, 0], runs.items()):
+            for row in data["rollouts"]:
+                ax.broken_barh(
+                    [(row["start"], row["end"] - row["start"])],
+                    (row["client"] - 0.35, 0.7),
+                    facecolors=COLORS[arm],
+                    alpha=0.45 + 0.2 * row["round"],
+                )
+            ax.set(
+                title=LABELS[arm], ylabel="Independent DAPO client", yticks=range(16)
+            )
+        axes[-1, 0].set_xlabel("Time since workload start (s)")
+        save(fig, output, "client-rollout-timeline")
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for arm, data in runs.items():
+            observations = [o for o in data["observations"] if "replicas" in o]
+            x = [o["elapsed"] for o in observations]
+            y = [
+                np.mean([len(r["adapters"]) for r in o["replicas"]])
+                for o in observations
+            ]
+            # Missing intervals must not look like measured continuous data.
+            for i in range(1, len(x)):
+                if x[i] - x[i - 1] > 15:
+                    y[i] = np.nan
+            ax.plot(x, y, STYLES[arm], color=COLORS[arm], label=LABELS[arm])
+        ax.axhline(8, color="black", linestyle=":", label="8 GPU adapter slots")
+        ax.set(
+            xlabel="Time since workload start (s)",
+            ylabel="Mean active adapter versions per replica",
+        )
+        ax.legend()
+        save(fig, output, "adapter-working-set")
 
 
 def main():

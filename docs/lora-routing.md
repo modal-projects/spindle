@@ -17,25 +17,33 @@ When upgrading an existing deployment, refresh its inference sidecars with
 
 ## Placement and load
 
-The router uses rendezvous hashing of the model ID to establish a stable ordering
-of replicas. Successive versions of an adapter therefore prefer the same homes.
-Within a set of warm replicas, request/conversation affinity breaks ties.
+The router uses rendezvous hashing of the model ID to order preferred replicas.
+Successive adapter versions prefer the same replicas. New prefixes are placed on
+the first eligible replica in this ordering whose active adapter working set can
+accommodate the adapter. This concentrates an adapter's different math problems
+without pinning an overloaded adapter to one GPU.
 
-For each replica, estimated load adds new local reservations to reported active
-requests, subtracting reservations already present at observation time to avoid
-counting them twice. It is at least the local outstanding count. A replica is
-eligible when its load is below
-`1.25 * minimum_pool_load + max(1, target_concurrency / replica_count)`.
-This lets a hot adapter spread across the pool and lets small workloads use idle
-GPUs. Among eligible replicas the router prefers the exact adapter version already
-active or recently used. Cold placement prefers a replica whose active adapter
-working set fits within `sglang_cfg.max_loras_per_batch`.
+Each exact adapter-version/affinity-key pair keeps its first destination in a
+bounded local map. A later residency change does not remap it. Sidecars advertise
+bounded, version-scoped recent prefix keys so another sampling frontend can
+recover locality. If the home is overloaded, the router first looks for another
+eligible replica with that prefix, then uses adapter placement. Temporary overflow
+does not rewrite the original home. Failed/departed homes can be replaced.
 
-Observations are approximate. Recent completion is a cache hint, not proof of GPU
-residency. Counts on different sampling workers are not synchronized. Local
-reservations make bursts visible immediately within a worker; replica observations
-incorporate other workers' traffic. This trades exact global load accounting for
-bounded control traffic and a synchronous in-memory routing decision.
+Estimated load adds new local reservations to reported outstanding requests,
+without double-counting reservations already present at observation time. A
+replica is eligible below `max(target_concurrency, mean_observed_pool_load)`.
+If all loads equal the bound, a least-loaded replica is selected. Below the
+configured target, this allows concentration and batching. Above the target,
+new work spills toward replicas below the pool mean. This first implementation
+uses request counts; it does not claim a calibrated prefill/decode cost model.
+
+These are approximate observations, not a distributed admission guarantee.
+Independent frontends can overshoot the bound between refreshes. Recent prefix
+use does not prove KV residency, and recent adapter use does not prove GPU
+residency. The engine still owns cache validation. A prefix may be worth keeping
+even when its adapter must be reloaded: changing adapter warmth alone never
+moves an established prefix. Stale observations fall back to native Flash.
 
 ## Flash and consistency
 
@@ -46,6 +54,8 @@ affinity remains in the generation payload and data-parallel rank selection.
 
 Pool membership is cached for five seconds. Active sampling workers refresh
 replica observations at most once per second, coalescing concurrent refreshes.
+A persistent HTTP client reuses observation connections. Prefix maps are bounded
+to 8,192 entries per router and 4,096 per sidecar; sidecar hints expire after 120s.
 Fresh requests use the last snapshot while refresh runs in the background.
 Initial discovery and bursts after ten seconds of idle observations share one
 refresh, bounded to three seconds. Missing or still-stale observations then fall
@@ -61,7 +71,7 @@ The sidecar reports its replica identity so the worker can detect a proxy that
 ignored the requested upstream.
 
 `GET /routing-state` reports active requests, active adapter identities, recent
-adapter use, and successful adapter-registration count/time. Registration counts
+adapter use, recent version-scoped prefix keys, and successful adapter-registration count/time. Registration counts
 measure `/load_lora_adapter` calls; they do **not** measure GPU adapter transfers
 or evictions.
 

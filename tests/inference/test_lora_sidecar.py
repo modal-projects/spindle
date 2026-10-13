@@ -7,6 +7,7 @@ from stitch.types import VersionRef
 
 from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
+from spindle.inference.lora_routing import prefix_key
 
 
 def _publish(tmp_path, version):
@@ -20,6 +21,34 @@ def _publish(tmp_path, version):
     bulletin = SnapshotBulletin(tmp_path / "bulletin")
     bulletin.publish(VersionRef("model-a", version), source)
     return bulletin
+
+
+def test_prefix_hints_are_scoped_to_the_resolved_adapter_version(tmp_path):
+    bulletin = _publish(tmp_path, 3)
+    _publish(tmp_path, 4)
+
+    def upstream(request):
+        return httpx.Response(200, json={"meta_info": {}})
+
+    app = create_app(bulletin, "http://sglang", transport=httpx.MockTransport(upstream))
+    with TestClient(app) as client:
+        for version in (3, 4):
+            response = client.post(
+                "/generate",
+                json={
+                    "input_ids": [1, 2],
+                    "session_id": "same-prefix",
+                    "weight_run_id": "model-a",
+                    "weight_version": {"exact_version": version},
+                },
+            )
+            assert response.status_code == 200
+        state = client.get("/routing-state").json()
+        assert set(state["prefixes"]) == {
+            prefix_key(VersionRef("model-a", version).identity, "same-prefix")
+            for version in (3, 4)
+        }
+        assert state["active"] == 0 and state["adapters"] == {}
 
 
 def test_sidecar_resolves_exact_adapter_and_stamps_response(tmp_path) -> None:

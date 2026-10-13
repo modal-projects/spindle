@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from spindle.inference.lora_routing import LoraRouter, Replica
+from spindle.inference.lora_routing import LoraRouter, Replica, prefix_key
 from spindle.inference.sampling import sample_task
 from tests.inference.test_sampling import response, task
 
@@ -18,7 +18,7 @@ def router(replicas, **kwargs):
     return result
 
 
-def test_hot_adapter_stays_local_and_hot_load_spills_without_losing_reservations():
+def test_adapter_placement_stays_local_until_target_then_spills():
     pool = router(
         [Replica("a", recent=("model/weight_v000001",)), Replica("b")], target=4
     )
@@ -26,8 +26,8 @@ def test_hot_adapter_stays_local_and_hot_load_spills_without_losing_reservations
         pool.select_destination("model", "model/weight_v000001", str(i))
         for i in range(12)
     ]
-    assert routes[:2] == ["a"] * 2
-    assert routes[2] == "b"
+    assert len(set(routes[:4])) == 1
+    assert routes[4] != routes[0]
     assert set(routes) == {"a", "b"}
     assert abs(routes.count("a") - routes.count("b")) <= 4
     for upstream in routes:
@@ -49,7 +49,7 @@ def test_full_working_set_is_avoided_on_cold_placement():
     home = pool.select_destination("model", "new", "request")
     pool.release(home, "new")
     pool.replicas[home].adapters = {"other": 1}
-    assert pool.select_destination("model", "new", "request") != home
+    assert pool.select_destination("model", "new", "new-prefix") != home
 
 
 def test_versions_and_models_do_not_share_warmth():
@@ -59,6 +59,38 @@ def test_versions_and_models_do_not_share_warmth():
     other = "a" if home == "b" else "b"
     pool.replicas[other].recent = ("another-model/v2", "model/v1")
     assert pool.select_destination("model", "model/v2", "request") == home
+
+
+def test_prefix_home_survives_residency_changes_and_temporary_overflow():
+    pool = router([Replica("a"), Replica("b")], target=4)
+    home = pool.select_destination("m", "m/v1", "prefix")
+    pool.release(home, "m/v1")
+    other = next(h for h in pool.replicas if h != home)
+    pool.replicas[other].recent = ("m/v1",)
+    pool.replicas[other].prefixes = frozenset({prefix_key("m/v1", "prefix")})
+    assert pool.select_destination("m", "m/v1", "prefix") == home
+    pool.release(home, "m/v1")
+    pool.replicas[home].active = 20
+    assert pool.select_destination("m", "m/v1", "prefix") == other
+    pool.release(other, "m/v1")
+    pool.replicas[home].active = 0
+    assert pool.select_destination("m", "m/v1", "prefix") == home
+
+
+def test_another_frontend_recovers_version_scoped_prefix_home():
+    pool = router([Replica("a"), Replica("b")])
+    default = pool.select_destination("m", "m/v1", "prefix")
+    other = next(h for h in pool.replicas if h != default)
+    fresh = router(
+        [
+            Replica(default),
+            Replica(other, prefixes=frozenset({prefix_key("m/v1", "prefix")})),
+        ]
+    )
+    assert fresh.select_destination("m", "m/v1", "prefix") == other
+    fresh.release(other, "m/v1")
+    assert prefix_key("m/v1", "prefix") != prefix_key("m/v2", "prefix")
+    assert fresh.select_destination("m", "m/v2", "prefix") == default
 
 
 def test_stale_or_failed_replicas_fall_back_and_refresh_removes_departed_nodes():
@@ -193,8 +225,7 @@ def test_new_reservations_add_to_observed_load_without_double_counting_old_ones(
         pool.local["a"] = Counter({"m/v1": 50})
         await pool._refresh()
         routes = [pool.select_destination("m", "m/v1", str(i)) for i in range(34)]
-        assert routes[:33] == ["a"] * 33
-        assert routes[33] == "b"
+        assert abs(routes.count("a") - routes.count("b")) <= 1
 
     asyncio.run(run())
 

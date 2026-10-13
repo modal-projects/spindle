@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import subprocess
@@ -17,7 +18,7 @@ import time
 import httpx
 import modal
 
-from spindle.inference.sampling import sample_task
+from spindle.inference.sampling import TCP_KEEPALIVE_OPTIONS, sample_task
 from spindle.providers.modal.fft_pool import proxy_auth_headers
 from spindle.providers.modal.image_dependencies import (
     CORE_PACKAGES,
@@ -75,6 +76,183 @@ def make_trace(
             )
     random.Random(seed).shuffle(trace)
     return trace
+
+
+@app.function(
+    image=image,
+    cpu=2,
+    memory=8192,
+    region="us-west",
+    secrets=[modal.Secret.from_name("lilo-proxy")],
+    max_containers=8,
+    timeout=2400,
+)
+async def run_training_frontend(pool, arm, clients, config, start_at):
+    """Two independent DAPO clients per real CPU container; one router per pool.
+
+    Replay real prompts and saved policies. Recorded train/publication intervals
+    are delays, not new optimizer work. One rollout is prefetched while that
+    client's update proceeds, matching client.py without cross-client barriers.
+    """
+    gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
+    router = create_router(pool, gateway, target=64, slots=8)
+    rows, rollouts = [], []
+    await router.refresh()
+    if time.time() > start_at:
+        raise RuntimeError("CPU frontend missed the readiness deadline")
+    limits = httpx.Limits(max_connections=512, max_keepalive_connections=256)
+    async with httpx.AsyncClient(
+        headers=proxy_auth_headers(),
+        timeout=240,
+        trust_env=False,
+        transport=httpx.AsyncHTTPTransport(
+            limits=limits,
+            socket_options=list(TCP_KEEPALIVE_OPTIONS),
+            trust_env=False,
+        ),
+    ) as client:
+
+        async def group(source, round_index, group_index, version):
+            client_index = source["client_index"]
+            problem = round_index * config["groups"] + group_index
+            prompt = source["prompts"][problem % len(source["prompts"])]
+            count = config["samples"]
+            if client_index == 0 and config["hot_samples"]:
+                count = config["hot_samples"]
+            ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
+            task = {
+                "request_id": ident,
+                "sampling_session_id": f"dapo-{source['model_id']}-{version}",
+                "model_id": source["model_id"],
+                "publish_version": version,
+                "payload": {
+                    "prompt": {"chunks": [{"type": "encoded_text", "tokens": prompt}]},
+                    "num_samples": count,
+                    "cache_affinity_key": f"problem-{problem % len(source['prompts'])}",
+                    "sampling_params": {
+                        "max_tokens": config["decode_tokens"],
+                        "stop": [],
+                        "temperature": 1.0,
+                        "seed": 4242 + round_index * 100 + group_index,
+                    },
+                },
+            }
+            events, stats = [], {}
+            began = time.time()
+            result = await sample_task(
+                task,
+                gateway,
+                client=client,
+                lora_router=router if arm == "lora" else None,
+                stats=stats,
+                on_event=events.append,
+                timeout=240,
+                retry_timeout=900,
+            )
+            ended = time.time()
+            attempts = [e for e in events if e.get("name") == "sample_attempt"]
+            assert len(result["sequences"]) == count
+            for index, sequence in enumerate(result["sequences"]):
+                seq_attempts = [
+                    e for e in attempts if e["attrs"]["sequence_index"] == index
+                ]
+                successful = [e for e in seq_attempts if e["attrs"].get("ok")]
+                assert len(successful) == 1
+                event = successful[0]
+                meta = event["attrs"]["backend_timing"]
+                assert (
+                    meta["weight_version_start"]
+                    == meta["weight_version_end"]
+                    == version
+                )
+                assert (
+                    len(sequence["tokens"])
+                    == len(sequence["logprobs"])
+                    == config["decode_tokens"]
+                )
+                assert sequence["stop_reason"] == "length"
+                assert all(math.isfinite(x) for x in sequence["logprobs"])
+                assert 0 <= meta["cached_tokens"] <= len(prompt)
+                rows.append(
+                    {
+                        "id": f"{ident}-sample-{index}",
+                        "client": client_index,
+                        "turn": round_index,
+                        "adapter_index": client_index * 2
+                        + source["versions"].index(version),
+                        "conversation": problem,
+                        "model_id": source["model_id"],
+                        "version": version,
+                        "start": began - start_at,
+                        "end": event["t1"] - start_at,
+                        "seconds": event["t1"] - began,
+                        "group_seconds": ended - began,
+                        "prompt_tokens": len(prompt),
+                        "decode_tokens": len(sequence["tokens"]),
+                        "cached_tokens": meta["cached_tokens"],
+                        "output_sha256": hashlib.sha256(
+                            json.dumps(sequence["tokens"]).encode()
+                        ).hexdigest(),
+                        "stats": stats["sequence_stats"][index],
+                        "attempts": seq_attempts,
+                    }
+                )
+
+        async def rollout(source, round_index):
+            version = source["versions"][0 if round_index < 2 else 1]
+            began = time.time()
+            groups = (
+                1
+                if source["client_index"] == 0 and config["hot_samples"]
+                else config["groups"]
+            )
+            await asyncio.gather(
+                *(group(source, round_index, g, version) for g in range(groups))
+            )
+            rollouts.append(
+                {
+                    "client": source["client_index"],
+                    "round": round_index,
+                    "version": version,
+                    "start": began - start_at,
+                    "end": time.time() - start_at,
+                    "seconds": time.time() - began,
+                    "groups": groups,
+                }
+            )
+            print(
+                f"{arm}: client {source['client_index']} rollout {round_index} finished in {time.time() - began:.1f}s",
+                flush=True,
+            )
+
+        async def training_client(source):
+            await asyncio.sleep(
+                max(
+                    0,
+                    start_at
+                    + source["client_index"] * config["stagger_seconds"]
+                    - time.time(),
+                )
+            )
+            await rollout(source, 0)
+            if config["rounds"] > 1:
+                # The next rollout starts immediately while this client's
+                # recorded update/publication interval elapses independently.
+                await asyncio.gather(
+                    rollout(source, 1), asyncio.sleep(source["update_seconds"])
+                )
+            if config["rounds"] > 2:
+                await rollout(source, 2)
+
+        try:
+            await asyncio.gather(*(training_client(source) for source in clients))
+        finally:
+            await router.aclose()
+    return {
+        "requests": rows,
+        "rollouts": rollouts,
+        "frontend": os.environ["MODAL_TASK_ID"],
+    }
 
 
 @app.function(
@@ -185,16 +363,25 @@ async def run_arm(pool, arm, clients, config):
         assert all(
             s["gpu_lora"]["resident_adapters"] == expected_residents for s in baseline
         )
-        trace = make_trace(clients, **config)
+        training = config.get("workload") == "dapo"
+        trace = (
+            {"clients": clients, "config": config}
+            if training
+            else make_trace(clients, **config)
+        )
         trace_hash = hashlib.sha256(
             json.dumps(trace, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         requests, observations = [], []
-        started = time.monotonic()
-        wall_started = time.time()
+        # Let all eight independent CPU frontends become ready before timing.
+        # This is a startup gate, not a barrier between clients' training steps.
+        lead = 60 if training else 0
+        started = time.monotonic() + lead
+        wall_started = time.time() + lead
         finished = asyncio.Event()
 
         async def observe():
+            await asyncio.sleep(max(0, started - time.monotonic()))
             while not finished.is_set():
                 try:
                     states = await inspect()
@@ -295,10 +482,25 @@ async def run_arm(pool, arm, clients, config):
                     )
 
         observer = asyncio.create_task(observe())
-        tasks = [asyncio.create_task(logical_client(i, s)) for i, s in enumerate(trace)]
+
+        async def frontend(shard):
+            result = await run_training_frontend.remote.aio(
+                pool, arm, clients[shard::8], config, wall_started
+            )
+            requests.extend(result["requests"])
+            return result
+
+        tasks = (
+            [asyncio.create_task(frontend(i)) for i in range(8)]
+            if training
+            else [
+                asyncio.create_task(logical_client(i, s)) for i, s in enumerate(trace)
+            ]
+        )
         error = None
+        results = []
         try:
-            await asyncio.wait_for(asyncio.gather(*tasks), timeout=2400)
+            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2400)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             print(f"{arm}: FAILED: {error}", flush=True)
@@ -310,6 +512,7 @@ async def run_arm(pool, arm, clients, config):
             await observer
         elapsed = time.monotonic() - started
         final = await inspect()
+        await asyncio.gather(*(router.aclose() for router in routers))
         if error is None:
             assert all(s["active"] == 0 for s in final)
         return {
@@ -324,6 +527,8 @@ async def run_arm(pool, arm, clients, config):
             "final": final,
             "observations": observations,
             "error": error,
+            "frontends": [r["frontend"] for r in results] if training else [],
+            "rollouts": [s for r in results for s in r["rollouts"]] if training else [],
         }
 
 
@@ -339,6 +544,14 @@ def main():
     parser.add_argument("--shared-tokens", type=int, default=7168)
     parser.add_argument("--decode-tokens", type=int, default=512)
     parser.add_argument("--seed", type=int, default=12026)
+    parser.add_argument(
+        "--workload", choices=("synthetic", "dapo"), default="synthetic"
+    )
+    parser.add_argument("--groups", type=int, default=16)
+    parser.add_argument("--samples", type=int, default=8)
+    parser.add_argument("--rounds", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument("--stagger-seconds", type=float, default=5)
+    parser.add_argument("--hot-samples", type=int, default=0)
     parser.add_argument("--keep-pools", action="store_true")
     parser.add_argument("--sequential", action="store_true")
     parser.add_argument("--arms", nargs="+", choices=("default", "lora", "kv"))
@@ -359,6 +572,21 @@ def main():
             "seed",
         )
     }
+    if args.workload == "dapo":
+        config = dict(
+            workload="dapo",
+            groups=args.groups,
+            samples=args.samples,
+            rounds=args.rounds,
+            stagger_seconds=args.stagger_seconds,
+            hot_samples=args.hot_samples,
+            decode_tokens=args.decode_tokens,
+        )
+        per_round = len(clients) * args.groups * args.samples
+        if args.hot_samples:
+            per_round += args.hot_samples - args.groups * args.samples
+        config["expected_requests"] = per_round * args.rounds
+        config["max_concurrency"] = per_round
     args.output.mkdir(parents=True, exist_ok=True)
 
     async def run():

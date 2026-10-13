@@ -9,12 +9,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 import xxhash
+
+
+def prefix_key(adapter: str, affinity: str) -> str:
+    return xxhash.xxh3_128_hexdigest((adapter + "\0" + affinity).encode())
 
 
 @lru_cache(maxsize=1024)
@@ -35,6 +39,7 @@ class Replica:
     adapters: dict[str, int] = field(default_factory=dict)
     recent: tuple[str, ...] = ()
     upstream: str = ""
+    prefixes: frozenset[str] = frozenset()
 
 
 class LoraRouter:
@@ -46,6 +51,7 @@ class LoraRouter:
         slots: int = 8,
         refresh_interval: float = 1.0,
         stale_after: float = 10.0,
+        close: Callable[[], Awaitable[None]] | None = None,
     ):
         if target < 1 or slots < 1:
             raise ValueError("routing target and adapter slots must be positive")
@@ -59,6 +65,17 @@ class LoraRouter:
         self.updated = 0.0
         self.next_refresh = 0.0
         self.pending: asyncio.Task | None = None
+        self._close = close
+        # A prefix keeps its first destination even when other replicas become
+        # warm. Overflow does not rewrite its home on every generation.
+        self.prefix_homes: OrderedDict[str, str] = OrderedDict()
+
+    async def aclose(self):
+        if self.pending is not None:
+            self.pending.cancel()
+            await asyncio.gather(self.pending, return_exceptions=True)
+        if self._close is not None:
+            await self._close()
 
     async def refresh(self):
         now = time.monotonic()
@@ -111,35 +128,46 @@ class LoraRouter:
             # entire reported load. Existing reservations must not count twice.
             arrivals = max(0, local - self.observed_local.get(host, 0))
             loads[host] = max(self.replicas[host].active + arrivals, local)
-        # An adapter may occupy additional replicas when its home becomes busy.
-        # Share the additive allowance across the pool so a small workload
-        # can use idle GPUs. At high load the relative bound allows locality
-        # without queueing behind an overloaded home.
-        limit = min(loads.values()) * 1.25 + max(1, self.target / len(hosts))
+        # Spend at most the configured concurrency target on a preferred host
+        # while capacity remains elsewhere. When the whole pool is saturated,
+        # place new work below the pool mean rather than growing a hot queue.
+        # This is a bound on our observation, not a distributed admission lock.
+        limit = max(self.target, sum(loads.values()) / len(hosts))
         eligible = [h for h in rank if loads[h] < limit]
+        if not eligible:
+            eligible = [h for h in rank if loads[h] == min(loads.values())]
 
-        def warm(host):
-            replica = self.replicas[host]
-            return (
-                adapter in self.local.get(host, {})
-                or adapter in replica.adapters
-                or adapter in replica.recent[-self.slots :]
-            )
-
-        warm_hosts = [h for h in eligible if warm(h)]
-        if warm_hosts:
-            # Stable conversation affinity within the warm set. At high load
-            # the eligibility bound still permits spillover.
-            chosen = _ranking(affinity, tuple(sorted(warm_hosts)))[0]
+        key = prefix_key(adapter, affinity)
+        home = self.prefix_homes.get(key)
+        if home not in hosts:
+            # Replica observations let another frontend recover prefix locality.
+            # These are recent-use hints, not assertions about resident KV.
+            known = tuple(h for h in hosts if key in self.replicas[h].prefixes)
+            home = _ranking(key, known)[0] if known else None
+        if home in eligible:
+            chosen = home
         else:
-            # Avoid introducing a new adapter into a full active GPU working set.
+            cached = [h for h in eligible if key in self.replicas[h].prefixes]
+            working = {
+                h: set(self.replicas[h].adapters) | set(self.local.get(h, {}))
+                for h in eligible
+            }
+            # Concentrate *new* prefixes on the adapter's deterministic homes.
+            # Expand only when load or the active adapter working set requires
+            # it. Do not remap established prefixes when this set changes.
             available = [
                 h
                 for h in eligible
-                if len(set(self.replicas[h].adapters) | set(self.local.get(h, {})))
-                < self.slots
+                if adapter in working[h] or len(working[h]) < self.slots
             ]
-            chosen = (available or eligible)[0]
+            candidates = cached or available or eligible
+            chosen = next(h for h in rank if h in candidates)
+        if home is None:
+            home = chosen
+        self.prefix_homes[key] = home
+        self.prefix_homes.move_to_end(key)
+        if len(self.prefix_homes) > 8192:
+            self.prefix_homes.popitem(last=False)
         self.local.setdefault(chosen, Counter())[adapter] += 1
         return chosen
 

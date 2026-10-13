@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 from stitch.types import VersionConstraint, VersionRef
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
+from .lora_routing import prefix_key
 
 
 def create_app(
@@ -39,6 +40,7 @@ def create_app(
         app.state.adapter_resolutions = {}
         app.state.active_adapters = Counter()
         app.state.recent_adapters = OrderedDict()
+        app.state.prefixes = OrderedDict()
         app.state.active = 0
         app.state.adapter_loads = 0
         app.state.adapter_load_seconds = 0.0
@@ -55,12 +57,14 @@ def create_app(
 
     @app.get("/routing-state")
     async def routing_state():
+        now = time.monotonic()
         return {
             "replica": os.environ.get("MODAL_TASK_ID", "local"),
             "active": app.state.active,
             "adapters": dict(app.state.active_adapters),
             # Recent use is a residency estimate, not a GPU-cache assertion.
             "recent": list(app.state.recent_adapters),
+            "prefixes": [k for k, t in app.state.prefixes.items() if now - t < 120],
             "adapter_loads": app.state.adapter_loads,
             "adapter_load_seconds": app.state.adapter_load_seconds,
         }
@@ -112,10 +116,20 @@ def create_app(
                 )
 
         adapter = payload.get("lora_path", "base")
+        affinity = payload.get("session_id")
+        key = prefix_key(adapter, affinity) if isinstance(affinity, str) else None
+        if key is not None:
+            app.state.prefixes[key] = time.monotonic()
+            app.state.prefixes.move_to_end(key)
+            if len(app.state.prefixes) > 4096:
+                app.state.prefixes.popitem(last=False)
         app.state.active_adapters[adapter] += 1
         try:
             response = await _post_generate(app.state.client, request, payload)
         finally:
+            if key is not None and key in app.state.prefixes:
+                app.state.prefixes[key] = time.monotonic()
+                app.state.prefixes.move_to_end(key)
             app.state.active_adapters[adapter] -= 1
             if not app.state.active_adapters[adapter]:
                 del app.state.active_adapters[adapter]
