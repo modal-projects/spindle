@@ -166,14 +166,15 @@ class LoraRouter:
             # model home can manufacture hot queues when adapter capacity is
             # plentiful. Redirect cold placement only when its working set is
             # full; an established prefix continues to win over adapter warmth.
-            preferred = next(h for h in _ranking(key, hosts) if h in eligible)
+            choices = [h for h in _ranking(key, hosts) if h in eligible][:2]
+            preferred = min(choices, key=loads.__getitem__)
             fits = adapter in working[preferred] or len(working[preferred]) < self.slots
             warm = [h for h in eligible if adapter in working[h]]
             room = [h for h in eligible if len(working[h]) < self.slots]
             candidates = cached or (
                 [preferred] if fits else warm or room or [preferred]
             )
-            chosen = candidates[0]
+            chosen = min(candidates, key=loads.__getitem__)
 
         if home is None:
             home = chosen

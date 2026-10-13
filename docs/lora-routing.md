@@ -17,12 +17,13 @@ When upgrading an existing deployment, refresh its inference sidecars with
 
 ## Placement and load
 
-New prefixes start with rendezvous hashing of their version-scoped affinity key,
-so a model's many independent problems spread across replicas when capacity is
-available. If that preferred replica's active adapter working set is full and
+New prefixes rank replicas by rendezvous hashing of their version-scoped affinity
+key and choose the less-loaded of the first two eligible candidates. This spreads
+a model's independent problems while reducing hot spots from a single hash choice. If that preferred replica's active adapter working set is full and
 does not contain the requested adapter, cold placement prefers an eligible
 replica already serving that adapter, then one with available adapter capacity.
-These fallback candidates use deterministic model rendezvous order. Adapter
+Fallback prefers the least-loaded candidate; deterministic model rendezvous order
+breaks load ties. Adapter
 concentration is a response to working-set pressure, not the default for every
 new prefix.
 
