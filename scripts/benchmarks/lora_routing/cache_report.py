@@ -618,7 +618,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument(
-        "--arms", nargs="+", choices=tuple(LABELS), default=list(LABELS)
+        "--arms", nargs="+", choices=tuple(LABELS), default=["default", "lora", "kv"]
     )
     args = parser.parse_args()
     runs = {

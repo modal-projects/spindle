@@ -68,13 +68,18 @@ def test_version_change_gets_no_old_version_cache_credit():
     assert choose(pool, adapter="m/v2") == "b"
 
 
-def test_registration_overlaps_gpu_backlog_instead_of_being_added():
+def test_synchronous_registration_is_charged_once_as_scheduler_work():
     pool = router(a=state(decode_tokens=100))
     details = {}
     choose(pool, details=details)
     assert details["backlog_seconds"] == 1
     assert details["registration_seconds"] == 2
-    assert details["score"] == 2 + 0.1 + 1.024 + 1
+    assert details["score"] == 1 + 2 + 0.1 + 1.024 + 1
+    next_details = {}
+    choose(pool, "next", details=next_details)
+    assert next_details["registration_seconds"] == 0
+    assert next_details["transfer_seconds"] == 0
+    assert abs(next_details["backlog_seconds"] - (1 + 2.024 + 2 + 0.1)) < 1e-9
 
 
 def test_burst_reservations_spill_and_observed_requests_are_not_counted_twice():
@@ -92,7 +97,9 @@ def test_burst_reservations_spill_and_observed_requests_are_not_counted_twice():
     details = {}
     pool.replicas = {chosen: pool.replicas[chosen]}
     choose(pool, "next", details=details)
-    assert abs(details["backlog_seconds"] - (len(existing) - 1) * 2.024 - 0.1) < 1e-9
+    assert (
+        abs(details["backlog_seconds"] - (len(existing) - 1) * 2.024 - 0.1 - 2) < 1e-9
+    )
     for i, host in enumerate(routes):
         pool.release(host, "m/v1", reservation_id=str(i))
     pool.release(chosen, "m/v1", reservation_id="next")
@@ -102,6 +109,39 @@ def test_burst_reservations_spill_and_observed_requests_are_not_counted_twice():
 def test_old_engine_snapshot_falls_back_even_when_http_poll_is_fresh():
     pool = router(a=state(age_seconds=4))
     assert choose(pool) is None
+
+
+def test_siblings_stay_together_and_large_groups_split_at_engine_capacity():
+    pool = router(a=state(), b=state())
+    pool.rates = WorkRates(1000, 100, 0.1, 2, decode_concurrency=4)
+    routes = [
+        choose(pool, str(i), group_id="rollout", group_size=12, sample_index=i)
+        for i in range(12)
+    ]
+    assert len(set(routes[:4])) == 1
+    assert len(set(routes[4:8])) == 1
+    assert routes[0] != routes[4]
+    assert len(set(routes[8:])) == 1
+    for i, host in enumerate(routes):
+        pool.release(host, "m/v1", reservation_id=str(i))
+    assert not any(pool.local.values())
+
+
+def test_group_cost_preserves_kv_when_individual_greedy_placement_would_spill():
+    cached = frozenset(h for h, n in token_prefixes("m/v1", list(range(1024))))
+    pool = router(
+        a=state(
+            prefixes=cached,
+            decode_tokens=300,
+            cpu_adapters=["m/v1"],
+            gpu_adapters=["m/v1"],
+        ),
+        b=state(cpu_adapters=["m/v1"], gpu_adapters=["m/v1"]),
+    )
+    pool.rates = WorkRates(1000, 100, 0.1, 2, decode_concurrency=8)
+    assert choose(pool, "single") == "b"
+    pool.release("b", "m/v1", reservation_id="single")
+    assert choose(pool, "group", group_id="g", group_size=8) == "a"
 
 
 def test_prefix_preparation_never_uses_affinity_lookup_and_is_group_specific():

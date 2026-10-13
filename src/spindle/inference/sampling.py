@@ -158,6 +158,7 @@ async def sample_task(
                     request_timeout=timeout,
                     lora_router=lora_router,
                     routing_prefixes=routing_prefixes,
+                    group_size=num_samples,
                 )
                 for index in range(num_samples)
             )
@@ -227,6 +228,7 @@ async def _sample_one(
     request_timeout: float = 3000.0,
     lora_router: LoraRouter | None = None,
     routing_prefixes=None,
+    group_size=1,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -326,6 +328,9 @@ async def _sample_one(
                 prefixes=routing_prefixes,
                 reservation_id=observation.id,
                 details=routing_details,
+                group_id=request_id if physical_attempt == 1 else observation.id,
+                group_size=group_size if physical_attempt == 1 else 1,
+                sample_index=index if physical_attempt == 1 else 0,
             )
             if upstream is not None:
                 # Flash affinity headers take precedence over exact upstreams.

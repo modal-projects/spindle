@@ -729,6 +729,8 @@ def main():
     pools = json.loads(args.pools.read_text())
     if args.arms:
         pools = [next(p for p in pools if p["arm"] == arm) for arm in args.arms]
+    if any(p["arm"].startswith("work") for p in pools) and args.work_rates is None:
+        parser.error("measured-work policies require --work-rates from calibration")
     clients = json.loads(args.clients.read_text())
     for source in clients:
         source["vocabulary"] = sorted(
