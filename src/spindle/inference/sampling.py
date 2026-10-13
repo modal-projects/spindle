@@ -318,6 +318,7 @@ async def _sample_one(
                 "attempt_number": physical_attempt,
                 "routed_dp_rank": routed_dp_rank,
                 "upstream": upstream or gateway_url,
+                "selected_replica": upstream,
                 "prompt_tokens": len(prompt),
             },
         )

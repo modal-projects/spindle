@@ -187,6 +187,18 @@ def summarize(data):
         "lora_hit_ratio": counters["request_lora_hits"] / admissions,
         "registration_calls": registrations,
         "reroutes": sum(r["stats"]["reroutes"] for r in rows),
+        "explicit_replica_attempt_fraction": (
+            sum(
+                bool(a["attrs"].get("selected_replica"))
+                for r in rows
+                for a in r["attempts"]
+            )
+            / attempts
+            if all(
+                "selected_replica" in a["attrs"] for r in rows for a in r["attempts"]
+            )
+            else None
+        ),
         "observed_max_queued_requests": max_queue,
         "complete_snapshot_polls": sum("replicas" in o for o in data["observations"]),
         "failed_snapshot_polls": sum("error" in o for o in data["observations"]),
