@@ -32,7 +32,7 @@ from .deployment_configs import (
     configs_from_env,
     platform_from_env,
 )
-from .engines import ModalEnginePlatform
+from .engines import EngineInstanceRecord, ModalEnginePlatform
 from .fft_pool import (
     FFTPoolSpec,
     deploy_pool,
@@ -229,6 +229,15 @@ async def ensure_lora_pool(spec: dict) -> str:
         {**pool.as_dict(), "touched_at": time.time()},
     )
     return gateway
+
+
+async def _trainer_booted(registry, definition_id: str) -> bool:
+    return any(
+        record.definition_id == definition_id
+        and record.state in {"starting", "running"}
+        for _, value in await registry.list_items("engine_instance:")
+        for record in (EngineInstanceRecord.model_validate(value),)
+    )
 
 
 async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
@@ -467,7 +476,8 @@ def _plane():
         await prepare_model_assets.remote.aio(model.engine_definition_id)
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
-        else:
+        elif await _trainer_booted(kv, model.engine_definition_id):
+            # Otherwise the trainer deploys the pool once it boots.
             await ensure_lora_pool.spawn.aio(
                 LoraPoolSpec(model.engine_definition_id).as_dict()
             )
