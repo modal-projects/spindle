@@ -75,3 +75,48 @@ def test_zero_replica_discovery_does_not_prevent_flash_cold_start(monkeypatch):
         assert pool.select_destination("m", "v1", "r") is None
 
     asyncio.run(run())
+
+
+def test_native_affinity_lookup_uses_the_generation_session_key(monkeypatch):
+    async def run():
+        nodes = [
+            SimpleNamespace(task_id=h, host="host-" + h, port=443) for h in ("a", "b")
+        ]
+        monkeypatch.setattr(
+            lora_routing, "list_flash_containers_async", AsyncMock(return_value=nodes)
+        )
+        monkeypatch.setattr(
+            lora_routing, "proxy_auth_headers", lambda: {"Modal-Key": "key"}
+        )
+        lookups = []
+
+        def handle(request):
+            assert request.url.path == "/routing-state"
+            assert request.headers["Modal-Key"] == "key"
+            if "Modal-Session-ID" in request.headers:
+                assert "Modal-Flash-Upstream" not in request.headers
+                lookups.append(request.headers["Modal-Session-ID"])
+                host = "b"
+            else:
+                host = (
+                    request.headers["Modal-Flash-Upstream"].split("-")[1].split(":")[0]
+                )
+            return httpx.Response(
+                200, json=dict(replica=host, active=0, adapters={}, recent=[])
+            )
+
+        original = httpx.AsyncClient
+        monkeypatch.setattr(
+            lora_routing.httpx,
+            "AsyncClient",
+            lambda **kw: original(transport=httpx.MockTransport(handle), **kw),
+        )
+        pool = lora_routing.create_router("app", "https://gateway", target=16, slots=8)
+        await pool.refresh()
+        await pool.prepare_prefix("m/v1", "generation-affinity")
+        await pool.prepare_prefix("m/v1", "generation-affinity")
+        assert pool.select_destination("m", "m/v1", "generation-affinity") == "b"
+        assert lookups == ["generation-affinity"]
+        await pool.aclose()
+
+    asyncio.run(run())

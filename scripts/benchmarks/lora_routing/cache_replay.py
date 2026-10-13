@@ -121,7 +121,9 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
             problem = round_index * config["groups"] + group_index
             prompt = source["prompts"][problem % len(source["prompts"])]
             count = config["samples"]
-            if client_index == 0 and config["hot_samples"]:
+            if client_index < config.get("large_group_clients", 0):
+                count = config["groups"] * config["samples"]
+            elif client_index == 0 and config["hot_samples"]:
                 count = config["hot_samples"]
             ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
             task = {
@@ -207,7 +209,8 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
             began = time.time()
             groups = (
                 1
-                if source["client_index"] == 0 and config["hot_samples"]
+                if source["client_index"] < config.get("large_group_clients", 0)
+                or (source["client_index"] == 0 and config["hot_samples"])
                 else config["groups"]
             )
             await asyncio.gather(
@@ -256,6 +259,13 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
         "requests": rows,
         "rollouts": rollouts,
         "frontend": os.environ["MODAL_TASK_ID"],
+        "prefix_homes": dict(router.prefix_homes),
+        "lookup_metrics": dict(
+            count=router.lookup_count,
+            failures=router.lookup_failures,
+            seconds=router.lookup_seconds,
+            max_seconds=router.lookup_max_seconds,
+        ),
     }
 
 
@@ -555,6 +565,20 @@ async def run_arm(pool, arm, clients, config):
             "error": error,
             "frontends": [r["frontend"] for r in results] if training else [],
             "rollouts": [s for r in results for s in r["rollouts"]] if training else [],
+            "native_prefix_homes": [r["prefix_homes"] for r in results]
+            if training
+            else [],
+            "lookup_metrics": [r["lookup_metrics"] for r in results]
+            if training
+            else [
+                dict(
+                    count=r.lookup_count,
+                    failures=r.lookup_failures,
+                    seconds=r.lookup_seconds,
+                    max_seconds=r.lookup_max_seconds,
+                )
+                for r in routers
+            ],
         }
 
 
@@ -578,6 +602,7 @@ def main():
     parser.add_argument("--rounds", type=int, choices=(1, 2, 3), default=3)
     parser.add_argument("--stagger-seconds", type=float, default=5)
     parser.add_argument("--hot-samples", type=int, default=0)
+    parser.add_argument("--large-group-clients", type=int, default=0)
     parser.add_argument("--keep-pools", action="store_true")
     parser.add_argument("--sequential", action="store_true")
     parser.add_argument("--arms", nargs="+", choices=("default", "lora", "kv"))
@@ -606,6 +631,7 @@ def main():
             rounds=args.rounds,
             stagger_seconds=args.stagger_seconds,
             hot_samples=args.hot_samples,
+            large_group_clients=args.large_group_clients,
             decode_tokens=args.decode_tokens,
         )
         per_round = len(clients) * args.groups * args.samples

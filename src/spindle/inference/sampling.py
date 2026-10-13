@@ -121,6 +121,13 @@ async def sample_task(
     async with client_context as active_client:
         if lora_router is not None:
             await lora_router.refresh()
+            if model_id is None or version is not None:
+                adapter = (
+                    VersionRef(model_id, int(version)).identity
+                    if model_id is not None
+                    else "base"
+                )
+                await lora_router.prepare_prefix(adapter, routing_session_id)
         outputs = await asyncio.gather(
             *(
                 _sample_one(

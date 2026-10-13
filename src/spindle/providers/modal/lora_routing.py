@@ -60,4 +60,18 @@ def create_router(
         observations = await asyncio.gather(*(inspect(c) for c in containers))
         return [r for r in observations if r is not None]
 
-    return LoraRouter(discover, target=target, slots=slots, close=client.aclose)
+    async def resolve_affinity(affinity):
+        response = await client.get(
+            gateway.rstrip("/") + "/routing-state",
+            headers={"Modal-Session-ID": affinity},
+        )
+        response.raise_for_status()
+        return response.json()["replica"]
+
+    return LoraRouter(
+        discover,
+        target=target,
+        slots=slots,
+        close=client.aclose,
+        resolve_affinity=resolve_affinity,
+    )

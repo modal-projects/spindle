@@ -52,6 +52,7 @@ class LoraRouter:
         refresh_interval: float = 1.0,
         stale_after: float = 10.0,
         close: Callable[[], Awaitable[None]] | None = None,
+        resolve_affinity: Callable[[str], Awaitable[str]] | None = None,
     ):
         if target < 1 or slots < 1:
             raise ValueError("routing target and adapter slots must be positive")
@@ -67,17 +68,67 @@ class LoraRouter:
         self.pending: asyncio.Task | None = None
         self.poller: asyncio.Task | None = None
         self._close = close
+        self.resolve_affinity = resolve_affinity
+        self.prefix_lookups: dict[str, asyncio.Task] = {}
+        self.lookup_count = self.lookup_failures = 0
+        self.lookup_seconds = self.lookup_max_seconds = 0.0
         # A prefix keeps its first destination even when other replicas become
         # warm. Overflow does not rewrite its home on every generation.
         self.prefix_homes: OrderedDict[str, str] = OrderedDict()
 
     async def aclose(self):
         tasks = [t for t in (self.pending, self.poller) if t is not None]
+        tasks.extend(self.prefix_lookups.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if self._close is not None:
             await self._close()
+
+    def _remember_prefix(self, key: str, home: str):
+        self.prefix_homes[key] = home
+        self.prefix_homes.move_to_end(key)
+        if len(self.prefix_homes) > 8192:
+            self.prefix_homes.popitem(last=False)
+
+    async def prepare_prefix(self, adapter: str, affinity: str):
+        """Resolve an unseen prefix once through native Flash affinity.
+
+        Concurrent callers share only this prefix's lookup. Warm prefixes do no
+        network work here; destination selection and reservations remain local.
+        """
+        if self.resolve_affinity is None or not self.replicas:
+            return
+        key = prefix_key(adapter, affinity)
+        if self.prefix_homes.get(key) in self.replicas:
+            return
+        known = tuple(h for h, r in self.replicas.items() if key in r.prefixes)
+        if known:
+            self._remember_prefix(key, _ranking(key, known)[0])
+            return
+
+        async def lookup():
+            began = time.monotonic()
+            try:
+                home = await asyncio.wait_for(self.resolve_affinity(affinity), 2.0)
+            except Exception:
+                self.lookup_failures += 1
+                return
+            finally:
+                elapsed = time.monotonic() - began
+                self.lookup_count += 1
+                self.lookup_seconds += elapsed
+                self.lookup_max_seconds = max(self.lookup_max_seconds, elapsed)
+            if home in self.replicas:
+                self._remember_prefix(key, home)
+            else:
+                self.lookup_failures += 1
+
+        if key not in self.prefix_lookups:
+            task = asyncio.create_task(lookup())
+            self.prefix_lookups[key] = task
+            task.add_done_callback(lambda _: self.prefix_lookups.pop(key, None))
+        await asyncio.shield(self.prefix_lookups[key])
 
     async def _poll_in_flight(self):
         while True:
@@ -154,6 +205,8 @@ class LoraRouter:
             # These are recent-use hints, not assertions about resident KV.
             known = tuple(h for h in hosts if key in self.replicas[h].prefixes)
             home = _ranking(key, known)[0] if known else None
+        if home is None and self.resolve_affinity is not None:
+            return None
         if home in eligible:
             chosen = home
         else:
@@ -169,19 +222,25 @@ class LoraRouter:
             choices = [h for h in _ranking(key, hosts) if h in eligible][:2]
             preferred = min(choices, key=loads.__getitem__)
             fits = adapter in working[preferred] or len(working[preferred]) < self.slots
-            warm = [h for h in eligible if adapter in working[h]]
+            warm = [
+                h
+                for h in eligible
+                if adapter in working[h]
+                or adapter in self.replicas[h].recent[-self.slots :]
+            ]
             room = [h for h in eligible if len(working[h]) < self.slots]
             candidates = cached or (
-                [preferred] if fits else warm or room or [preferred]
+                warm or room or [preferred]
+                if home is not None
+                else [preferred]
+                if fits
+                else warm or room or [preferred]
             )
             chosen = min(candidates, key=loads.__getitem__)
 
         if home is None:
             home = chosen
-        self.prefix_homes[key] = home
-        self.prefix_homes.move_to_end(key)
-        if len(self.prefix_homes) > 8192:
-            self.prefix_homes.popitem(last=False)
+        self._remember_prefix(key, home)
         self.local.setdefault(chosen, Counter())[adapter] += 1
         return chosen
 

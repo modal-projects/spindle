@@ -318,3 +318,50 @@ def test_two_choices_balance_a_new_prefix_without_moving_its_established_home():
     pool.replicas[first_hash_choice].active = 0
     pool.replicas[home].active = 2
     assert pool.select_destination("m", "m/v1", "problem") == home
+
+
+def test_native_prefix_lookup_is_coalesced_and_preserves_flash_home():
+    async def run():
+        ready, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+
+        async def resolve(affinity):
+            nonlocal calls
+            assert affinity == "prefix"
+            calls += 1
+            ready.set()
+            await release.wait()
+            return "native"
+
+        pool = router(
+            [Replica("native"), Replica("other")], target=4, resolve_affinity=resolve
+        )
+        pending = [
+            asyncio.create_task(pool.prepare_prefix("m/v1", "prefix"))
+            for _ in range(12)
+        ]
+        await ready.wait()
+        pending[0].cancel()
+        release.set()
+        await asyncio.gather(*pending, return_exceptions=True)
+        await pool.prepare_prefix("m/v1", "prefix")
+        assert calls == 1
+        routes = [pool.select_destination("m", "m/v1", "prefix") for _ in range(5)]
+        assert routes[:4] == ["native"] * 4
+        assert routes[4] == "other"
+        assert pool.prefix_homes[prefix_key("m/v1", "prefix")] == "native"
+        await pool.aclose()
+
+    asyncio.run(run())
+
+
+def test_failed_native_lookup_falls_back_to_flash_instead_of_rehashing():
+    async def run():
+        pool = router(
+            [Replica("a")], resolve_affinity=AsyncMock(side_effect=TimeoutError)
+        )
+        await pool.prepare_prefix("m/v1", "p")
+        assert pool.select_destination("m", "m/v1", "p") is None
+        await pool.aclose()
+
+    asyncio.run(run())
