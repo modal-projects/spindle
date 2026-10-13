@@ -104,6 +104,7 @@ def test_burst_reservations_spill_and_observed_requests_are_not_counted_twice():
         pool.release(host, "m/v1", reservation_id=str(i))
     pool.release(chosen, "m/v1", reservation_id="next")
     assert not pool.reservations and not any(pool.local.values())
+    assert not pool.host_reservations
 
 
 def test_old_engine_snapshot_falls_back_even_when_http_poll_is_fresh():

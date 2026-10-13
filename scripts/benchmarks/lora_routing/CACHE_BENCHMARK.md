@@ -1,9 +1,13 @@
-# Fixed-work LoRA and KV cache comparison
+# LoRA and KV cache comparisons
 
 The measured results and plots are in [the Notion report](https://app.notion.com/p/3f71e7f1694981628893fea0f75f2711?pvs=204)
 and [the current KV baseline comparison](../../../docs/lora-kv-training-replay-results.md).
 The [original three-policy comparison](../../../docs/lora-cache-routing-results.md)
 describes an earlier router.
+The [measured-work experiment](../../../docs/lora-work-routing-results.md) adds
+engine-backed observations, grouped placement, and a service-cost ablation. It
+uses timed independent replay loops; the older fixed-work fixture remains
+available below.
 
 This benchmark compares the existing default Flash path, the current LoRA-aware
 router, and native Flash affinity using a stable conversation key. It does not
@@ -213,3 +217,78 @@ resolved homes. Measured request latency includes this lookup. The benchmark-onl
 sidecar now gives engine observations a separate HTTP connection pool so they do
 not queue behind its generation connections; production request handling is
 unchanged by this instrumentation change.
+
+## Timed measured-work comparison
+
+The measured-work experiment enables `SGLANG_SPINDLE_ROUTING_OBSERVATIONS=1` in
+all arms so observer overhead is shared. Unlike the historical router, `work`
+uses actual supported engine KV boundaries and CPU/GPU LoRA inventory.
+`work-no-adapter` uses the same grouping and cache/load score but omits both
+adapter setup terms. The routing profile must come from calibration on the same
+model, rank, hardware, context and concurrency regime. The calibration script
+requires the benchmark image's idle-only reset endpoints.
+
+After deploying the pool and starting the independent monitor as above:
+
+```bash
+python scripts/benchmarks/lora_routing/work_calibrate.py \
+  --pools /tmp/cache-run/pools.json \
+  --clients /path/to/dapo-clients.json --output /tmp/cache-run/calibration
+
+# Warmed reuse: 16 clients, each 8 groups × 8 samples, all using version 4.
+python scripts/benchmarks/lora_routing/cache_replay.py \
+  --pools /tmp/cache-run/pools.json --clients /path/to/dapo-clients.json \
+  --output /tmp/cache-run/warmed --workload dapo \
+  --groups 8 --samples 8 --rounds 100 --duration-seconds 300 \
+  --stagger-seconds 0.5 --decode-tokens 512 \
+  --long-prefix --repeat-prefixes --warm-prefixes --fixed-version \
+  --work-rates /tmp/cache-run/calibration/work-rates.json \
+  --arms kv work --sequential --keep-pools
+python scripts/benchmarks/lora_routing/cache_report.py \
+  /tmp/cache-run/warmed --arms kv work
+
+# Version turnover with mixed group sizes and one hotter client.
+python scripts/benchmarks/lora_routing/cache_replay.py \
+  --pools /tmp/cache-run/pools.json --clients /path/to/dapo-clients.json \
+  --output /tmp/cache-run/turnover --workload dapo \
+  --groups 8 --samples 8 --large-group-clients 8 --hot-samples 128 \
+  --rounds 100 --duration-seconds 300 --stagger-seconds 0.5 --decode-tokens 512 \
+  --long-prefix --repeat-prefixes --warm-prefixes --cold-versions \
+  --work-rates /tmp/cache-run/calibration/work-rates.json \
+  --arms kv work work-no-adapter --sequential --keep-pools
+python scripts/benchmarks/lora_routing/cache_report.py \
+  /tmp/cache-run/turnover --arms kv work work-no-adapter
+touch /tmp/cache-run/STOP
+```
+
+`--duration-seconds` bounds new rollout admissions, not final drain. Each client
+advances independently; the 100-round cap is not a fixed request count. The
+report includes both full-run throughput and completed tokens in [60,300).
+Full-run duration includes final recorded update delays and all retries. Faster
+policies may issue more rollouts before admission closes.
+
+`--long-prefix` substitutes 8,192 synthetic input tokens with a 7,168-token prefix
+reused within client/problem/version and a 1,024-token changing suffix.
+`--warm-prefixes` runs three serialized suffixes per problem through native KV
+affinity before the timer. In the turnover command, client 0 submits 1 × 128;
+clients 1–7 submit 1 × 64; clients 8–15 submit 8 × 8. Maximum simultaneous
+requests are 1,088. The first two rollouts use version 4 and later rollouts use
+version 7. `--cold-versions` unregisters all identities before priming only
+version 4, so version 7 requires CPU registration. Checkpoint files already
+exist; this does not guarantee network-cold Volume reads. Registration counts
+are expected and validated in this case, rather than required to be zero.
+
+The grouped router splits a known sample group at measured decode capacity
+(36 here), not the Flash target. The profile records prefill/decode rates,
+GPU-load and exposed-registration delays, and this capacity. Calibration uses
+serialized reuse controls, equal-cache paired adapter measurements, and cohort
+engine makespan. Its output hashes validate the serialized control only, not
+universal bitwise equivalence across batching schedules.
+
+The October 13 report preserves the failed individual-placement implementation
+at `6be8811` and grouped revision at `283d689`. The grouped warmed comparison
+reuses the earlier KV baseline; its raw trace hash differs because the config
+added `decode_concurrency`. Workload fields excluding `work_rates` and replica
+identity sets were explicitly checked equal before plotting that comparison.
+The turnover arms have matching trace hashes. Do not treat reused baselines or
+closed-loop request counts as independent randomized replicates.

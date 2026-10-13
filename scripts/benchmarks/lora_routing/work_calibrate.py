@@ -43,7 +43,10 @@ async def calibrate(pool, clients):
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     router = create_router(pool, gateway, target=64, slots=8)
     async with httpx.AsyncClient(
-        headers=proxy_auth_headers(), timeout=900, trust_env=False
+        headers=proxy_auth_headers(),
+        timeout=900,
+        trust_env=False,
+        limits=httpx.Limits(max_connections=1024, max_keepalive_connections=512),
     ) as client:
         deadline = time.monotonic() + 1100
         while time.monotonic() < deadline:
@@ -57,6 +60,21 @@ async def calibrate(pool, clients):
         async def one(replica):
             headers = {"Modal-Flash-Upstream": replica.upstream}
             rows = []
+            response = await client.post(
+                gateway + "/benchmark-unregister",
+                headers=headers,
+                json={
+                    "adapters": [
+                        f"{s['model_id']}/weight_v{s['versions'][0]:06d}"
+                        for s in clients[:9]
+                    ]
+                },
+            )
+            response.raise_for_status()
+            response = await client.post(
+                gateway + "/benchmark-flush-cache", headers=headers
+            )
+            response.raise_for_status()
 
             async def request(source, tokens, output_tokens=1, label="", version=None):
                 began = time.monotonic()
@@ -113,6 +131,10 @@ async def calibrate(pool, clients):
                 prefixes=len(state["work"]["prefixes"]),
                 snapshot_seconds=state["work"]["snapshot_seconds"],
             )
+            engine = (
+                await client.get(gateway + "/benchmark-state", headers=headers)
+            ).json()["engine"]
+            capacity = engine["loads"][0]["max_running_requests"]
             before = time.monotonic()
             prefills = await asyncio.gather(
                 *(
@@ -125,16 +147,31 @@ async def calibrate(pool, clients):
                 )
             )
             prefill_wall = time.monotonic() - before
-            prefill_rate = sum(
-                8192 - r["meta"]["cached_tokens"] for r in prefills
-            ) / max(r["meta"]["e2e_latency"] for r in prefills)
+            prefill_span = max(
+                r["meta"]["response_sent_to_client_ts"] for r in prefills
+            ) - min(
+                r["meta"]["response_sent_to_client_ts"] - r["meta"]["e2e_latency"]
+                for r in prefills
+            )
+            prefill_rate = (
+                sum(8192 - r["meta"]["cached_tokens"] for r in prefills) / prefill_span
+            )
             await request(source, prompt, label="decode-prime")
             before = time.monotonic()
             decodes = await asyncio.gather(
-                *(request(source, prompt, 512, "decode-36") for _ in range(36))
+                *(
+                    request(source, prompt, 512, "decode-capacity")
+                    for _ in range(capacity)
+                )
             )
             decode_wall = time.monotonic() - before
-            decode_rate = 36 * 512 / max(r["meta"]["e2e_latency"] for r in decodes)
+            decode_span = max(
+                r["meta"]["response_sent_to_client_ts"] for r in decodes
+            ) - min(
+                r["meta"]["response_sent_to_client_ts"] - r["meta"]["e2e_latency"]
+                for r in decodes
+            )
+            decode_rate = capacity * 512 / decode_span
             # Reuse exactly the same short prompt/cache state for the cold GPU
             # adapter and hot GPU adapter timing pair. The CPU adapter stays loaded.
             for s in clients[:9]:
@@ -151,6 +188,7 @@ async def calibrate(pool, clients):
                     cold["meta"]["e2e_latency"] - hot["meta"]["e2e_latency"]
                 )
             return dict(
+                decode_concurrency=capacity,
                 replica=replica.replica_id,
                 rows=rows,
                 prefill_rate=prefill_rate,
@@ -166,6 +204,7 @@ async def calibrate(pool, clients):
         results = await asyncio.gather(*(one(r) for r in router.replicas.values()))
     await router.aclose()
     rates = dict(
+        decode_concurrency=results[0]["decode_concurrency"],
         prefill_tokens_per_second=statistics.median(r["prefill_rate"] for r in results),
         decode_tokens_per_second=statistics.median(r["decode_rate"] for r in results),
         gpu_lora_seconds=max(

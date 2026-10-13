@@ -8,6 +8,15 @@ See the [native KV baseline comparison](lora-kv-training-replay-results.md) for
 the current policy's mixed DAPO replay and its limitations. The earlier
 [training comparison](lora-routing-results.md) measured a preceding policy.
 
+An opt-in measured-work policy and its real-GPU results are described in
+[measured-work routing](lora-work-routing-results.md). Set
+`inference_lora_routing = "work"` and supply `inference_routing_work_rates` from
+`scripts/benchmarks/lora_routing/work_calibrate.py`. This enables engine-backed
+cache/adapter snapshots and group placement; it is experimental, with mixed
+results against native KV affinity. The default remains `"affinity"`, whose
+policy is described below. Measured-work routing currently requires one DP
+replica and one pipeline stage per container.
+
 `inference_lora_routing = "affinity"` enables routing; `"naive"` keeps the existing
 adapter-independent Flash behavior for comparisons. Base-model sampling and FFT
 routing keep their existing paths.

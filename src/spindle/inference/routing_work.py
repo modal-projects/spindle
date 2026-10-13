@@ -196,5 +196,9 @@ class WorkRouter(LoraRouter):
     def release(self, upstream, adapter, *, failed=False, reservation_id=None):
         reservation = self.reservations.pop(reservation_id, None)
         if reservation is not None:
-            self.host_reservations[reservation["host"]].pop(reservation_id)
+            host = reservation["host"]
+            pending = self.host_reservations[host]
+            pending.pop(reservation_id)
+            if not pending:
+                del self.host_reservations[host]
         super().release(upstream, adapter, failed=failed)

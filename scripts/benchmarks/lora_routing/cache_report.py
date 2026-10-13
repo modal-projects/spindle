@@ -584,7 +584,7 @@ def plots(runs, summary, output):
                     [(row["start"], row["end"] - row["start"])],
                     (row["client"] - 0.35, 0.7),
                     facecolors=COLORS[arm],
-                    alpha=0.45 + 0.2 * row["round"],
+                    alpha=min(1.0, 0.45 + 0.2 * row["round"]),
                 )
             ax.set(
                 title=LABELS[arm], ylabel="Independent DAPO client", yticks=range(16)
