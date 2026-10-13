@@ -28,6 +28,36 @@ def totals(states):
     return {k: sum(s["gpu_lora"].get(k, 0) for s in states) for k in COUNTERS}
 
 
+def engine_intervals(data):
+    """Approximate successful-attempt occupancy; not native queue samples.
+
+    Anchor engine e2e duration at response-sent time. SGLang records e2e finish
+    just before response sending, so this shifts the interval by that gap.
+    Failed/retried attempts without a response cannot be reconstructed.
+    """
+    hosts = sorted(s["replica"] for s in data["baseline"])
+    adapters = sorted({r["adapter_index"] for r in data["requests"]})
+    times = np.arange(0, data["seconds"], 1.0)
+    changes = np.zeros((len(hosts), len(adapters), len(times) + 1), dtype=int)
+    for row in data["requests"]:
+        meta = next(
+            a["attrs"]["backend_timing"]
+            for a in reversed(row["attempts"])
+            if a["attrs"].get("ok")
+        )
+        end = meta["response_sent_to_client_ts"] - data["wall_started"]
+        start = end - meta["e2e_latency"]
+        lo, hi = np.searchsorted(times, [start, end])
+        h, a = (
+            hosts.index(row["stats"]["upstream"]),
+            adapters.index(row["adapter_index"]),
+        )
+        changes[h, a, lo] += 1
+        changes[h, a, hi] -= 1
+    occupancy = np.cumsum(changes, axis=2)[:, :, :-1]
+    return times, occupancy.sum(axis=1), (occupancy > 0).sum(axis=1)
+
+
 def summarize(data):
     assert data.get("error") is None, data.get("error")
     rows, config = data["requests"], data["config"]
@@ -148,6 +178,8 @@ def summarize(data):
         if "replicas" in o
         and sum(s["active"] for s in o["replicas"]) >= running_capacity
     ]
+    _, estimated_loads, estimated_sets = engine_intervals(data)
+    engine_busy = estimated_loads.sum(axis=0) >= running_capacity
     busy_loads = [np.array([s["active"] for s in o["replicas"]]) for o in busy]
     busy_sets = [len(s["adapters"]) for o in busy for s in o["replicas"]]
     placements = {
@@ -226,6 +258,25 @@ def summarize(data):
             default=0,
         ),
         "busy_snapshot_threshold": running_capacity,
+        "reconstructed_busy_engine_seconds": int(engine_busy.sum()),
+        "reconstructed_busy_engine_load_cv": float(
+            np.mean(
+                estimated_loads[:, engine_busy].std(axis=0)
+                / estimated_loads[:, engine_busy].mean(axis=0)
+            )
+        )
+        if engine_busy.any()
+        else None,
+        "reconstructed_busy_engine_mean_adapter_versions": float(
+            estimated_sets[:, engine_busy].mean()
+        )
+        if engine_busy.any()
+        else None,
+        "reconstructed_busy_engine_fraction_over_8_adapters": float(
+            np.mean(estimated_sets[:, engine_busy] > 8)
+        )
+        if engine_busy.any()
+        else None,
         "busy_snapshot_count": len(busy),
         "mean_load_cv_while_pool_above_running_capacity": float(
             np.mean([loads.std() / loads.mean() for loads in busy_loads])
@@ -440,6 +491,21 @@ def plots(runs, summary, output):
         )
         ax.axhline(64, color="#777777", linestyle=":", linewidth=1)
     save(fig, output, "replica-load")
+
+    fig, axes = plt.subplots(
+        1, len(runs), figsize=(4.3 * len(runs), 4), sharey=True, squeeze=False
+    )
+    for ax, (arm, data) in zip(axes[0], runs.items()):
+        times, loads, _ = engine_intervals(data)
+        for counts in loads:
+            ax.plot(times, counts, alpha=0.7, linewidth=1)
+        ax.set(
+            title=LABELS[arm],
+            xlabel="Time (s)",
+            ylabel="Estimated requests in engine / replica",
+        )
+    fig.suptitle("Reconstructed successful-attempt intervals (1-second samples)")
+    save(fig, output, "reconstructed-engine-load")
 
     fig, ax = plt.subplots(figsize=(8, 4))
     for arm, data in runs.items():
