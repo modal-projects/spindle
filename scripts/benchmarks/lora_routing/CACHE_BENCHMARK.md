@@ -191,3 +191,20 @@ SGLang's e2e finish occurs just before response sending, so the inferred interva
 is shifted by that gap. Failed attempts without responses cannot be reconstructed;
 report their count alongside this figure. This supplements incomplete native
 snapshots and is not an exact native scheduler queue trace.
+
+
+The mixed math case uses `--groups 16 --samples 8 --large-group-clients 8
+--rounds 1 --stagger-seconds 0.5`. Clients 0–7 reshape their unchanged 128-sequence
+budget into one problem with 128 samples; clients 8–15 retain 16 problems with
+eight samples each. The trace still has 2,048 requests and 1,048,576 output tokens.
+This represents mixed group-size experiments sharing an inference pool. It is
+an explicit workload variant, not the source DAPO job's default configuration.
+[Published MATH GRPO experiments](https://arxiv.org/html/2603.01162v3) evaluate
+128-sample groups; this benchmark does not reproduce that paper's optimizer work.
+
+The final router resolves native Flash affinity once per unseen prefix, before
+request fanout. Raw results include lookup count/failure/time aggregates and the
+resolved homes. Measured request latency includes this lookup. The benchmark-only
+sidecar now gives engine observations a separate HTTP connection pool so they do
+not queue behind its generation connections; production request handling is
+unchanged by this instrumentation change.

@@ -17,22 +17,26 @@ When upgrading an existing deployment, refresh its inference sidecars with
 
 ## Placement and load
 
-New prefixes rank replicas by rendezvous hashing of their version-scoped affinity
-key and choose the less-loaded of the first two eligible candidates. This spreads
-a model's independent problems while reducing hot spots from a single hash choice. If that preferred replica's active adapter working set is full and
-does not contain the requested adapter, cold placement prefers an eligible
-replica already serving that adapter, then one with available adapter capacity.
-Fallback prefers the least-loaded candidate; deterministic model rendezvous order
-breaks load ties. Adapter
-concentration is a response to working-set pressure, not the default for every
-new prefix.
+`sample_task` first prepares the problem's prefix, then each generation calls
+synchronous `select_destination`. A prefix already present in the router or in
+replica hints needs no placement RPC. For a new prefix, the Modal provider sends
+one authenticated `GET /routing-state` with the **same Modal-Session-ID used by
+native generation affinity**. This obtains Flash's actual home instead of
+substituting another hash distribution. Concurrent callers for that prefix share
+one lookup, bounded to two seconds; different prefixes resolve concurrently.
+A failed lookup falls back to native Flash.
 
-Each exact adapter-version/affinity-key pair keeps its first destination in a
-bounded local map. A later residency change does not remap it. Sidecars advertise
-bounded, version-scoped recent prefix keys so another sampling frontend can
-recover locality. If the home is overloaded, the router first looks for another
-eligible replica with that prefix, then uses adapter placement. Temporary overflow
-does not rewrite the original home. Failed/departed homes can be replaced.
+The resolved exact-version/affinity pair keeps that home in a bounded local map.
+It remains there while eligible, even if its adapter becomes cold or another
+replica becomes warm. If overloaded, selection first prefers an eligible replica
+with recent use of the same prefix, then one with an active/recent exact adapter,
+then one with room in its active adapter working set. These candidates are ranked
+by load, with deterministic model hashing breaking ties. If none has room, the
+less-loaded of two prefix-hash candidates is used. The model's recent adapter
+hint uses the last `slots` entries; it is not a GPU-residency guarantee.
+Temporary overflow does not rewrite the original home. Failed/departed homes can
+be replaced. Non-Modal callers without an affinity resolver use two-choice
+rendezvous placement for their initial home.
 
 Estimated load adds new local reservations to reported outstanding requests,
 without double-counting reservations already present at observation time. A
@@ -43,7 +47,6 @@ high load it preserves a small prefix group instead of spreading each sample
 across hosts just above the pool mean. A hot home spills once it consumes this
 budget. This is a request-count heuristic, not a calibrated prefill/decode cost
 model or a proof that one target is the optimal budget for every workload.
-
 
 These are approximate observations, not a distributed admission guarantee.
 Independent frontends can overshoot the bound between refreshes. Recent prefix
