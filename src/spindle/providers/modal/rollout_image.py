@@ -215,7 +215,7 @@ SGLANG_LORA_LIFETIME_PATCH = (
     '         """\n'
 )
 
-image = (
+base_image = (
     modal.Image.from_registry(SGLANG_IMAGE)
     .entrypoint([])
     .apt_install("git")
@@ -245,5 +245,6 @@ image = (
             "SGLANG_DISABLE_CUDNN_CHECK": "1",
         }
     )
-    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+
+image = base_image.add_local_python_source("spindle", ignore=ignore_config_source)

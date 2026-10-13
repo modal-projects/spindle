@@ -261,3 +261,7 @@ records zero active GPUs.
 
 See [the routing design and reproduction guide](lora-routing.md) for deployment,
 independent training clients, observation collection, and report commands.
+
+## Long-prefix cache experiment
+
+The subsequent [fixed-work LoRA/KV comparison](lora-cache-routing-results.md) measures actual GPU residency, adapter loads/evictions, and prefix reuse on the same eight H200s. It uses a different, fixed-length workload; its absolute throughput is not directly comparable to the shorter-prompt replay or training experiment above.
