@@ -89,6 +89,20 @@ def instrument(sglang_root, sidecar):
         '        """Run a batch."""\n        if self.enable_lora and batch.forward_mode.is_extend():\n            routing_benchmark.requests(batch.reqs, self.tp_worker.model_runner.lora_manager.memory_pool.uid_to_buffer_id)\n',
     )
     replace(sidecar, "import contextlib\n", "import contextlib\nimport json\n")
+    # Observation must not queue behind the generation client's 100 occupied
+    # HTTP connections. This separate pool exists only in the benchmark image.
+    replace(
+        sidecar,
+        "        app.state.adapter_lock = asyncio.Lock()\n",
+        "        app.state.benchmark_client = httpx.AsyncClient(base_url=upstream_url.rstrip('/'), timeout=10, trust_env=False)\n"
+        "        app.state.adapter_lock = asyncio.Lock()\n",
+    )
+    replace(
+        sidecar,
+        "            await app.state.client.aclose()\n",
+        "            await app.state.benchmark_client.aclose()\n"
+        "            await app.state.client.aclose()\n",
+    )
     replace(
         sidecar,
         '    @app.get("/routing-state")\n',
@@ -96,7 +110,7 @@ def instrument(sglang_root, sidecar):
     async def benchmark_state():
         path = Path("/tmp/spindle-routing-metrics.json")
         counters = json.loads(path.read_text()) if path.exists() else {}
-        response = await app.state.client.get("/v1/loads?include=core")
+        response = await app.state.benchmark_client.get("/v1/loads?include=core")
         response.raise_for_status()
         return {**await routing_state(), "gpu_lora": counters, "engine": response.json()}
 
