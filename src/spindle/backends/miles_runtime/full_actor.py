@@ -17,6 +17,7 @@ import torch
 import torch.distributed as dist
 from megatron.core import dist_checkpointing
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.utils import get_model_config
 from miles.backends.megatron_utils.actor import MegatronTrainRayActor
 from miles.backends.megatron_utils.checkpoint import _load_checkpoint_hf
 from miles.backends.megatron_utils.model import (
@@ -100,7 +101,7 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             setup_train_iteration_config(
                 self.args, self.model, None, disable_optimizer=True
             )
-            config = self._chunk.config
+            config = get_model_config(self._chunk)
             # Gradients stay local until optim_step reduces them once; a
             # reduce-scatter per pass would double count earlier passes.
             config.finalize_model_grads_func = lambda *args, **kwargs: None
