@@ -64,8 +64,6 @@ Each parent's settings and overrides apply before its child's. Constructor field
 | `miles_cfg` | Existing `MilesBackendConfig`; `cli_options` supplies additional Miles arguments |
 | `sglang_cfg` | SGLang `ServerArgs` |
 
-LoRA sampler pools autoscale up to `inference_max_replicas`, targeting `inference_target_concurrency` requests per replica, and release a replica after `inference_scaledown_window_s` idle seconds. They hold `inference_min_replicas` replicas only while training is happening: from the moment a trainer for the config boots until the config's training models are reclaimed. Otherwise, for example during evals, they scale from zero. Full fine-tune rollout pools use `inference_min_replicas` as a fixed minimum unless the training client's `rollout` settings override it.
-
 Modal and backend libraries validate their own options. Spindle checks integration requirements such as trainer slot capacity, supported training modes, and parallelism agreeing with allocated GPUs. It supplies managed model paths, context length and adapter settings; conflicting backend overrides are rejected.
 
 `BaseConfig` does not enforce field types or reject arbitrary attributes. Extra backend options belong in the corresponding backend dictionary. A misspelled top-level attribute is ordinary Python data and may be unused.
