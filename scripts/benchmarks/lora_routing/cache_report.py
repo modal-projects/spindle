@@ -134,6 +134,22 @@ def summarize(data):
         for o in loaded
     ]
     active_sets = [len(s["adapters"]) for o in loaded for s in o["replicas"]]
+    # Use actual engine capacity to evaluate busy intervals. The independent
+    # clients need not all overlap, so half the theoretical launch ceiling can
+    # otherwise select no observations at all.
+    running_capacity = sum(
+        load["max_running_requests"]
+        for state in data["baseline"]
+        for load in state["engine"]["loads"]
+    )
+    busy = [
+        o
+        for o in data["observations"]
+        if "replicas" in o
+        and sum(s["active"] for s in o["replicas"]) >= running_capacity
+    ]
+    busy_loads = [np.array([s["active"] for s in o["replicas"]]) for o in busy]
+    busy_sets = [len(s["adapters"]) for o in busy for s in o["replicas"]]
     placements = {
         i: {r["stats"]["upstream"] for r in rows if r["adapter_index"] == i}
         for i in {r["adapter_index"] for r in rows}
@@ -188,6 +204,34 @@ def summarize(data):
             np.mean(np.array(active_sets) > 8)
         )
         if active_sets
+        else None,
+        "observed_peak_pool_active": max(
+            (
+                sum(s["active"] for s in o["replicas"])
+                for o in data["observations"]
+                if "replicas" in o
+            ),
+            default=0,
+        ),
+        "busy_snapshot_threshold": running_capacity,
+        "busy_snapshot_count": len(busy),
+        "mean_load_cv_while_pool_above_running_capacity": float(
+            np.mean([loads.std() / loads.mean() for loads in busy_loads])
+        )
+        if busy_loads
+        else None,
+        "fraction_busy_snapshots_with_idle_replica": float(
+            np.mean([np.any(loads == 0) for loads in busy_loads])
+        )
+        if busy_loads
+        else None,
+        "mean_busy_active_adapter_versions_per_replica": float(np.mean(busy_sets))
+        if busy_sets
+        else None,
+        "fraction_busy_replica_observations_over_8_adapters": float(
+            np.mean(np.array(busy_sets) > 8)
+        )
+        if busy_sets
         else None,
         "mean_replicas_per_adapter": float(
             np.mean([len(v) for v in placements.values()])

@@ -5,8 +5,10 @@ and [the repository results](../../../docs/lora-cache-routing-results.md).
 
 This benchmark compares the existing default Flash path, the current LoRA-aware
 router, and native Flash affinity using a stable conversation key. It does not
-implement LMETRIC or change the production routing policy. The workload runs on
-real inference GPUs with synthetic, repeatable token sequences and frozen adapters.
+implement LMETRIC. The workload runs on real inference GPUs with frozen adapters;
+choose either synthetic repeated prefixes or independent DAPO client replay.
+Historical results describe the policy at their recorded commit, not necessarily
+the current router.
 
 ## Workload
 
@@ -36,7 +38,8 @@ quality. The seed is 12026. A hash verifies identical traces across policies.
 An eight-vCPU CPU function drives eight independent router-state objects through
 the production `sample_task` path and real Modal Flash. It does not emulate eight
 separate `execute_sample` containers or their ingress overhead. Destination
-selection is unchanged; the generator is not a production routing controller.
+selection uses the checked-out router; the generator is not a production routing
+controller.
 
 ## Controlled state and instrumentation
 
@@ -124,3 +127,51 @@ The fixed pool deliberately isolates routing. This is not an autoscaling test,
 training-throughput measurement, or estimator of statistical significance from
 one trial. The LoRA router still uses approximate recent/active-adapter hints;
 benchmark GPU counters are observations and are not fed into routing decisions.
+
+
+## Independent DAPO client replay
+
+Build a manifest from a completed 16-client training run:
+
+```bash
+python scripts/benchmarks/lora_routing/dapo_manifest.py /path/to/training-run \
+  --bulletin-volume routing27-bulletin-1011 --output /tmp/cache-run/dapo-clients.json
+python scripts/benchmarks/lora_routing/cache_replay.py \
+  --pools /tmp/cache-run/pools.json --clients /tmp/cache-run/dapo-clients.json \
+  --output /tmp/cache-run/dapo --workload dapo \
+  --groups 16 --samples 8 --rounds 3 --stagger-seconds 5 --decode-tokens 512 \
+  --arms lora kv --sequential --keep-pools
+python scripts/benchmarks/lora_routing/cache_report.py /tmp/cache-run/dapo --arms lora kv
+```
+
+This uses the real tokenized math problems and two saved trained checkpoints per
+client. It runs eight separate nonpreemptible CPU functions, each with two
+independent clients and one pool router, through production `sample_task`. The
+coordinator waits once for all eight workers to be ready, then releases a common
+start timestamp. There is no coordination barrier between training rounds.
+
+Each client submits 16 groups × 8 samples (128 concurrent requests per rollout),
+then starts its next rollout while its recorded optimizer/publication delay
+elapses. The third rollout uses the second checkpoint. Problems advance between
+rounds; every sample of the same problem has the same affinity key, scoped to its
+sampling session and exact version. Temperature is 1.0, seeds are fixed, and
+`ignore_eos=True` fixes each decode at 512 tokens. The default trace has 6,144
+requests and 3,145,728 output tokens, with at most 2,048 concurrent requests.
+Actual concurrency is measured, since staggered starts, independent progress,
+and update intervals reduce overlap.
+
+**This replays inference on GPUs; update intervals are recorded delays, not new
+optimizer work. It measures request and rollout completion, not live training
+throughput or model quality.** The source training configuration is retained in
+the original run. Resetting GPU adapters and KV state also clears prefix hints.
+
+`--stagger-seconds` controls client arrival density without introducing round
+barriers. `--hot-samples 128` changes client 0 to one 128-sample problem per
+rollout, keeping its total request count unchanged; other clients remain 16 × 8.
+This is an explicit high-fanout stress case, not the source job's 8-sample group.
+
+The report adds per-client rollout timelines and active adapter working sets.
+Busy-interval balance metrics use total actual engine running capacity as their
+threshold (288 here), and report the number of eligible snapshots. All transport
+retries remain in the measured result. Nonpreemptible CPU workers match
+production sampling workers; GPU allocation is unchanged.

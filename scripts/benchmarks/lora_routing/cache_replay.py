@@ -6,6 +6,7 @@ replay the same seeded prompts and fixed output lengths under each policy.
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import json
 import math
@@ -86,8 +87,9 @@ def make_trace(
     secrets=[modal.Secret.from_name("lilo-proxy")],
     max_containers=8,
     timeout=2400,
+    nonpreemptible=True,
 )
-async def run_training_frontend(pool, arm, clients, config, start_at):
+async def run_training_frontend(pool, arm, clients, config, startup, shard):
     """Two independent DAPO clients per real CPU container; one router per pool.
 
     Replay real prompts and saved policies. Recorded train/publication intervals
@@ -98,8 +100,10 @@ async def run_training_frontend(pool, arm, clients, config, start_at):
     router = create_router(pool, gateway, target=64, slots=8)
     rows, rollouts = [], []
     await router.refresh()
-    if time.time() > start_at:
-        raise RuntimeError("CPU frontend missed the readiness deadline")
+    await startup.put.aio(
+        {"shard": shard, "frontend": os.environ["MODAL_TASK_ID"]}, partition="ready"
+    )
+    start_at = await startup.get.aio(timeout=180, partition=f"start-{shard}")
     limits = httpx.Limits(max_connections=512, max_keepalive_connections=256)
     async with httpx.AsyncClient(
         headers=proxy_auth_headers(),
@@ -262,6 +266,7 @@ async def run_training_frontend(pool, arm, clients, config, start_at):
     region="us-west",
     secrets=[modal.Secret.from_name("lilo-proxy")],
     timeout=3600,
+    nonpreemptible=True,
 )
 async def run_arm(pool, arm, clients, config):
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
@@ -373,11 +378,8 @@ async def run_arm(pool, arm, clients, config):
             json.dumps(trace, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         requests, observations = [], []
-        # Let all eight independent CPU frontends become ready before timing.
-        # This is a startup gate, not a barrier between clients' training steps.
-        lead = 60 if training else 0
-        started = time.monotonic() + lead
-        wall_started = time.time() + lead
+        started = time.monotonic()
+        wall_started = time.time()
         finished = asyncio.Event()
 
         async def observe():
@@ -481,35 +483,59 @@ async def run_arm(pool, arm, clients, config):
                         flush=True,
                     )
 
-        observer = asyncio.create_task(observe())
-
-        async def frontend(shard):
+        async def frontend(shard, startup):
             result = await run_training_frontend.remote.aio(
-                pool, arm, clients[shard::8], config, wall_started
+                pool, arm, clients[shard::8], config, startup, shard
             )
             requests.extend(result["requests"])
             return result
 
-        tasks = (
-            [asyncio.create_task(frontend(i)) for i in range(8)]
-            if training
-            else [
-                asyncio.create_task(logical_client(i, s)) for i, s in enumerate(trace)
-            ]
-        )
         error = None
         results = []
-        try:
-            results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2400)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            print(f"{arm}: FAILED: {error}", flush=True)
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            finished.set()
-            await observer
+        # Coordination occurs once at startup, never on sample requests or
+        # between training rounds. The queue is destroyed when this arm ends.
+        async with (
+            modal.Queue.ephemeral() if training else nullcontext(None)
+        ) as startup:
+            tasks = (
+                [asyncio.create_task(frontend(i, startup)) for i in range(8)]
+                if training
+                else [
+                    asyncio.create_task(logical_client(i, s))
+                    for i, s in enumerate(trace)
+                ]
+            )
+            observer = None
+            try:
+                if training:
+                    async with asyncio.timeout(180):
+                        ready = [
+                            await startup.get.aio(timeout=180, partition="ready")
+                            for _ in range(8)
+                        ]
+                    assert {r["shard"] for r in ready} == set(range(8))
+                    assert len({r["frontend"] for r in ready}) == 8
+                    wall_started = time.time() + 2
+                    started = time.monotonic() + 2
+                    await asyncio.gather(
+                        *(
+                            startup.put.aio(wall_started, partition=f"start-{i}")
+                            for i in range(8)
+                        )
+                    )
+                    print(f"{arm}: all eight CPU frontends ready", flush=True)
+                observer = asyncio.create_task(observe())
+                results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=2400)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                print(f"{arm}: FAILED: {error}", flush=True)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                finished.set()
+                if observer is not None:
+                    await observer
         elapsed = time.monotonic() - started
         final = await inspect()
         await asyncio.gather(*(router.aclose() for router in routers))
