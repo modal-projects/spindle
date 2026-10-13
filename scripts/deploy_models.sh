@@ -9,6 +9,8 @@ cd "$(dirname "$0")/.."
 deployment_files=(
   src/spindle/configs/qwen35_9b_lora_16k.py
   src/spindle/configs/qwen35_9b_lora_64k.py
+  src/spindle/configs/qwen35_2b_lora_16k.py
+  src/spindle/configs/qwen35_4b_lora_16k.py
   src/spindle/configs/qwen35_4b_fft_64k.py
   src/spindle/configs/gpt_oss_20b_lora_32k.py
   src/spindle/configs/gpt_oss_20b_lora_64k.py
