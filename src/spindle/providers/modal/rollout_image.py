@@ -1,4 +1,5 @@
 import modal
+from pathlib import Path
 
 from .image_dependencies import (
     CORE_PACKAGES,
@@ -236,6 +237,12 @@ base_image = (
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")
+    .add_local_file(
+        Path(__file__).resolve().parents[2] / "inference/sglang_routing_observer.py",
+        "/opt/spindle-routing-observer.py",
+        copy=True,
+    )
+    .run_commands("python /opt/spindle-routing-observer.py")
     .env(
         {
             "HF_XET_HIGH_PERFORMANCE": "1",

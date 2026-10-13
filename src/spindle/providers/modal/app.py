@@ -292,16 +292,26 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         routing = definition.recipe.inference_lora_routing
-        if routing not in {"affinity", "naive"}:
+        if routing not in {"affinity", "naive", "work"}:
             raise ValueError(f"unknown LoRA routing policy: {routing}")
         router = None
-        if routing == "affinity" and task.get("model_id") is not None:
+        if routing in {"affinity", "work"} and task.get("model_id") is not None:
+            if (
+                routing == "work"
+                and definition.recipe.inference_routing_work_rates is None
+            ):
+                raise ValueError(
+                    "work routing requires measured inference_routing_work_rates"
+                )
             if spec.app_name not in _lora_routers:
                 _lora_routers[spec.app_name] = create_router(
                     spec.app_name,
                     gateway,
                     target=definition.recipe.inference_target_concurrency,
                     slots=definition.inference_settings.get("max_loras_per_batch", 8),
+                    work_rates=definition.recipe.inference_routing_work_rates
+                    if routing == "work"
+                    else None,
                 )
             router = _lora_routers[spec.app_name]
 

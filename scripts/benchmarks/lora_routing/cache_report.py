@@ -13,8 +13,11 @@ import numpy as np
 
 
 LABELS = {"default": "Default Flash", "lora": "LoRA-aware", "kv": "KV affinity"}
+LABELS.update({"work": "Measured work", "work-no-adapter": "Work without adapter cost"})
 COLORS = {"default": "#d84b43", "lora": "#287fba", "kv": "#15947a"}
+COLORS.update({"work": "#6a48af", "work-no-adapter": "#d89519"})
 STYLES = {"default": "--", "lora": "-", "kv": "-."}
+STYLES.update({"work": "-", "work-no-adapter": ":"})
 COUNTERS = (
     "request_lora_hits",
     "request_lora_misses",
@@ -67,6 +70,10 @@ def summarize(data):
         if training
         else 32 * config["streams"] * config["turns"]
     )
+    if config.get("duration_seconds"):
+        expected = len(rows)
+        assert expected > 0
+        assert len(data["frontends"]) == len(set(data["frontends"])) == 8
     assert len(rows) == len({r["id"] for r in rows}) == expected
     assert all(
         (training or r["prompt_tokens"] == config["prompt_tokens"])
@@ -120,7 +127,8 @@ def summarize(data):
     registrations = sum(s["adapter_loads"] for s in data["final"]) - sum(
         s["adapter_loads"] for s in data["baseline"]
     )
-    assert registrations == 0, "Registration I/O contaminated the cache comparison"
+    if not config.get("cold_versions"):
+        assert registrations == 0, "Registration I/O contaminated the cache comparison"
     snapshots = [
         s for row in data["observations"] if "replicas" in row for s in row["replicas"]
     ]
@@ -192,6 +200,16 @@ def summarize(data):
         prefix_placements.setdefault(key, set()).add(row["stats"]["upstream"])
     lookups = data.get("lookup_metrics", [])
     lookup_count = sum(m["count"] for m in lookups)
+    window_end = config.get("duration_seconds", 0)
+    window_start = min(60, window_end / 3)
+    window = [r for r in rows if window_start <= r["end"] < window_end]
+    selections = [
+        a["attrs"]["routing"]["selection_seconds"]
+        for r in rows
+        for a in r["attempts"]
+        if a["attrs"].get("routing")
+    ]
+    snapshot_times = [s["work"]["snapshot_seconds"] for s in snapshots if s.get("work")]
     return {
         "requests": expected,
         "physical_attempts": attempts,
@@ -199,6 +217,28 @@ def summarize(data):
         "extra_engine_admissions": admissions - expected,
         "attempts_without_engine_admission": attempts - admissions,
         "seconds": data["seconds"],
+        "measurement_window": [window_start, window_end] if window_end else None,
+        "steady_completed_requests": len(window) if window_end else None,
+        "steady_output_tokens_per_second": sum(r["decode_tokens"] for r in window)
+        / (window_end - window_start)
+        if window_end
+        else None,
+        "steady_latency_mean_s": float(np.mean([r["seconds"] for r in window]))
+        if window
+        else None,
+        "steady_kv_hit_ratio": sum(r["cached_tokens"] for r in window)
+        / max(1, sum(r["prompt_tokens"] for r in window))
+        if window
+        else None,
+        "routing_selection_p50_us": float(np.quantile(selections, 0.5) * 1e6)
+        if selections
+        else None,
+        "routing_selection_p95_us": float(np.quantile(selections, 0.95) * 1e6)
+        if selections
+        else None,
+        "snapshot_p95_ms": float(np.quantile(snapshot_times, 0.95) * 1e3)
+        if snapshot_times
+        else None,
         "output_tokens": expected * config["decode_tokens"],
         "tokens_per_second": expected * config["decode_tokens"] / data["seconds"],
         "requests_per_second": expected / data["seconds"],

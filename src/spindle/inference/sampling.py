@@ -119,6 +119,7 @@ async def sample_task(
         )
     )
     async with client_context as active_client:
+        routing_prefixes = None
         if lora_router is not None:
             await lora_router.refresh()
             if model_id is None or version is not None:
@@ -127,7 +128,9 @@ async def sample_task(
                     if model_id is not None
                     else "base"
                 )
-                await lora_router.prepare_prefix(adapter, routing_session_id)
+                routing_prefixes = await lora_router.prepare_prefix(
+                    adapter, routing_session_id, prompt=prompt
+                )
         outputs = await asyncio.gather(
             *(
                 _sample_one(
@@ -154,6 +157,7 @@ async def sample_task(
                     base_headers=headers,
                     request_timeout=timeout,
                     lora_router=lora_router,
+                    routing_prefixes=routing_prefixes,
                 )
                 for index in range(num_samples)
             )
@@ -222,6 +226,7 @@ async def _sample_one(
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
     lora_router: LoraRouter | None = None,
+    routing_prefixes=None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -298,10 +303,29 @@ async def _sample_one(
                 exact=None if latest else int(version),
             )
         upstream = None
+        physical_attempt += 1
+        observation = SampleAttempt(
+            on_event,
+            {
+                **(trace_attrs or {}),
+                "sequence_index": index,
+                "attempt_number": physical_attempt,
+                "routed_dp_rank": routed_dp_rank,
+                "prompt_tokens": len(prompt),
+            },
+        )
+        routing_details = {}
         if lora_router is not None:
             await lora_router.refresh()
             upstream = lora_router.select_destination(
-                model_id or "base", adapter, cache_affinity_id or routing_session_id
+                model_id or "base",
+                adapter,
+                cache_affinity_id or routing_session_id,
+                prompt=prompt,
+                output_tokens=params.get("max_new_tokens", 1),
+                prefixes=routing_prefixes,
+                reservation_id=observation.id,
+                details=routing_details,
             )
             if upstream is not None:
                 # Flash affinity headers take precedence over exact upstreams.
@@ -316,18 +340,10 @@ async def _sample_one(
                 headers["Modal-Flash-Upstream"] = lora_router.replicas[
                     upstream
                 ].upstream
-        physical_attempt += 1
-        observation = SampleAttempt(
-            on_event,
-            {
-                **(trace_attrs or {}),
-                "sequence_index": index,
-                "attempt_number": physical_attempt,
-                "routed_dp_rank": routed_dp_rank,
-                "upstream": upstream or gateway_url,
-                "selected_replica": upstream,
-                "prompt_tokens": len(prompt),
-            },
+        observation.attrs.update(
+            upstream=upstream or gateway_url,
+            selected_replica=upstream,
+            routing=routing_details,
         )
         body["rid"] = observation.id
         attempt_result = observation.attrs
@@ -431,6 +447,7 @@ async def _sample_one(
                 lora_router.release(
                     upstream,
                     adapter,
+                    reservation_id=observation.id,
                     failed=cause is not None
                     or attempt_result.get("route_mismatch", False)
                     or "version_error" in attempt_result

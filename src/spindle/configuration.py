@@ -58,6 +58,7 @@ class BaseConfig:
     inference_startup_timeout_s = 1200
     inference_env = {}
     inference_lora_routing = "affinity"
+    inference_routing_work_rates = None
 
     miles_cfg = {}
     megatron_cfg = {}

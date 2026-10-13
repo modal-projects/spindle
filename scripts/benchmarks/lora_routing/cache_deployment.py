@@ -20,6 +20,7 @@ class Config(Parent):
     inference_cpu = 8
     inference_target_concurrency = 64
     inference_startup_timeout_s = 1200
+    inference_env = {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
     overrides = {
         "platform.modal.environment": "lilo-deploy",
         "platform.modal.region": "us-west",
@@ -70,7 +71,7 @@ def main():
             "pool": pool.app_name,
             "deployment": json.loads(deployment.model_dump_json()),
         }
-        for arm in ("default", "lora", "kv")
+        for arm in ("default", "lora", "kv", "work", "work-no-adapter")
     ]
     args.output.write_text(json.dumps(assignments, indent=2) + "\n")
 

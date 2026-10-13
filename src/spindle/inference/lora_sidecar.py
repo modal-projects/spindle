@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import time
 import uuid
@@ -44,6 +45,9 @@ def create_app(
         app.state.active = 0
         app.state.adapter_loads = 0
         app.state.adapter_load_seconds = 0.0
+        app.state.routing_requests = {}
+        app.state.routing_snapshot = {}
+        app.state.routing_read_at = 0.0
         try:
             yield
         finally:
@@ -58,6 +62,40 @@ def create_app(
     @app.get("/routing-state")
     async def routing_state():
         now = time.monotonic()
+        work = None
+        if os.environ.get("SGLANG_SPINDLE_ROUTING_OBSERVATIONS") == "1":
+            if now - app.state.routing_read_at > 0.5:
+                app.state.routing_read_at = now
+                path = Path("/tmp/spindle-routing-work.json")
+                try:
+                    app.state.routing_snapshot = json.loads(
+                        await asyncio.to_thread(path.read_text)
+                    )
+                except (OSError, ValueError):
+                    app.state.routing_snapshot = {}
+            snapshot = app.state.routing_snapshot
+            if snapshot:
+                current = app.state.routing_requests
+                rows = {
+                    r["rid"]: r for r in snapshot["requests"] if r["rid"] in current
+                }
+                rows.update(
+                    (rid, row) for rid, row in current.items() if rid not in rows
+                )
+                work = dict(
+                    age_seconds=time.time() - snapshot["timestamp"],
+                    incarnation=snapshot["incarnation"],
+                    sequence=snapshot["sequence"],
+                    prefixes=snapshot["prefixes"],
+                    cpu_adapters=snapshot["cpu_adapters"],
+                    gpu_adapters=snapshot["gpu_adapters"],
+                    request_ids=list(rows),
+                    pending_adapters=list({r["adapter"] for r in rows.values()}),
+                    prefill_tokens=sum(r["prefill_tokens"] for r in rows.values()),
+                    decode_tokens=sum(r["decode_tokens"] for r in rows.values()),
+                    snapshot_seconds=snapshot["snapshot_seconds"],
+                    cache_kind=snapshot["cache_kind"],
+                )
         return {
             "replica": os.environ.get("MODAL_TASK_ID", "local"),
             "active": app.state.active,
@@ -67,19 +105,40 @@ def create_app(
             "prefixes": [k for k, t in app.state.prefixes.items() if now - t < 120],
             "adapter_loads": app.state.adapter_loads,
             "adapter_load_seconds": app.state.adapter_load_seconds,
+            "work": work,
         }
 
     @app.post("/generate")
     async def generate(request: Request) -> Response:
+        payload = await request.json()
+        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        constraint = VersionConstraint.from_payload(payload)
+        run_id = payload.get("weight_run_id")
+        adapter = (
+            VersionRef(str(run_id), constraint.exact_version).identity
+            if run_id is not None and constraint.exact_version is not None
+            else payload.get("lora_path", "base")
+        )
+        if isinstance(rid, str):
+            app.state.routing_requests[rid] = dict(
+                rid=rid,
+                adapter=adapter,
+                prefill_tokens=len(payload.get("input_ids", ())),
+                decode_tokens=payload.get("sampling_params", {}).get(
+                    "max_new_tokens", 1
+                ),
+            )
         app.state.active += 1
         try:
-            response = await generate_response(request)
+            response = await generate_response(request, payload)
             response.headers["x-spindle-replica"] = os.environ.get(
                 "MODAL_TASK_ID", "local"
             )
             return response
         finally:
             app.state.active -= 1
+            if isinstance(rid, str):
+                app.state.routing_requests.pop(rid, None)
 
     @app.get("/health")
     async def health() -> Response:
@@ -90,8 +149,7 @@ def create_app(
             media_type=response.headers.get("content-type"),
         )
 
-    async def generate_response(request: Request) -> Response:
-        payload = await request.json()
+    async def generate_response(request: Request, payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -116,6 +174,8 @@ def create_app(
                 )
 
         adapter = payload.get("lora_path", "base")
+        if isinstance(payload["rid"], str):
+            app.state.routing_requests[payload["rid"]]["adapter"] = adapter
         affinity = payload.get("session_id")
         key = prefix_key(adapter, affinity) if isinstance(affinity, str) else None
         if key is not None:

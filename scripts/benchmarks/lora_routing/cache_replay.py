@@ -79,6 +79,18 @@ def make_trace(
     return trace
 
 
+def long_prompt(source, round_index, group_index):
+    client_index = source["client_index"]
+    vocabulary = source["vocabulary"]
+    shared = random.Random(12026 + client_index * 1000 + group_index).choices(
+        vocabulary, k=7168
+    )
+    suffix = random.Random(
+        24026 + client_index * 10000 + round_index * 100 + group_index
+    ).choices(vocabulary, k=1024)
+    return shared + suffix
+
+
 @app.function(
     image=image,
     cpu=2,
@@ -97,7 +109,14 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     client's update proceeds, matching client.py without cross-client barriers.
     """
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
-    router = create_router(pool, gateway, target=64, slots=8)
+    router = create_router(
+        pool,
+        gateway,
+        target=64,
+        slots=8,
+        work_rates=config.get("work_rates") if arm.startswith("work") else None,
+        adapter_costs=arm != "work-no-adapter",
+    )
     rows, rollouts = [], []
     await router.refresh()
     await startup.put.aio(
@@ -118,13 +137,17 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
 
         async def group(source, round_index, group_index, version):
             client_index = source["client_index"]
-            problem = round_index * config["groups"] + group_index
+            problem = (
+                0 if config.get("repeat_prefixes") else round_index * config["groups"]
+            ) + group_index
             prompt = source["prompts"][problem % len(source["prompts"])]
+            if config.get("long_prefix"):
+                prompt = long_prompt(source, round_index, group_index)
             count = config["samples"]
-            if client_index < config.get("large_group_clients", 0):
-                count = config["groups"] * config["samples"]
-            elif client_index == 0 and config["hot_samples"]:
+            if client_index == 0 and config["hot_samples"]:
                 count = config["hot_samples"]
+            elif client_index < config.get("large_group_clients", 0):
+                count = config["groups"] * config["samples"]
             ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
             task = {
                 "request_id": ident,
@@ -149,7 +172,9 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                 task,
                 gateway,
                 client=client,
-                lora_router=router if arm == "lora" else None,
+                lora_router=router
+                if arm in {"lora", "work", "work-no-adapter"}
+                else None,
                 stats=stats,
                 on_event=events.append,
                 timeout=240,
@@ -205,7 +230,9 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                 )
 
         async def rollout(source, round_index):
-            version = source["versions"][0 if round_index < 2 else 1]
+            version = source["versions"][
+                0 if round_index < 2 or not config.get("version_turnover", True) else 1
+            ]
             began = time.time()
             groups = (
                 1
@@ -242,14 +269,18 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                 )
             )
             await rollout(source, 0)
-            if config["rounds"] > 1:
-                # The next rollout starts immediately while this client's
-                # recorded update/publication interval elapses independently.
+            for round_index in range(1, config["rounds"]):
+                if (
+                    config.get("duration_seconds")
+                    and time.time() - start_at >= config["duration_seconds"]
+                ):
+                    break
+                # Preserve independent prefetch/update overlap. Saved checkpoint
+                # arrivals replay publication; these sleeps are not optimizer work.
                 await asyncio.gather(
-                    rollout(source, 1), asyncio.sleep(source["update_seconds"])
+                    rollout(source, round_index),
+                    asyncio.sleep(source["update_seconds"]),
                 )
-            if config["rounds"] > 2:
-                await rollout(source, 2)
 
         try:
             await asyncio.gather(*(training_client(source) for source in clients))
@@ -280,7 +311,17 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
 )
 async def run_arm(pool, arm, clients, config):
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
-    routers = [create_router(pool, gateway, target=64, slots=8) for _ in range(8)]
+    routers = [
+        create_router(
+            pool,
+            gateway,
+            target=64,
+            slots=8,
+            work_rates=config.get("work_rates") if arm.startswith("work") else None,
+            adapter_costs=arm != "work-no-adapter",
+        )
+        for _ in range(8)
+    ]
     deadline = time.monotonic() + 1100
     async with httpx.AsyncClient(
         headers=proxy_auth_headers(),
@@ -316,8 +357,25 @@ async def run_arm(pool, arm, clients, config):
         # GPU slots hold the last seven adapters plus the base model; the trace
         # therefore isolates placement and GPU/KV churn from registration I/O.
         async def warm(replica):
+            if config.get("cold_versions"):
+                response = await client.post(
+                    gateway + "/benchmark-unregister",
+                    headers={"Modal-Flash-Upstream": replica.upstream},
+                    json={
+                        "adapters": [
+                            f"{c['model_id']}/weight_v{v:06d}"
+                            for c in clients
+                            for v in c["versions"]
+                        ]
+                    },
+                )
+                response.raise_for_status()
             for source in clients:
-                for version in source["versions"]:
+                for version in (
+                    source["versions"][:1]
+                    if config.get("cold_versions")
+                    else source["versions"]
+                ):
                     response = await client.post(
                         gateway + "/generate",
                         headers={"Modal-Flash-Upstream": replica.upstream},
@@ -365,17 +423,64 @@ async def run_arm(pool, arm, clients, config):
             response.raise_for_status()
 
         await asyncio.gather(*(warm(r) for r in replicas.values()))
-        print(f"{arm}: all 32 adapters registered on all eight replicas", flush=True)
+        print(f"{arm}: adapter reset completed on all eight replicas", flush=True)
+        warmup = []
+        if config.get("warm_prefixes"):
+
+            async def warm_client(source):
+                groups = (
+                    1
+                    if source["client_index"] < config.get("large_group_clients", 0)
+                    else config["groups"]
+                )
+                for group in range(groups):
+                    for turn in (-3, -2, -1):
+                        prompt = long_prompt(source, turn, group)
+                        task = dict(
+                            request_id=f"warm-{source['client_index']}-{group}-{turn}",
+                            sampling_session_id=f"dapo-{source['model_id']}-{source['versions'][0]}",
+                            model_id=source["model_id"],
+                            publish_version=source["versions"][0],
+                            payload=dict(
+                                prompt={
+                                    "chunks": [
+                                        {"type": "encoded_text", "tokens": prompt}
+                                    ]
+                                },
+                                num_samples=1,
+                                cache_affinity_key=f"problem-{group % len(source['prompts'])}",
+                                sampling_params=dict(
+                                    max_tokens=1, stop=[], temperature=0
+                                ),
+                            ),
+                        )
+                        result = await sample_task(task, gateway, client=client)
+                        warmup.append(
+                            dict(
+                                client=source["client_index"],
+                                group=group,
+                                turn=turn,
+                                cached_tokens=result["prompt_cache_hit_tokens"],
+                            )
+                        )
+
+            await asyncio.gather(*(warm_client(c) for c in clients))
+            print(f"{arm}: serialized prefix warmup complete", flush=True)
         for router in routers:
             await router.refresh()
         baseline = await inspect()
         assert all(s["active"] == 0 and s["gpu_lora"] for s in baseline)
-        assert all(s["adapter_loads"] == len(clients) * 2 for s in baseline)
+        registered_versions = [
+            (c, v)
+            for c in clients
+            for v in (
+                c["versions"][:1] if config.get("cold_versions") else c["versions"]
+            )
+        ]
         expected_residents = sorted(
-            f"{c['model_id']}/weight_v{v:06d}"
-            for c, v in [(c, v) for c in clients for v in c["versions"]][-7:]
+            f"{c['model_id']}/weight_v{v:06d}" for c, v in registered_versions[-7:]
         )
-        assert all(
+        assert config.get("warm_prefixes") or all(
             s["gpu_lora"]["resident_adapters"] == expected_residents for s in baseline
         )
         training = config.get("workload") == "dapo"
@@ -443,7 +548,9 @@ async def run_arm(pool, arm, clients, config):
                     task,
                     gateway,
                     client=client,
-                    lora_router=routers[index % 8] if arm == "lora" else None,
+                    lora_router=routers[index % 8]
+                    if arm in {"lora", "work", "work-no-adapter"}
+                    else None,
                     stats=stats,
                     on_event=events.append,
                     timeout=240,
@@ -562,6 +669,7 @@ async def run_arm(pool, arm, clients, config):
             "baseline": baseline,
             "final": final,
             "observations": observations,
+            "warmup": warmup,
             "error": error,
             "frontends": [r["frontend"] for r in results] if training else [],
             "rollouts": [s for r in results for s in r["rollouts"]] if training else [],
@@ -599,18 +707,33 @@ def main():
     )
     parser.add_argument("--groups", type=int, default=16)
     parser.add_argument("--samples", type=int, default=8)
-    parser.add_argument("--rounds", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--duration-seconds", type=float, default=0)
+    parser.add_argument("--long-prefix", action="store_true")
+    parser.add_argument("--warm-prefixes", action="store_true")
+    parser.add_argument("--repeat-prefixes", action="store_true")
+    parser.add_argument("--fixed-version", action="store_true")
+    parser.add_argument("--cold-versions", action="store_true")
+    parser.add_argument("--work-rates", type=Path)
     parser.add_argument("--stagger-seconds", type=float, default=5)
     parser.add_argument("--hot-samples", type=int, default=0)
     parser.add_argument("--large-group-clients", type=int, default=0)
     parser.add_argument("--keep-pools", action="store_true")
     parser.add_argument("--sequential", action="store_true")
-    parser.add_argument("--arms", nargs="+", choices=("default", "lora", "kv"))
+    parser.add_argument(
+        "--arms",
+        nargs="+",
+        choices=("default", "lora", "kv", "work", "work-no-adapter"),
+    )
     args = parser.parse_args()
     pools = json.loads(args.pools.read_text())
     if args.arms:
         pools = [next(p for p in pools if p["arm"] == arm) for arm in args.arms]
     clients = json.loads(args.clients.read_text())
+    for source in clients:
+        source["vocabulary"] = sorted(
+            {token for prompt in source["prompts"] for token in prompt}
+        )
     config = {
         k: getattr(args, k)
         for k in (
@@ -633,6 +756,15 @@ def main():
             hot_samples=args.hot_samples,
             large_group_clients=args.large_group_clients,
             decode_tokens=args.decode_tokens,
+            long_prefix=args.long_prefix,
+            warm_prefixes=args.warm_prefixes,
+            repeat_prefixes=args.repeat_prefixes,
+            version_turnover=not args.fixed_version,
+            cold_versions=args.cold_versions,
+            duration_seconds=args.duration_seconds,
+            work_rates=json.loads(args.work_rates.read_text())
+            if args.work_rates
+            else None,
         )
         per_round = len(clients) * args.groups * args.samples
         if args.hot_samples:

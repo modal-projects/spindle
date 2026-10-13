@@ -88,7 +88,6 @@ def instrument(sglang_root, sidecar):
         '        """Run a batch."""\n',
         '        """Run a batch."""\n        if self.enable_lora and batch.forward_mode.is_extend():\n            routing_benchmark.requests(batch.reqs, self.tp_worker.model_runner.lora_manager.memory_pool.uid_to_buffer_id)\n',
     )
-    replace(sidecar, "import contextlib\n", "import contextlib\nimport json\n")
     # Observation must not queue behind the generation client's 100 occupied
     # HTTP connections. This separate pool exists only in the benchmark image.
     replace(
@@ -119,6 +118,17 @@ def instrument(sglang_root, sidecar):
         response = await app.state.client.post("/flush_cache")
         app.state.prefixes.clear()
         return Response(content=response.content, status_code=response.status_code)
+
+    @app.post("/benchmark-unregister")
+    async def benchmark_unregister(request: Request):
+        assert app.state.active == 0
+        payload = await request.json()
+        for adapter in payload["adapters"]:
+            if adapter in app.state.registered_adapters:
+                response = await app.state.benchmark_client.post("/unload_lora_adapter", json={"lora_name": adapter})
+                response.raise_for_status()
+                app.state.registered_adapters.pop(adapter)
+        return {"ok": True}
 
     @app.get("/routing-state")
 """,

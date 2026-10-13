@@ -40,6 +40,7 @@ class Replica:
     recent: tuple[str, ...] = ()
     upstream: str = ""
     prefixes: frozenset[str] = frozenset()
+    work: dict | None = None
 
 
 class LoraRouter:
@@ -91,7 +92,7 @@ class LoraRouter:
         if len(self.prefix_homes) > 8192:
             self.prefix_homes.popitem(last=False)
 
-    async def prepare_prefix(self, adapter: str, affinity: str):
+    async def prepare_prefix(self, adapter: str, affinity: str, *, prompt=()):
         """Resolve an unseen prefix once through native Flash affinity.
 
         Concurrent callers share only this prefix's lookup. Warm prefixes do no
@@ -171,7 +172,9 @@ class LoraRouter:
         }
         self.local = {h: c for h, c in self.local.items() if c or h in self.replicas}
 
-    def select_destination(self, model: str, adapter: str, affinity: str) -> str | None:
+    def select_destination(
+        self, model: str, adapter: str, affinity: str, **kwargs
+    ) -> str | None:
         """Choose a replica and reserve its load until release() is called."""
         now = time.monotonic()
         if now - self.updated > self.stale_after:
@@ -244,7 +247,14 @@ class LoraRouter:
         self.local.setdefault(chosen, Counter())[adapter] += 1
         return chosen
 
-    def release(self, upstream: str | None, adapter: str, *, failed: bool = False):
+    def release(
+        self,
+        upstream: str | None,
+        adapter: str,
+        *,
+        failed: bool = False,
+        reservation_id=None,
+    ):
         if upstream is None:
             return
         counts = self.local[upstream]
