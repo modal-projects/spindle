@@ -51,6 +51,29 @@ def test_qwen38_context_parallel_token_budget(context, cp):
     assert config["actor_num_gpus_per_node"] == 8
 
 
+@pytest.mark.parametrize("context,gpus,cp", [(32768, 4, 1), (131072, 8, 2)])
+def test_gpt_oss_120b_uses_its_own_weights_and_mxfp4_layout(context, gpus, cp):
+    spec = load(config_path(f"gpt-oss-120b-lora-{context // 1024}k"))
+    deployment = DeploymentConfig.create(spec)
+    trainer = deployment.trainer_settings["miles"]
+    serving = deployment.inference_settings
+
+    assert deployment.weights_repo == "openai/gpt-oss-120b"
+    assert trainer["hf_checkpoint"] == "/assets/openai/gpt-oss-120b"
+    assert deployment.max_context_length == serving["context_length"] == context
+    assert spec.inference_gpu == "H200"
+    assert spec.inference_gpus_per_node == serving["tp_size"] == 1
+    assert serving["moe_runner_backend"] == "marlin"
+    assert trainer["actor_num_gpus_per_node"] == gpus
+    assert trainer["tensor_model_parallel_size"] == 4
+    assert trainer["expert_model_parallel_size"] == gpus
+    assert trainer["context_parallel_size"] == cp
+    assert trainer["cli_options"]["num_layers"] == 36
+    assert trainer["cli_options"]["num_experts"] == 128
+    assert "balance_data" not in trainer["cli_options"]
+    assert "log_probs_chunk_size" not in trainer["cli_options"]
+
+
 def test_single_client_recipe_keeps_shared_backend_capacity():
     shared = load(config_path("qwen35-9b-lora-16k"))
     single = load(config_path("qwen35-9b-lora-16k-single"))

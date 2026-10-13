@@ -12,6 +12,7 @@ SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
 # Backports on the pinned branch, until the upstream releases include them:
 # MXFP4 expert LoRA: https://github.com/sgl-project/sglang/pull/42940
 # Ungated expert LoRA: https://github.com/sgl-project/sglang/pull/43916
+# Return to stitch-sglang-v0.5.21 after https://github.com/modal-projects/sglang/pull/76.
 SGLANG_BRANCH = "codex/spindle-model-coverage-v0.5.21"
 SGLANG_REVISION = "ad82055cf4d1721ee3d77611ad20940e08c4c4f4"
 
