@@ -7,7 +7,7 @@ from spindle.providers.modal.deployment_configs import configs_from_env
 
 @pytest.mark.parametrize(
     "path",
-    sorted(config_path("qwen35-9b-lora-16k").parent.glob("qwen*.py")),
+    sorted(config_path("qwen35-9b-lora-16k").parent.glob("[!_]*.py")),
     ids=lambda p: p.stem,
 )
 def test_all_packaged_recipes_validate_offline(path):
