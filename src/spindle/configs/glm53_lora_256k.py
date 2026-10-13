@@ -8,7 +8,7 @@ class Config(Parent):
     trainer_gpu = "B300"
     trainer_nodes = 2
     trainer_max_clients_per_instance = 4
-    # Eight B300s passed mixed 256K/8K sampling without cache retractions.
+    # Eight B300s hold enough KV cache for mixed long- and short-context sampling.
     inference_gpu = "B300"
     inference_gpus_per_node = 8
     inference_memory_mib = 1048576

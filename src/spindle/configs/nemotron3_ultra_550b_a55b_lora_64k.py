@@ -18,22 +18,23 @@ class Config(Parent):
     inference_memory_mib = 1048576
     inference_cpu = 32
     overrides = {
-        "miles_cfg.max_lora_slots": 4,
         "trainer_env.TORCHINDUCTOR_CACHE_DIR": "/tmp/spindle-inductor",
-        "sglang_cfg.max_loras_per_batch": 2,
-        # Cached adapter tensors must not keep the snapshot volume mapped.
-        "sglang_cfg.weight_loader_disable_mmap": True,
-        "sglang_cfg.model_loader_extra_config": {"num_threads": 2},
-        "sglang_cfg.max_loaded_loras": 4,
         "miles_cfg.model_type": "nemotron-3-ultra-550b-a55b",
         "miles_cfg.expert_model_parallel_size": 16,
+        "miles_cfg.max_lora_slots": 4,
         "miles_cfg.max_tokens_per_gpu": 32768,
         "sglang_cfg.quantization": "fp8",
         "sglang_cfg.tp_size": 4,
         "sglang_cfg.ep_size": 4,
+        # Cached adapter tensors must not keep the snapshot volume mapped.
+        "sglang_cfg.weight_loader_disable_mmap": True,
+        "sglang_cfg.model_loader_extra_config": {"num_threads": 2},
         "sglang_cfg.mem_fraction_static": 0.9,
         "sglang_cfg.max_running_requests": 128,
+        # Each request holds five Mamba state slots; size the cache for 128 requests.
         "sglang_cfg.max_mamba_cache_size": 640,
+        "sglang_cfg.max_loaded_loras": 4,
+        "sglang_cfg.max_loras_per_batch": 2,
         "inference_target_concurrency": 64,
     }
 

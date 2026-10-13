@@ -9,7 +9,7 @@ class Config(Parent):
     trainer_gpus_per_node = 8
     trainer_max_clients_per_instance = 2
     overrides = {
-        # Four initialized optimizer slots exhausted memory on a later padded batch.
+        # Two slots leave optimizer-state headroom for padded 256K batches.
         "miles_cfg.max_lora_slots": 2,
         "miles_cfg.max_tokens_per_gpu": 32768,
         "miles_cfg.context_parallel_size": 8,

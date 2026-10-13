@@ -59,7 +59,7 @@ class Config(BaseConfig):
         "quantization": "fp8",
         "moe_runner_backend": "triton",
         "mem_fraction_static": 0.9,
-        # The four-B300 sampler reports 827K KV tokens with four adapter slots.
+        # Bounded by the KV cache that four B300s leave with four adapter slots.
         "max_running_requests": 96,
         "max_queued_requests": 32,
         "max_loaded_loras": 4,

@@ -13,16 +13,16 @@ class Config(Parent):
     inference_max_replicas = 2
     inference_memory_mib = 262144
     overrides = {
-        "miles_cfg.max_lora_slots": 4,
-        "sglang_cfg.max_loras_per_batch": 4,
-        "miles_cfg.max_tokens_per_gpu": 32768,
-        "sglang_cfg.max_loaded_loras": 4,
-        # Five state slots per request; the default cache capped this model at 38.
-        "sglang_cfg.max_mamba_cache_size": 640,
         "miles_cfg.model_type": "nemotron-3-super-120b-a12b",
         "miles_cfg.expert_model_parallel_size": 8,
+        "miles_cfg.max_lora_slots": 4,
+        "miles_cfg.max_tokens_per_gpu": 32768,
         "sglang_cfg.tp_size": 4,
         "sglang_cfg.ep_size": 4,
+        "sglang_cfg.max_loaded_loras": 4,
+        "sglang_cfg.max_loras_per_batch": 4,
+        # Each request holds five Mamba state slots; size the cache for 128 requests.
+        "sglang_cfg.max_mamba_cache_size": 640,
     }
 
 
