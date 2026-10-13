@@ -44,6 +44,7 @@ async def sample_task(
     data_parallel_size: int = 1,
     context_length: int | None = None,
     context_reserve_tokens: int = 1,
+    stop_token_ids_only: bool = False,
     transport: httpx.AsyncBaseTransport | None = None,
     client: httpx.AsyncClient | None = None,
     api_key: str | None = None,
@@ -62,6 +63,7 @@ async def sample_task(
             if context_length is not None
             else None
         ),
+        stop_token_ids_only=stop_token_ids_only,
     )
     replay_flags = {}
     for key in ("return_routed_experts", "return_sampling_mask"):
@@ -430,6 +432,7 @@ def _sampling_params(
     params: dict[str, Any],
     *,
     remaining_context: int | None = None,
+    stop_token_ids_only: bool = False,
 ) -> dict[str, Any]:
     output = {
         key: params[key]
@@ -448,6 +451,12 @@ def _sampling_params(
     ):
         output["stop_token_ids"] = stop
     elif stop is not None:
+        if stop_token_ids_only:
+            # SGLang matches stop strings by decoding, which needs its tokenizer.
+            raise ValueError(
+                "this model's sampler runs without a tokenizer; "
+                "pass stop sequences as token IDs"
+            )
         output["stop"] = stop
     if params.get("max_tokens") is not None:
         output["max_new_tokens"] = int(params["max_tokens"])
