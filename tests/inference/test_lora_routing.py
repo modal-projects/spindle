@@ -305,3 +305,16 @@ def test_observations_refresh_during_long_generations_without_more_submissions()
         await pool.aclose()
 
     asyncio.run(run())
+
+
+def test_two_choices_balance_a_new_prefix_without_moving_its_established_home():
+    reference = router([Replica("a"), Replica("b")], target=64)
+    first_hash_choice = reference.select_destination("m", "m/v1", "problem")
+    pool = router([Replica("a"), Replica("b")], target=64)
+    pool.replicas[first_hash_choice].active = 1
+    home = pool.select_destination("m", "m/v1", "problem")
+    assert home != first_hash_choice
+    pool.release(home, "m/v1")
+    pool.replicas[first_hash_choice].active = 0
+    pool.replicas[home].active = 2
+    assert pool.select_destination("m", "m/v1", "problem") == home
