@@ -71,6 +71,13 @@ def test_actor_override_preserves_non_multilora_workers():
     assert once(
         "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
     ).worker_class == ("spindle.backends.miles_runtime.actor.SpindleMilesTrainRayActor")
+    base = "miles.backends.megatron_utils.actor.MegatronTrainRayActor"
+    assert once(base).worker_class == base
+    _configure_actor_spec(specs, full=True)
+    assert specs._compute_spec_trainer(base).worker_class == (
+        "spindle.backends.miles_runtime.full_actor.SpindleMilesFullTrainRayActor"
+    )
+    assert specs._compute_spec_trainer("fft").worker_class == "fft"
 
 
 class _FakeRay:

@@ -100,18 +100,23 @@ def backend_config(spec, asset_path="/assets/pending"):
         return {"megatron": asdict(config), "checkpoint_dir": "/checkpoints"}
     if spec.backend != "miles":
         raise ValueError(f"unknown backend: {spec.backend}")
-    if spec.parameterization != "lora":
-        raise ValueError("Miles requires lora parameterization")
     settings = spec.miles_cfg
     reject_managed_options(
         settings,
-        {"hf_checkpoint", "actor_num_gpus_per_node", "actor_num_nodes", "extra_args"},
+        {
+            "hf_checkpoint",
+            "actor_num_gpus_per_node",
+            "actor_num_nodes",
+            "extra_args",
+            "parameterization",
+        },
     )
     reject_managed_options(settings.get("cli_options", {}), MILES_MANAGED)
     config = MilesBackendConfig(
         hf_checkpoint=asset_path,
         actor_num_gpus_per_node=spec.trainer_gpus_per_node,
         actor_num_nodes=spec.trainer_nodes,
+        parameterization=spec.parameterization,
         extra_args=("--seq-length", str(spec.max_context_length)),
         **settings,
     )
@@ -120,7 +125,14 @@ def backend_config(spec, asset_path="/assets/pending"):
         config.expert_model_parallel_size * config.expert_tensor_parallel_size
     ):
         raise ValueError("expert parallel sizes must divide the trainer GPU allocation")
-    if spec.trainer_max_clients_per_instance > config.max_lora_slots:
+    if config.full:
+        if spec.trainer_max_clients_per_instance != 1:
+            raise ValueError("FFT trainers admit one client per instance")
+        if spec.sampler_persistence_concurrency != 1:
+            raise ValueError(
+                "full parameterization requires sampler_persistence_concurrency: 1"
+            )
+    elif spec.trainer_max_clients_per_instance > config.max_lora_slots:
         raise ValueError("max_clients_per_instance exceeds max_lora_slots")
     return {"miles": asdict(config), "checkpoint_dir": "/checkpoints"}
 

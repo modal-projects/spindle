@@ -61,7 +61,9 @@ class MilesBackendConfig:
     model_type: str
     actor_num_gpus_per_node: int
     actor_num_nodes: int = 1
+    parameterization: str = "lora"
     tensor_model_parallel_size: int = 1
+    pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: int = 1
@@ -82,13 +84,19 @@ class MilesBackendConfig:
     cli_options: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def full(self) -> bool:
+        return self.parameterization == "full"
+
+    @property
     def world_size(self) -> int:
         return self.actor_num_nodes * self.actor_num_gpus_per_node
 
     @property
     def data_parallel_size(self) -> int:
         return self.world_size // (
-            self.tensor_model_parallel_size * self.context_parallel_size
+            self.tensor_model_parallel_size
+            * self.pipeline_model_parallel_size
+            * self.context_parallel_size
         )
 
     @property
@@ -108,10 +116,15 @@ class MilesBackendConfig:
         return tuple(targets)
 
     def validate(self) -> None:
+        if self.parameterization not in ("lora", "full"):
+            raise ValueError("parameterization must be lora or full")
+        if not self.full and self.pipeline_model_parallel_size != 1:
+            raise ValueError("pipeline parallelism requires full parameterization")
         positive = {
             "actor_num_gpus_per_node": self.actor_num_gpus_per_node,
             "actor_num_nodes": self.actor_num_nodes,
             "tensor_model_parallel_size": self.tensor_model_parallel_size,
+            "pipeline_model_parallel_size": self.pipeline_model_parallel_size,
             "context_parallel_size": self.context_parallel_size,
             "expert_model_parallel_size": self.expert_model_parallel_size,
             "expert_tensor_parallel_size": self.expert_tensor_parallel_size,
@@ -141,14 +154,16 @@ class MilesBackendConfig:
             raise ValueError("default_lora_alpha must be a positive integer")
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("lora_dropout must be in [0, 1)")
-        if (
-            self.world_size
-            % (self.tensor_model_parallel_size * self.context_parallel_size)
-            != 0
-        ):
+        model_parallel_size = (
+            self.tensor_model_parallel_size
+            * self.pipeline_model_parallel_size
+            * self.context_parallel_size
+        )
+        if self.world_size % model_parallel_size != 0:
             raise ValueError(
                 "actor_num_nodes * actor_num_gpus_per_node must be a multiple of "
-                "tensor_model_parallel_size * context_parallel_size"
+                "tensor_model_parallel_size * pipeline_model_parallel_size * "
+                "context_parallel_size"
             )
         if (
             self.actor_num_nodes > 1
@@ -180,16 +195,7 @@ class MilesBackendConfig:
             str(self.actor_num_nodes),
             "--actor-num-gpus-per-node",
             str(self.actor_num_gpus_per_node),
-            "--multi-lora-n-adapters",
-            str(self.max_lora_slots),
-            "--lora-rank",
-            str(self.max_lora_rank),
-            "--lora-alpha",
-            str(int(self.default_lora_alpha)),
-            "--lora-dropout",
-            str(self.lora_dropout),
-            "--target-modules",
-            ",".join(self.target_modules),
+            *self._parameterization_arguments(),
             "--no-gradient-accumulation-fusion",
             "--optimizer",
             "adam",
@@ -198,7 +204,7 @@ class MilesBackendConfig:
             "--tensor-model-parallel-size",
             str(self.tensor_model_parallel_size),
             "--pipeline-model-parallel-size",
-            "1",
+            str(self.pipeline_model_parallel_size),
             "--context-parallel-size",
             str(self.context_parallel_size),
             "--expert-model-parallel-size",
@@ -220,6 +226,22 @@ class MilesBackendConfig:
         if self.tensor_model_parallel_size > 1:
             arguments.append("--sequence-parallel")
         return [*arguments, *self.extra_args]
+
+    def _parameterization_arguments(self) -> list[str]:
+        if self.full:
+            return []
+        return [
+            "--multi-lora-n-adapters",
+            str(self.max_lora_slots),
+            "--lora-rank",
+            str(self.max_lora_rank),
+            "--lora-alpha",
+            str(int(self.default_lora_alpha)),
+            "--lora-dropout",
+            str(self.lora_dropout),
+            "--target-modules",
+            ",".join(self.target_modules),
+        ]
 
 
 def parse_backend_config(

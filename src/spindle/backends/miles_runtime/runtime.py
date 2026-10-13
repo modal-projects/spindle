@@ -163,6 +163,61 @@ class MilesRuntime:
         self._run(self._bridge.export_slot(slot, rank, alpha, path))
         _materialize_capture(path)
 
+    def full_optim_step(self, adam_params: dict[str, float]) -> dict[str, float]:
+        return _first(
+            self._run(
+                self._trainer._execute_slots("optim_step", adam_params=adam_params)
+            )
+        )
+
+    def save_full_checkpoint(
+        self,
+        path: str,
+        *,
+        include_optimizer: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._run(
+            self._trainer._execute_slots(
+                "save_checkpoint",
+                path=path,
+                include_optimizer=include_optimizer,
+                metadata=metadata,
+            )
+        )
+
+    def load_full_checkpoint(self, path: str, *, restore_optimizer: bool) -> None:
+        self._run(
+            self._trainer._execute_slots(
+                "load_checkpoint", path=path, restore_optimizer=restore_optimizer
+            )
+        )
+
+    def capture_full_delta(self, **kwargs: Any) -> dict[str, Any]:
+        """Stage a sampler delta on rank 0 and return its manifest."""
+        results = self._run(
+            self._trainer._execute_slots("capture_sampler_delta", **kwargs)
+        )
+        manifests = [result for result in results if result is not None]
+        if len(manifests) != 1:
+            raise BackendFailed(
+                f"expected one staged delta manifest, got {len(manifests)}"
+            )
+        return manifests[0]
+
+    def full_delta_aligned_with(self, identity: str) -> bool:
+        return all(
+            self._run(
+                self._trainer._execute_slots("is_delta_aligned_with", identity=identity)
+            )
+        )
+
+    def forget_full_delta_parent(self) -> None:
+        self._run(self._trainer._execute_slots("forget_delta_parent"))
+
+    def reload_base_weights(self) -> None:
+        self._run(self._trainer._execute_slots("reload_base_weights"))
+
     def torch_profile_start(self) -> None:
         self._run_best_effort(self._trainer._execute_slots("torch_profile_start"))
 
@@ -224,7 +279,7 @@ class MilesRuntime:
         os.environ.setdefault("no_proxy", "127.0.0.1")
 
         install_bridge_replay(tinker_runtime)
-        _configure_actor_spec(train_specs)
+        _configure_actor_spec(train_specs, full=self.config.full)
         _allow_context_parallel_multi_lora(lora_arguments)
         architecture = (
             shlex.split(load_model_args(self.config.model_type))
@@ -373,26 +428,38 @@ def _check_result(result) -> None:
         raise RuntimeError(f"Miles operation failed: {result['error']}")
 
 
-def _configure_actor_spec(train_specs) -> None:
+def _first(results):
+    return results[0]
+
+
+_ACTOR_CLASSES = {
+    "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor": (
+        "spindle.backends.miles_runtime.actor.SpindleMilesTrainRayActor"
+    ),
+    "miles.backends.megatron_utils.actor.MegatronTrainRayActor": (
+        "spindle.backends.miles_runtime.full_actor.SpindleMilesFullTrainRayActor"
+    ),
+}
+
+
+def _configure_actor_spec(train_specs, *, full: bool = False) -> None:
     original = train_specs._compute_spec_trainer
-    if getattr(original, "_spindle_actor_spec", False):
+    if getattr(original, "_spindle_actor_spec", None) == full:
         return
+    if getattr(original, "_spindle_actor_spec", None) is not None:
+        original = original.__wrapped__
 
     @wraps(original)
     def compute(*args, **kwargs):
         spec = original(*args, **kwargs)
-        if (
-            spec.worker_class
-            == "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
+        replacement = _ACTOR_CLASSES.get(spec.worker_class)
+        if replacement is None or (
+            not full and spec.worker_class.endswith("MegatronTrainRayActor")
         ):
-            return spec.model_copy(
-                update={
-                    "worker_class": "spindle.backends.miles_runtime.actor.SpindleMilesTrainRayActor"
-                }
-            )
-        return spec
+            return spec
+        return spec.model_copy(update={"worker_class": replacement})
 
-    compute._spindle_actor_spec = True
+    compute._spindle_actor_spec = full
     train_specs._compute_spec_trainer = compute
 
 
