@@ -128,14 +128,13 @@ class LoraRouter:
             # entire reported load. Existing reservations must not count twice.
             arrivals = max(0, local - self.observed_local.get(host, 0))
             loads[host] = max(self.replicas[host].active + arrivals, local)
-        # Spend at most the configured concurrency target on a preferred host
-        # while capacity remains elsewhere. When the whole pool is saturated,
-        # place new work below the pool mean rather than growing a hot queue.
-        # This is a bound on our observation, not a distributed admission lock.
-        limit = max(self.target, sum(loads.values()) / len(hosts))
+        # Allow one configured target of excess backlog for locality. A bound
+        # exactly at the pool mean scatters every sample in a group once all
+        # replicas are busy. The additive budget still spills an overloaded
+        # prefix, and remains meaningful at both low and high pool load.
+        # This bounds our observation, not distributed admission.
+        limit = min(loads.values()) + self.target
         eligible = [h for h in rank if loads[h] < limit]
-        if not eligible:
-            eligible = [h for h in rank if loads[h] == min(loads.values())]
 
         key = prefix_key(adapter, affinity)
         home = self.prefix_homes.get(key)
@@ -161,7 +160,7 @@ class LoraRouter:
                 if adapter in working[h] or len(working[h]) < self.slots
             ]
             candidates = cached or available or eligible
-            chosen = next(h for h in rank if h in candidates)
+            chosen = candidates[0]
         if home is None:
             home = chosen
         self.prefix_homes[key] = home

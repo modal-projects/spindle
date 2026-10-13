@@ -32,11 +32,14 @@ does not rewrite the original home. Failed/departed homes can be replaced.
 
 Estimated load adds new local reservations to reported outstanding requests,
 without double-counting reservations already present at observation time. A
-replica is eligible below `max(target_concurrency, mean_observed_pool_load)`.
-If all loads equal the bound, a least-loaded replica is selected. Below the
-configured target, this allows concentration and batching. Above the target,
-new work spills toward replicas below the pool mean. This first implementation
-uses request counts; it does not claim a calibrated prefill/decode cost model.
+replica is eligible below `minimum_observed_load + target_concurrency`.
+The configured target is an explicit budget of excess outstanding requests that
+we are willing to accept for locality. At low load it bounds concentration; at
+high load it preserves a small prefix group instead of spreading each sample
+across hosts just above the pool mean. A hot home spills once it consumes this
+budget. This is a request-count heuristic, not a calibrated prefill/decode cost
+model or a proof that one target is the optimal budget for every workload.
+
 
 These are approximate observations, not a distributed admission guarantee.
 Independent frontends can overshoot the bound between refreshes. Recent prefix

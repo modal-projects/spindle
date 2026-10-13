@@ -220,12 +220,15 @@ def test_new_reservations_add_to_observed_load_without_double_counting_old_ones(
             [Replica("a", active=100, recent=("m/v1",)), Replica("b", active=100)],
             target=16,
         )
-        # These requests existed before the replica observation and are already
-        # represented in its active count.
-        pool.local["a"] = Counter({"m/v1": 50})
+        home = pool.select_destination("m", "m/v1", "probe")
+        pool.release(home, "m/v1")
+        # These reservations already exist in the reported active count.
+        pool.local[home] = Counter({"m/v1": 50})
         await pool._refresh()
         routes = [pool.select_destination("m", "m/v1", str(i)) for i in range(34)]
-        assert abs(routes.count("a") - routes.count("b")) <= 1
+        assert routes[:16] == [home] * 16
+        assert routes[16] != home
+        assert abs(routes.count("a") - routes.count("b")) <= pool.target
 
     asyncio.run(run())
 
@@ -259,3 +262,17 @@ def test_burst_after_idle_waits_for_one_refresh_and_failed_discovery_falls_back(
         assert pool.select_destination("m", "m/v1", "r") is None
 
     asyncio.run(run())
+
+
+def test_saturated_pool_preserves_small_prefix_groups_and_bounds_hot_overflow():
+    pool = router([Replica(str(i), active=96) for i in range(8)], target=64)
+    routes = [pool.select_destination("m", "m/v1", "problem") for _ in range(128)]
+    # Saturation alone must not split an eight-sample training problem 8 ways.
+    assert len(set(routes[:8])) == 1
+    assert len(set(routes[:64])) == 1
+    assert routes[64] != routes[0]
+    assert max(Counter(routes).values()) == 64
+    home = pool.prefix_homes[prefix_key("m/v1", "problem")]
+    for route in routes:
+        pool.release(route, "m/v1")
+    assert pool.select_destination("m", "m/v1", "problem") == home
