@@ -65,19 +65,30 @@ class LoraRouter:
         self.updated = 0.0
         self.next_refresh = 0.0
         self.pending: asyncio.Task | None = None
+        self.poller: asyncio.Task | None = None
         self._close = close
         # A prefix keeps its first destination even when other replicas become
         # warm. Overflow does not rewrite its home on every generation.
         self.prefix_homes: OrderedDict[str, str] = OrderedDict()
 
     async def aclose(self):
-        if self.pending is not None:
-            self.pending.cancel()
-            await asyncio.gather(self.pending, return_exceptions=True)
+        tasks = [t for t in (self.pending, self.poller) if t is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._close is not None:
             await self._close()
 
+    async def _poll_in_flight(self):
+        while True:
+            await asyncio.sleep(self.refresh_interval)
+            if not any(self.local.values()):
+                return
+            await self.refresh()
+
     async def refresh(self):
+        if self.poller is None or self.poller.done():
+            self.poller = asyncio.create_task(self._poll_in_flight())
         now = time.monotonic()
         if now >= self.next_refresh and (self.pending is None or self.pending.done()):
             self.next_refresh = now + self.refresh_interval
@@ -151,16 +162,19 @@ class LoraRouter:
                 h: set(self.replicas[h].adapters) | set(self.local.get(h, {}))
                 for h in eligible
             }
-            # Concentrate *new* prefixes on the adapter's deterministic homes.
-            # Expand only when load or the active adapter working set requires
-            # it. Do not remap established prefixes when this set changes.
-            available = [
-                h
-                for h in eligible
-                if adapter in working[h] or len(working[h]) < self.slots
-            ]
-            candidates = cached or available or eligible
+            # Start from KV affinity. Concentrating every new prefix on a
+            # model home can manufacture hot queues when adapter capacity is
+            # plentiful. Redirect cold placement only when its working set is
+            # full; an established prefix continues to win over adapter warmth.
+            preferred = next(h for h in _ranking(key, hosts) if h in eligible)
+            fits = adapter in working[preferred] or len(working[preferred]) < self.slots
+            warm = [h for h in eligible if adapter in working[h]]
+            room = [h for h in eligible if len(working[h]) < self.slots]
+            candidates = cached or (
+                [preferred] if fits else warm or room or [preferred]
+            )
             chosen = candidates[0]
+
         if home is None:
             home = chosen
         self.prefix_homes[key] = home

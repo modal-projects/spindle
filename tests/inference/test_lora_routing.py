@@ -18,12 +18,12 @@ def router(replicas, **kwargs):
     return result
 
 
-def test_adapter_placement_stays_local_until_target_then_spills():
+def test_prefix_placement_stays_local_until_target_then_spills():
     pool = router(
         [Replica("a", recent=("model/weight_v000001",)), Replica("b")], target=4
     )
     routes = [
-        pool.select_destination("model", "model/weight_v000001", str(i))
+        pool.select_destination("model", "model/weight_v000001", "prefix")
         for i in range(12)
     ]
     assert len(set(routes[:4])) == 1
@@ -46,8 +46,8 @@ def test_rendezvous_is_independent_of_worker_and_discovery_order():
 
 def test_full_working_set_is_avoided_on_cold_placement():
     pool = router([Replica("a"), Replica("b")], slots=1)
-    home = pool.select_destination("model", "new", "request")
-    pool.release(home, "new")
+    reference = router([Replica("a"), Replica("b")], slots=1)
+    home = reference.select_destination("model", "new", "new-prefix")
     pool.replicas[home].adapters = {"other": 1}
     assert pool.select_destination("model", "new", "new-prefix") != home
 
@@ -90,7 +90,10 @@ def test_another_frontend_recovers_version_scoped_prefix_home():
     assert fresh.select_destination("m", "m/v1", "prefix") == other
     fresh.release(other, "m/v1")
     assert prefix_key("m/v1", "prefix") != prefix_key("m/v2", "prefix")
-    assert fresh.select_destination("m", "m/v2", "prefix") == default
+    reference = router([Replica(default), Replica(other)])
+    assert fresh.select_destination(
+        "m", "m/v2", "prefix"
+    ) == reference.select_destination("m", "m/v2", "prefix")
 
 
 def test_stale_or_failed_replicas_fall_back_and_refresh_removes_departed_nodes():
@@ -225,7 +228,7 @@ def test_new_reservations_add_to_observed_load_without_double_counting_old_ones(
         # These reservations already exist in the reported active count.
         pool.local[home] = Counter({"m/v1": 50})
         await pool._refresh()
-        routes = [pool.select_destination("m", "m/v1", str(i)) for i in range(34)]
+        routes = [pool.select_destination("m", "m/v1", "probe") for i in range(34)]
         assert routes[:16] == [home] * 16
         assert routes[16] != home
         assert abs(routes.count("a") - routes.count("b")) <= pool.target
@@ -276,3 +279,29 @@ def test_saturated_pool_preserves_small_prefix_groups_and_bounds_hot_overflow():
     for route in routes:
         pool.release(route, "m/v1")
     assert pool.select_destination("m", "m/v1", "problem") == home
+
+
+def test_new_prefixes_spread_when_adapter_capacity_is_available():
+    pool = router([Replica(str(i)) for i in range(8)], target=64)
+    destinations = [
+        pool.select_destination("m", "m/v1", f"problem-{i}") for i in range(64)
+    ]
+    assert len(set(destinations)) == 8
+
+
+def test_observations_refresh_during_long_generations_without_more_submissions():
+    async def run():
+        pool = LoraRouter(AsyncMock(return_value=[Replica("a")]), refresh_interval=0.01)
+        await pool.refresh()
+        chosen = pool.select_destination("m", "m/v1", "p")
+        async with asyncio.timeout(0.5):
+            while pool.discover.await_count < 3:
+                await asyncio.sleep(0.01)
+        pool.release(chosen, "m/v1")
+        await pool.poller
+        count = pool.discover.await_count
+        await asyncio.sleep(0.03)
+        assert pool.discover.await_count == count
+        await pool.aclose()
+
+    asyncio.run(run())
