@@ -175,3 +175,19 @@ Busy-interval balance metrics use total actual engine running capacity as their
 threshold (288 here), and report the number of eligible snapshots. All transport
 retries remain in the measured result. Nonpreemptible CPU workers match
 production sampling workers; GPU allocation is unchanged.
+
+
+For a fixed-arrival pressure window, use the same DAPO command with
+`--rounds 1 --stagger-seconds 0.5`. This submits one ordinary 128-sequence rollout
+from each of 16 clients over 7.5 seconds: 2,048 requests and 1,048,576 output
+tokens. There are no later submissions whose timing could be changed by a
+transport retry. All clients remain independent; it is a concurrent rollout
+window, not a measurement of a complete optimizer cycle. The second checkpoint
+is registered for equal initialization but is not requested in this variant.
+
+`reconstructed-engine-load` estimates successful-attempt occupancy by anchoring
+engine-reported e2e duration at its response-sent timestamp, sampled every second.
+SGLang's e2e finish occurs just before response sending, so the inferred interval
+is shifted by that gap. Failed attempts without responses cannot be reconstructed;
+report their count alongside this figure. This supplements incomplete native
+snapshots and is not an exact native scheduler queue trace.
