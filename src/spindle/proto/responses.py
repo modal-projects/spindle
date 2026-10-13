@@ -15,12 +15,7 @@ PROTOBUF_MEDIA_TYPE = "application/x-protobuf"
 
 @dataclass(frozen=True, slots=True)
 class EncodedResult:
-    """A completed result already in the SDK's protobuf wire format.
-
-    Forward/backward outputs carry one value per token. The backend encodes them
-    once; the engine and frontend forward the bytes to clients that accept
-    protobuf and decode them only for JSON clients.
-    """
+    """A completed result already in the SDK's protobuf wire format."""
 
     body: bytes
 
@@ -33,11 +28,7 @@ _NUMPY_DTYPES = {pb.DTYPE_FLOAT32: ("<f4", "float32"), pb.DTYPE_INT64: ("<i8", "
 
 
 def encode_forward_backward_exact(result: object) -> EncodedResult | None:
-    """Encode a forward/backward result if protobuf preserves its JSON form exactly.
-
-    That holds for dense tensors whose float values are float32 and whose integer
-    values fit int64. Anything else returns None and stays JSON.
-    """
+    """Encode a forward/backward result if protobuf preserves its JSON form exactly."""
     if not isinstance(result, dict) or set(result) != {
         "loss_fn_output_type",
         "loss_fn_outputs",
