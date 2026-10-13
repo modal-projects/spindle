@@ -17,11 +17,14 @@ When upgrading an existing deployment, refresh its inference sidecars with
 
 ## Placement and load
 
-The router uses rendezvous hashing of the model ID to order preferred replicas.
-Successive adapter versions prefer the same replicas. New prefixes are placed on
-the first eligible replica in this ordering whose active adapter working set can
-accommodate the adapter. This concentrates an adapter's different math problems
-without pinning an overloaded adapter to one GPU.
+New prefixes start with rendezvous hashing of their version-scoped affinity key,
+so a model's many independent problems spread across replicas when capacity is
+available. If that preferred replica's active adapter working set is full and
+does not contain the requested adapter, cold placement prefers an eligible
+replica already serving that adapter, then one with available adapter capacity.
+These fallback candidates use deterministic model rendezvous order. Adapter
+concentration is a response to working-set pressure, not the default for every
+new prefix.
 
 Each exact adapter-version/affinity-key pair keeps its first destination in a
 bounded local map. A later residency change does not remap it. Sidecars advertise
@@ -57,7 +60,10 @@ affinity remains in the generation payload and data-parallel rank selection.
 
 Pool membership is cached for five seconds. Active sampling workers refresh
 replica observations at most once per second, coalescing concurrent refreshes.
-A persistent HTTP client reuses observation connections. Prefix maps are bounded
+A persistent HTTP client reuses observation connections. While generations remain
+in flight, a per-router background task keeps this same coalesced refresh cadence
+active; it exits when the router has no local reservations. This avoids using an
+old burst snapshot for the next independently arriving client. Prefix maps are bounded
 to 8,192 entries per router and 4,096 per sidecar; sidecar hints expire after 120s.
 Fresh requests use the last snapshot while refresh runs in the background.
 Initial discovery and bursts after ten seconds of idle observations share one
