@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import pairwise
-from math import prod
+from math import isfinite, prod
 from typing import Any
 
 import numpy as np
@@ -47,6 +47,8 @@ def encode_forward_backward_exact(result: object) -> EncodedResult | None:
     metrics = result["metrics"]
     if not all(type(value) is float for value in metrics.values()):
         return None
+    if not all(isfinite(value) for value in metrics.values()):
+        raise ValueError("forward/backward metrics contain non-finite values")
     message = pb.ForwardBackwardOutput(
         loss_fn_output_type=result["loss_fn_output_type"], metrics=metrics
     )
@@ -63,8 +65,10 @@ def encode_forward_backward_exact(result: object) -> EncodedResult | None:
             kinds = "f" if tensor["dtype"] == "float32" else "iu"
             if exact.ndim != 1 or (exact.size and exact.dtype.kind not in kinds):
                 return None
+            if exact.dtype.kind == "f" and not np.isfinite(exact).all():
+                raise ValueError("forward/backward outputs contain non-finite values")
             values = exact.astype(dtype)
-            if not np.array_equal(values, exact, equal_nan=True):
+            if not np.array_equal(values, exact):
                 return None
             shape = tensor["shape"]
             if (

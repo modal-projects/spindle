@@ -215,7 +215,7 @@ def encode_results(results: tuple[object, ...], telemetry: dict | None = None) -
         encoded = encode_forward_backward_exact(result)
         if encoded is None:
             kinds.append("json")
-            bodies.append(json.dumps(result).encode())
+            bodies.append(json.dumps(result, allow_nan=False).encode())
         else:
             kinds.append("protobuf")
             bodies.append(encoded.body)

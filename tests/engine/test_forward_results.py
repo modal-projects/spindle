@@ -73,6 +73,20 @@ def test_results_that_protobuf_would_change_stay_json(result):
     assert encode_forward_backward_exact(result) is None
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    "result",
+    [
+        lambda value: _with(forward_result(2), data=[0.1, value]),
+        lambda value: {**forward_result(2), "metrics": {"loss:sum": value}},
+        lambda value: {"model_id": "model-a", "value": value},
+    ],
+)
+def test_non_finite_results_are_rejected(result, value):
+    with pytest.raises(ValueError):
+        encode_results((result(value),))
+
+
 def test_result_frames_mix_protobuf_and_json():
     exact, other = forward_result(4), {"model_id": "model-a", "value": 0.1}
     results, telemetry = decode_results(encode_results((exact, other), {"gpu_s": 1.5}))
