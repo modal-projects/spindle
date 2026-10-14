@@ -263,10 +263,12 @@ async def _sample_one(
     rejected: set[str] = set()
     waiting_logged = False
     physical_attempt = 0
+    admission_rejected: set[str] = set()
     adapter = (
         VersionRef(model_id, int(version)).identity if model_id is not None else "base"
     )
     while True:
+        admission_busy = False
         cause: httpx.TransportError | None = None
         resolved = (
             (gateway.rstrip("/"),) if isinstance(gateway, str) else await gateway()
@@ -321,10 +323,7 @@ async def _sample_one(
         routing_details = {}
         if lora_router is not None:
             await lora_router.refresh()
-            upstream = lora_router.select_destination(
-                model_id or "base",
-                adapter,
-                cache_affinity_id or routing_session_id,
+            selection = dict(
                 prompt=prompt,
                 output_tokens=params.get("max_new_tokens", 1),
                 prefixes=routing_prefixes,
@@ -334,6 +333,25 @@ async def _sample_one(
                 group_size=group_size if physical_attempt == 1 else 1,
                 sample_index=index if physical_attempt == 1 else 0,
             )
+            upstream = lora_router.select_destination(
+                model_id or "base",
+                adapter,
+                cache_affinity_id or routing_session_id,
+                exclude_hosts=admission_rejected,
+                **selection,
+            )
+            if upstream is None and admission_rejected:
+                # Every currently eligible destination has rejected admission.
+                # Stop probing and queue using ordinary placement. Never turn
+                # saturation into an endless retry loop or a frontend queue.
+                upstream = lora_router.select_destination(
+                    model_id or "base",
+                    adapter,
+                    cache_affinity_id or routing_session_id,
+                    **selection,
+                )
+                routing_details.pop("admission_limit", None)
+                routing_details["admission_fallback"] = True
             if upstream is not None:
                 # Flash affinity headers take precedence over exact upstreams.
                 # Keep logical conversation affinity in the payload/DP rank,
@@ -347,6 +365,10 @@ async def _sample_one(
                 headers["Modal-Flash-Upstream"] = lora_router.replicas[
                     upstream
                 ].upstream
+                if "admission_limit" in routing_details:
+                    headers["X-Spindle-Routing-Limit"] = str(
+                        routing_details["admission_limit"]
+                    )
         observation.attrs.update(
             upstream=upstream or gateway_url,
             selected_replica=upstream,
@@ -392,6 +414,24 @@ async def _sample_one(
                 attempt_result["route_mismatch"] = True
             if actual_replica:
                 attempt_result["upstream"] = actual_replica
+            admission_busy = (
+                response.status_code == 429
+                and response.headers.get("x-spindle-routing-rejected") == "1"
+                and upstream is not None
+                and actual_replica == upstream
+                and "admission_limit" in routing_details
+            )
+            if admission_busy:
+                admission_rejected.add(upstream)
+                feedback = response.json()
+                lora_router.note_busy(
+                    upstream, int(feedback["active"]), feedback["request_ids"]
+                )
+                attempt_result["admission_rejected"] = True
+                reroute_attempt += 1
+            attempt_result["admission_checked"] = (
+                response.headers.get("x-spindle-routing-admitted") == "1"
+            )
             retryable = (
                 response.status_code == 409
                 or (response.status_code in {404, 408, 429} and lora_router is not None)
@@ -459,7 +499,10 @@ async def _sample_one(
                     or attempt_result.get("route_mismatch", False)
                     or "version_error" in attempt_result
                     or attempt_result.get("http_status", 200) >= 500
-                    or attempt_result.get("http_status", 200) in {404, 408, 429},
+                    or (
+                        attempt_result.get("http_status", 200) in {404, 408, 429}
+                        and not admission_busy
+                    ),
                 )
             observation.finish()
         remaining = deadline - loop.time()
@@ -468,6 +511,8 @@ async def _sample_one(
             raise RuntimeError(
                 f"rollout {state} after {retry_timeout:g}s: {reason}"
             ) from cause
+        if admission_busy:
+            continue
         if on_wait is not None:
             await on_wait()
         await _backoff(stats, min(remaining, delay * random.uniform(0.8, 1.2)))

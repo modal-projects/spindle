@@ -24,6 +24,66 @@ def _publish(tmp_path, version):
     return bulletin
 
 
+def test_admission_rejects_before_registration_and_releases_after_completion(tmp_path):
+    async def run():
+        entered, finish = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def engine(request):
+            calls.append(request.url.path)
+            if request.url.path == "/generate":
+                entered.set()
+                await finish.wait()
+            return httpx.Response(200, json={"meta_info": {}})
+
+        app = create_app(
+            _publish(tmp_path, 3),
+            "http://sglang",
+            transport=httpx.MockTransport(engine),
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+            ) as client:
+                first = asyncio.create_task(
+                    client.post(
+                        "/generate",
+                        json={"rid": "accepted", "input_ids": [1]},
+                        headers={"X-Spindle-Routing-Limit": "1"},
+                    )
+                )
+                await entered.wait()
+                rejected = await client.post(
+                    "/generate",
+                    json={
+                        "rid": "rejected",
+                        "input_ids": [1],
+                        "weight_run_id": "model-a",
+                        "weight_version": {"exact_version": 3},
+                    },
+                    headers={"X-Spindle-Routing-Limit": "1"},
+                )
+                assert rejected.status_code == 429
+                assert rejected.headers["x-spindle-routing-rejected"] == "1"
+                assert rejected.json()["request_ids"] == ["accepted"]
+                assert calls == ["/generate"]
+                assert app.state.active == 1
+                assert not app.state.registered_adapters
+                finish.set()
+                accepted = await first
+                assert accepted.headers["x-spindle-routing-admitted"] == "1"
+                assert app.state.active == 0 and not app.state.routing_requests
+                invalid = await client.post(
+                    "/generate",
+                    json={"input_ids": [1]},
+                    headers={"X-Spindle-Routing-Limit": "0"},
+                )
+                assert invalid.status_code == 400
+                assert calls == ["/generate"]
+
+    asyncio.run(run())
+
+
 def test_decode_maxima_merge_engine_progress_with_unobserved_ingress(
     tmp_path, monkeypatch
 ):

@@ -12,7 +12,7 @@ import numpy as np
 from spindle.inference.lora_routing import Replica
 from spindle.inference.routing_domains import DomainRouter
 from spindle.inference.routing_capacity import CapacityRouter
-from spindle.inference.routing_simple import SimpleRouter
+from spindle.inference.routing_simple import SIMPLE_POLICIES, SimpleRouter
 from spindle.inference.routing_work import WorkRates, WorkRouter, token_prefixes
 
 
@@ -24,7 +24,7 @@ def make_router(policy, tie_seed=None):
     options = dict(rates=WorkRates(8706, 1065, 0.067, 1.87, 36))
     if policy == "stable":
         return DomainRouter(empty, balanced=True, stable=True, **options)
-    if policy in {"model-home", "model-spill"}:
+    if policy in SIMPLE_POLICIES:
         return SimpleRouter(empty, policy=policy, **options)
     if policy == "capacity-random":
         return CapacityRouter(empty, tie_seed=tie_seed or "cpu-benchmark", **options)
@@ -104,8 +104,7 @@ def run():
             "stable",
             "capacity",
             "capacity-random",
-            "model-home",
-            "model-spill",
+            *SIMPLE_POLICIES,
         ],
     )
     parser.add_argument(
@@ -116,8 +115,7 @@ def run():
             "stable",
             "capacity",
             "capacity-random",
-            "model-home",
-            "model-spill",
+            *SIMPLE_POLICIES,
         ],
     )
     args = parser.parse_args()

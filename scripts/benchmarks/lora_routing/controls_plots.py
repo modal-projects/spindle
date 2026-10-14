@@ -24,10 +24,16 @@ ORDER = [
     "balanced-spill",
     "model-home",
     "model-spill",
+    "model-wave",
+    "model-idle",
+    "model-locality",
     "lora",
     "work",
     "stable",
     "capacity",
+    "guarded-locality",
+    "guarded-least-load",
+    "guarded-home",
 ]
 LABELS = dict(
     zip(
@@ -43,10 +49,16 @@ LABELS = dict(
             "Even overflow",
             "Job static",
             "Job overflow",
+            "One-batch overflow",
+            "Spare-capacity overflow",
+            "Bounded setup",
             "Legacy LoRA",
             "Work",
             "Domains",
             "Batch capacity",
+            "Admission + setup",
+            "Admission + least load",
+            "Admission + home",
         ],
         strict=True,
     )
@@ -77,9 +89,20 @@ def main():
     for job, arms in json.loads(args.metrics.read_text()).items():
         if not job.startswith("screen-"):
             continue
-        name = job.removesuffix("-supplement").removesuffix("-recovery")
-        if any(r["config"].get("separate_cohort_transport") for r in arms.values()):
-            name += "-separate-preparation"
+        example = next(iter(arms.values()))
+        config = example["config"]
+        family = (
+            "screen-serving64"
+            if "streams" in config
+            else "screen-dialogue1024"
+            if config.get("dialogue_turns", 1) > 1
+            else "screen-long1024"
+        )
+        # Only merge supplemental arms with identical recorded workloads,
+        # including transport and timeout settings. Source hashes remain in
+        # the metrics so these exploratory screens are not mistaken for frozen
+        # confirmatory trials.
+        name = family + "-" + example["workload_sha256"][:8]
         target = grouped.setdefault(name, {})
         assert not (target.keys() & arms.keys())
         target.update(arms)
@@ -155,6 +178,11 @@ def main():
                     "balanced-spill",
                     "model-home",
                     "model-spill",
+                    "model-wave",
+                    "model-idle",
+                    "model-locality",
+                    "guarded-locality",
+                    "guarded-home",
                     "stable",
                 },
             ),
@@ -168,6 +196,7 @@ def main():
                     "work",
                     "stable",
                     "capacity",
+                    "guarded-least-load",
                 },
             ),
         ]:

@@ -105,6 +105,7 @@ def create_app(
                 )
         return {
             "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "admission_supported": True,
             "active": app.state.active,
             "adapters": dict(app.state.active_adapters),
             # Recent use is a residency estimate, not a GPU-cache assertion.
@@ -118,6 +119,33 @@ def create_app(
     @app.post("/generate")
     async def generate(request: Request) -> Response:
         payload = await request.json()
+        raw_limit = request.headers.get("x-spindle-routing-limit")
+        admission_limit = None
+        if raw_limit is not None:
+            try:
+                admission_limit = int(raw_limit)
+                if admission_limit < 1:
+                    raise ValueError
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "Invalid routing limit"}, status_code=400
+                )
+            # No await separates this check from incrementing active below.
+            # The event loop owns the local admission count. Rejected requests
+            # neither resolve/register weights nor enter the engine queue.
+            if app.state.active >= admission_limit:
+                return JSONResponse(
+                    {
+                        "detail": "Replica is busy",
+                        "active": app.state.active,
+                        "request_ids": list(app.state.routing_requests),
+                    },
+                    status_code=429,
+                    headers={
+                        "x-spindle-routing-rejected": "1",
+                        "x-spindle-replica": os.environ.get("MODAL_TASK_ID", "local"),
+                    },
+                )
         rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
         constraint = VersionConstraint.from_payload(payload)
         run_id = payload.get("weight_run_id")
@@ -141,6 +169,8 @@ def create_app(
             response.headers["x-spindle-replica"] = os.environ.get(
                 "MODAL_TASK_ID", "local"
             )
+            if admission_limit is not None:
+                response.headers["x-spindle-routing-admitted"] = "1"
             return response
         finally:
             app.state.active -= 1

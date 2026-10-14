@@ -66,6 +66,9 @@ def create_router(
                     return None
                 work = state.get("work")
                 if work is not None:
+                    work["admission_supported"] = state.get(
+                        "admission_supported", False
+                    )
                     work["age_seconds"] += time.monotonic() - began
                     work["prefixes"] = frozenset(work["prefixes"])
                     work["request_ids"] = frozenset(work["request_ids"])

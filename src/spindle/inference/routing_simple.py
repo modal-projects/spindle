@@ -19,7 +19,11 @@ SIMPLE_POLICIES = (
     "model-spill",
     "model-wave",
     "model-idle",
+    "model-locality",
     "bounded-kv",
+    "guarded-locality",
+    "guarded-least-load",
+    "guarded-home",
 )
 
 
@@ -28,11 +32,24 @@ class SimpleRouter(DomainRouter):
         if policy not in SIMPLE_POLICIES:
             raise ValueError(f"Unknown simple routing policy: {policy}")
         super().__init__(*args, balanced=True, stable=True, **kwargs)
-        self.policy = policy
-        if policy.startswith(("balanced-", "model-")):
+        self.guarded = policy.startswith("guarded-")
+        self.policy = {
+            "guarded-locality": "model-locality",
+            "guarded-least-load": "least-load",
+            "guarded-home": "model-home",
+        }.get(policy, policy)
+        if self.policy.startswith(("balanced-", "model-")):
             # Round-robin adapter counts with rendezvous tie breaking. Unlike
             # the original slot-budget map this also balances a small catalog.
             self.even_primaries = True
+
+    def select_destination(self, *args, **kwargs):
+        if self.guarded and any(
+            r.work is not None and not r.work.get("admission_supported", False)
+            for r in self.replicas.values()
+        ):
+            return None
+        return super().select_destination(*args, **kwargs)
 
     def placement_identity(self, adapter):
         # Placement may survive an optimizer publication. Cache matches, weight
@@ -41,19 +58,56 @@ class SimpleRouter(DomainRouter):
             adapter.rsplit("/", 1)[0] if self.policy.startswith("model-") else adapter
         )
 
+    def request_count(self, host):
+        replica = self.replicas[host]
+        observed = replica.work["request_ids"]
+        return replica.active + sum(
+            rid not in observed for rid in self.host_reservations.get(host, {})
+        )
+
+    def reuse_group_route(self, host):
+        return (
+            not self.guarded or self.request_count(host) < self.rates.decode_concurrency
+        )
+
     def placement_candidates(self, model, adapter, candidates, count):
         loads = {}
         for host, candidate in candidates.items():
-            replica = self.replicas[host]
-            observed = replica.work["request_ids"]
-            local = sum(
-                rid not in observed for rid in self.host_reservations.get(host, {})
-            )
-            loads[host] = replica.active + local
+            loads[host] = self.request_count(host)
             candidate["observed_and_reserved_requests"] = loads[host]
             candidate["score"] = float(loads[host])
+        if self.guarded:
+            capacity = self.rates.decode_concurrency
+            spare = {h: c for h, c in candidates.items() if loads[h] < capacity}
+            # Once the observed pool is full, keep ordinary placement and queue
+            # at the engine. Admission probes are only useful while another
+            # destination appears to have room; they are not a global semaphore.
+            if spare:
+                candidates = spare
+                for candidate in candidates.values():
+                    candidate["admission_limit"] = capacity
         if len(candidates) == 1 or self.policy == "least-load":
             return candidates
+        if self.policy == "model-locality":
+            # Separate load feasibility from state-reconstruction cost. This
+            # avoids adding a noisy drain-time estimate to cache/setup cost.
+            # One engine batch bounds the observed request-count preference;
+            # it is not a distributed admission or completion-time guarantee.
+            limit = min(loads.values()) + self.rates.decode_concurrency
+            ranking = self.primary_placement(adapter, self.placement_topology(adapter))
+            eligible = {}
+            for host in ranking:
+                if host not in candidates or loads[host] > limit:
+                    continue
+                candidate = candidates[host]
+                candidate["score"] = (
+                    candidate["registration_seconds"]
+                    + candidate["transfer_seconds"]
+                    + candidate["group_prefill_seconds"]
+                )
+                candidate["request_count_limit"] = limit
+                eligible[host] = candidate
+            return eligible
         limit = 1.25 * sum(loads.values()) / len(loads) + count
         if self.policy in {
             "adapter-home",

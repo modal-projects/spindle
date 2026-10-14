@@ -172,6 +172,14 @@ class LoraRouter:
         }
         self.local = {h: c for h, c in self.local.items() if c or h in self.replicas}
 
+    def note_busy(self, host: str, active: int, request_ids):
+        """Incorporate direct admission feedback until the next observation."""
+        if host in self.replicas:
+            replica = self.replicas[host]
+            replica.active = active
+            if replica.work is not None:
+                replica.work["request_ids"] = frozenset(request_ids)
+
     def select_destination(
         self, model: str, adapter: str, affinity: str, **kwargs
     ) -> str | None:

@@ -17,6 +17,7 @@ def pool(policy):
         h: Replica(
             h,
             work=dict(
+                admission_supported=True,
                 age_seconds=0,
                 prefixes=frozenset(),
                 prefill_tokens=0,
@@ -104,6 +105,26 @@ def test_idle_overflow_requires_observed_pressure_and_available_capacity():
     for replica in router.replicas.values():
         replica.active = 8
     assert choose(router, "all-busy") == home
+
+
+def test_bounded_setup_can_load_adapter_to_reuse_a_long_prefix():
+    router = pool("model-locality")
+    home = choose(router, "initial")
+    router.release(home, "m-0/v1", reservation_id="initial")
+    other = next(h for h in router.replicas if h != home)
+    router.replicas[home].work["gpu_adapters"] = ["m-0/v1"]
+    router.replicas[other].work["prefixes"] = frozenset(
+        h for h, _ in token_prefixes("m-0/v1", list(range(1024)))
+    )
+    assert choose(router, "reuse") == other
+    router.replicas[other].active = 100
+    assert choose(router, "bounded") == home
+
+
+def test_bounded_setup_uses_stable_primary_when_all_state_is_cold():
+    router = pool("model-locality")
+    primary = router.primary_placement("m-0/v1", tuple(sorted(router.replicas)))[0]
+    assert choose(router, "first") == primary
 
 
 def test_model_homes_survive_independent_version_arrivals_without_cache_credit():

@@ -256,6 +256,10 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
             successful = [e for e in seq_attempts if e["attrs"].get("ok")]
             assert len(successful) == 1
             event = successful[0]
+            if "admission_limit" in event["attrs"].get("routing", {}):
+                assert event["attrs"]["admission_checked"], (
+                    "Admission header was not enforced"
+                )
             meta = event["attrs"]["backend_timing"]
             assert meta["weight_version_start"] == meta["weight_version_end"] == version
             assert (
@@ -737,6 +741,14 @@ async def run_arm(pool, arm, clients, config):
                     == stream["version"]
                 )
                 assert 0 <= result["prompt_cache_hit_tokens"] <= len(prompt)
+                for event in events:
+                    attrs = event.get("attrs", {})
+                    if attrs.get("ok") and "admission_limit" in attrs.get(
+                        "routing", {}
+                    ):
+                        assert attrs["admission_checked"], (
+                            "Admission header was not enforced"
+                        )
                 requests.append(
                     {
                         "id": ident,

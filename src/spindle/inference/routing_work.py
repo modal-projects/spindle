@@ -97,6 +97,7 @@ class WorkRouter(LoraRouter):
         group_id=None,
         group_size=1,
         sample_index=0,
+        exclude_hosts=(),
     ):
         now = time.monotonic()
         if now - self.updated > self.stale_after:
@@ -106,6 +107,7 @@ class WorkRouter(LoraRouter):
                 h
                 for h, r in self.replicas.items()
                 if self.failed_until.get(h, 0) <= now
+                and h not in exclude_hosts
                 and r.work is not None
                 and r.work.get("age_seconds", 99) + now - self.updated < 3
             )
@@ -123,7 +125,7 @@ class WorkRouter(LoraRouter):
         count = min(capacity, group_size - chunk * capacity)
         group_key = (adapter, group_id, chunk) if group_id is not None else None
         planned = self.group_routes.get(group_key)
-        if planned in hosts:
+        if planned in hosts and self.reuse_group_route(planned):
             hosts = (planned,)
         candidates = {}
         for host in _ranking(key, hosts):
@@ -218,6 +220,9 @@ class WorkRouter(LoraRouter):
 
     def placement_candidates(self, model, adapter, candidates, count):
         return candidates
+
+    def reuse_group_route(self, host):
+        return True
 
     def release(self, upstream, adapter, *, failed=False, reservation_id=None):
         reservation = self.reservations.pop(reservation_id, None)

@@ -127,6 +127,42 @@ capacity and another replica has spare capacity after local reservations.
 Neither is treated as a selected policy. These controls test whether aggressive
 overflow itself explains the lost locality without fitting additional costs.
 
+A third candidate separates the two decisions explicitly. Eligible replicas
+have observed-plus-local request count at most the pool minimum plus one
+effective engine batch. Among them, minimize remaining group prefill time plus
+adapter registration and transfer time. The stable job primary breaks cold
+ties; the existing prefix home wins numerical ties. Unlike Work and Capacity,
+this rule does not add estimated queue drain time to setup time. It can choose
+a replica with cold adapter weights when the measured prefill saving exceeds
+their setup cost. The count band is a local heuristic and does not guarantee
+global admission under stale concurrent frontend observations. This candidate
+is added to the conservative screen before those GPU results are collected.
+
+The eight-frontend CPU counterexample still sends 288 requests to the only warm
+replica under this rule. Test a replica-local admission check carried on the
+existing generation request. While another destination appears to have room,
+the selected replica accepts only below effective running capacity C. The
+sidecar checks and increments its count without an intervening await. A busy
+response precedes adapter resolution and engine submission, includes active
+request IDs for deduplicating local reservations, and causes an immediate
+retry excluding that replica. Busy feedback can break a stale group placement.
+An accepted request needs no additional RPC. When the observed pool is full,
+or every eligible replica has rejected, use ordinary placement without the
+check and queue normally. Thus probes are bounded; saturation does not become
+an endless retry loop. This remains approximate routing, not a cluster-wide
+admission or autoscaling guarantee.
+
+The CPU protocol test with eight stale frontends admits exactly 36 requests on
+each of eight mock replicas; it does not measure GPU performance. Sidecar tests
+verify rejection before adapter registration and count release after completion.
+A third isolated eight-H200 pool is needed for the new image. Its three-hour
+watchdog limits that allocation to 24 GPU-hours. Total current task allocation
+is at most 24 GPUs, and at most 40 if later live RL overlaps all three pools,
+below the user's 48-GPU ceiling. Compare guarded locality against unguarded
+locality, guarded least load, static job placement, and native KV on the same
+image. Record rejected admission probes separately from transport failures,
+and require an acknowledgment that Flash forwarded the admission header.
+
 ## Live RL
 
 During screening, run one KV-affinity baseline validation to establish actual
