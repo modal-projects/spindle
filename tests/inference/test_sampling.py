@@ -550,3 +550,41 @@ def test_empty_stop_list_disables_eos():
     )
     assert seen[0]["ignore_eos"] is True
     assert "stop" not in seen[0]
+
+
+def test_tokenizerless_sampler_rejects_stop_strings():
+    request = task()
+    request["payload"]["sampling_params"]["stop"] = ["</answer>"]
+
+    def handle(http_request):
+        raise AssertionError("stop strings must not reach a tokenizer-less engine")
+
+    with pytest.raises(ValueError, match="token IDs"):
+        asyncio.run(
+            sample_task(
+                request,
+                "http://rollout",
+                stop_token_ids_only=True,
+                transport=httpx.MockTransport(handle),
+            )
+        )
+
+
+def test_tokenizerless_sampler_accepts_stop_token_ids():
+    seen = []
+    request = task()
+    request["payload"]["sampling_params"]["stop"] = [7, 9]
+
+    def handle(http_request):
+        seen.append(json.loads(http_request.content)["sampling_params"])
+        return response(7)
+
+    asyncio.run(
+        sample_task(
+            request,
+            "http://rollout",
+            stop_token_ids_only=True,
+            transport=httpx.MockTransport(handle),
+        )
+    )
+    assert seen[0]["stop_token_ids"] == [7, 9]

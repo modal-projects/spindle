@@ -295,6 +295,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if rollout_world_size % rollout_tensor_parallel_size:
         raise ValueError("rollout GPU count must be divisible by tensor parallel size")
     rollout_data_parallel_size = rollout_world_size // rollout_tensor_parallel_size
+    stop_token_ids_only = bool(definition.inference_settings.get("skip_tokenizer_init"))
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
@@ -310,6 +311,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             data_parallel_size=rollout_data_parallel_size,
             headers=proxy_auth_headers(),
             context_length=definition.max_context_length,
+            stop_token_ids_only=stop_token_ids_only,
             on_wait=keep_pool_ready,
             stats=stats,
         )
@@ -331,6 +333,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         headers=proxy_auth_headers(),
         on_wait=lambda: _touch_fft_pool(spec),
         context_length=definition.max_context_length,
+        stop_token_ids_only=stop_token_ids_only,
         stats=stats,
     )
 
