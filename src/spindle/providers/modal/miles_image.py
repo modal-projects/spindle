@@ -22,7 +22,9 @@ BASE_IMAGE = (
     f"radixark/miles:{MILES_RELEASE}"
     "@sha256:6355834f16bacd35d5d40c43f142e3758376f7b2e8d678bccfe870c092bd96bf"
 )
-MILES_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
+MILES_RELEASE_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
+MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
+MILES_BRANCH = "spindle-miles"
 MILES_PATH = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"
 
@@ -38,7 +40,9 @@ def _check_release(miles_commit: str) -> None:
     dockerfile = Path(MILES_PATH, "docker", "Dockerfile").read_text()
     bridge = re.search(r"Megatron-Bridge[.]git@([0-9a-f]{40})", dockerfile)[1]
     installed = json.loads(distribution("megatron-bridge").read_text("direct_url.json"))
-    assert _head(MILES_PATH) == miles_commit, "Miles is not at MILES_COMMIT"
+    assert _head(MILES_PATH) == miles_commit, (
+        "Miles base image differs from the release commit"
+    )
     assert _head(MEGATRON_PATH) == lock["megatron_commit"], (
         "Megatron-LM differs from release-lock.json"
     )
@@ -47,47 +51,6 @@ def _check_release(miles_commit: str) -> None:
     )
     print("megatron-lm", lock["megatron_commit"], "megatron-bridge", bridge)
 
-
-# The release validator assumes gated experts; ungated MLPs have no gate_proj.
-# Backport until the pinned Miles revision includes this upstream fix:
-# https://github.com/radixark/miles/pull/4032
-MILES_UNGATED_EXPERT_PATCH = (
-    "--- a/miles/backends/megatron_utils/lora/bridge.py\n"
-    "+++ b/miles/backends/megatron_utils/lora/bridge.py\n"
-    "@@ -105,7 +105,9 @@\n"
-    '     served = {target.rsplit(".", 1)[-1] for target in args.hf_lora_targets}\n'
-    '     if "gate_up_proj" in served:\n'
-    '         served.update(("gate_proj", "up_proj"))\n'
-    '-    expert_pair = {"gate_proj", "up_proj", "down_proj"}\n'
-    '+    expert_pair = {"up_proj", "down_proj"}\n'
-    "+    if provider.gated_linear_unit:\n"
-    '+        expert_pair.add("gate_proj")\n'
-    "     if served & expert_pair:\n"
-    "         assert expert_pair <= served, (\n"
-    '             f"Multi-LoRA on MoE experts requires all of {sorted(expert_pair)} in "\n'
-)
-
-# Bridge-built models bypass Megatron's CLI-to-config conversion.
-MILES_BRIDGE_CP_PATCH = (
-    "--- a/miles/backends/megatron_utils/model_provider.py\n"
-    "+++ b/miles/backends/megatron_utils/model_provider.py\n"
-    "@@ -45,3 +45,6 @@\n"
-    "     provider.sequence_parallel = args.sequence_parallel\n"
-    "     provider.context_parallel_size = args.context_parallel_size\n"
-    "+    provider.cp_comm_type = (\n"
-    "+        args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type\n"
-    "+    )\n"
-    " \n"
-    "--- a/miles/backends/megatron_utils/lora/bridge.py\n"
-    "+++ b/miles/backends/megatron_utils/lora/bridge.py\n"
-    "@@ -154,3 +154,6 @@\n"
-    "     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size\n"
-    "     provider.context_parallel_size = args.context_parallel_size\n"
-    "+    provider.cp_comm_type = (\n"
-    "+        args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type\n"
-    "+    )\n"
-    "     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion\n"
-)
 
 BRIDGE_IMPORT_CACHE_PATCH = (
     "--- a/megatron/bridge/models/conversion/model_bridge.py\n"
@@ -127,47 +90,6 @@ BRIDGE_IMPORT_CACHE_PATCH = (
     "             converted_weights = self._convert_loaded_hf_weight(task, hf_weights)\n"
 )
 
-# Stage adapter snapshots on CPU during conversion, before materializing the list.
-MILES_ADAPTER_SNAPSHOT_CPU_PATCH = (
-    "--- a/miles/backends/megatron_utils/update_weight/hf_weight_iterator_bridge.py\n"
-    "+++ b/miles/backends/megatron_utils/update_weight/hf_weight_iterator_bridge.py\n"
-    "@@ -17,10 +17,21 @@\n"
-    " class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):\n"
-    "     def __init__(self, *args, **kwargs):\n"
-    "         super().__init__(*args, **kwargs)\n"
-    "+        self._adapter_export_cpu = False\n"
-    " \n"
-    "         from megatron.bridge import AutoBridge\n"
-    " \n"
-    "         self._bridge = AutoBridge.from_hf_pretrained(self.args.hf_checkpoint, trust_remote_code=True)\n"
-    "+\n"
-    "+    def materialize_adapter(self, adapter, *, materialize=True):\n"
-    "+        # Disk snapshots need CPU tensors. Stage each converted tensor before\n"
-    "+        # the exporter builds its full list; copying the final list is too late.\n"
-    "+        previous = self._adapter_export_cpu\n"
-    "+        self._adapter_export_cpu = True\n"
-    "+        try:\n"
-    "+            return super().materialize_adapter(adapter, materialize=materialize)\n"
-    "+        finally:\n"
-    "+            self._adapter_export_cpu = previous\n"
-    " \n"
-    "     def _iter_hf_param_units(self, weights, *, materialize):\n"
-    "         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in weights.items()}\n"
-    "@@ -74,7 +85,11 @@\n"
-    "                 **self._source_name_kwargs(self._bridge.export_adapter_weights),\n"
-    "             )\n"
-    '             named_weights = self._postprocess_and_quantize(named_weights, "lora")\n'
-    "-            return [(h, w) for h, w, _m in named_weights if is_lora_weight_name(h)]\n"
-    "+            return [\n"
-    '+                (h, w.detach().to("cpu", copy=True) if self._adapter_export_cpu else w)\n'
-    "+                for h, w, _m in named_weights\n"
-    "+                if is_lora_weight_name(h)\n"
-    "+            ]\n"
-    " \n"
-    "     @staticmethod\n"
-    "     def _source_name_kwargs(export_fn) -> dict:\n"
-)
-
 # The release has the DSA backend hooks but omits the TileLang implementation.
 # Upstream #5049 adds the kernels and their packed/context-parallel tests.
 # Fetching the commit by hash pins its exact contents, unlike a generated .diff.
@@ -189,20 +111,7 @@ image = (
         {
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }
-    )
-    .run_commands(
-        "cd /root/miles && git apply - <<'PATCH'\n"
-        + MILES_UNGATED_EXPERT_PATCH
-        + "PATCH\n",
-        "python - <<'PY'\n"
-        "from importlib.metadata import distribution\n"
-        "import subprocess\n"
-        "root = distribution('megatron-bridge').locate_file('')\n"
-        "subprocess.run(['patch', '-p1', '-d', str(root)], input="
-        + repr(BRIDGE_IMPORT_CACHE_PATCH)
-        + ", text=True, check=True)\nPY\n",
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE)
     .pip_install(
@@ -214,7 +123,19 @@ image = (
         "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
         "opentelemetry-exporter-otlp-proto-http==1.43.0",
     )
-    .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
+    .run_function(_check_release, kwargs={"miles_commit": MILES_RELEASE_COMMIT})
+    .run_commands(
+        f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY}"
+        f" refs/heads/{MILES_BRANCH}"
+        f" && git -C {MILES_PATH} checkout -B {MILES_BRANCH} FETCH_HEAD",
+        "python - <<'PY'\n"
+        "from importlib.metadata import distribution\n"
+        "import subprocess\n"
+        "root = distribution('megatron-bridge').locate_file('')\n"
+        "subprocess.run(['patch', '-p1', '-d', str(root)], input="
+        + repr(BRIDGE_IMPORT_CACHE_PATCH)
+        + ", text=True, check=True)\nPY\n",
+    )
     .run_commands(
         "pip install --no-deps 'peft>=0.18.1'",
         MEGATRON_RUNTIME_CHECK,
@@ -222,10 +143,6 @@ image = (
         "assert all(hasattr(T, name) for name in "
         "('load_slot', 'unload_slot', 'forward_backward', "
         "'forward_only', 'optim_step', 'save_slot', 'export_slot'))\"",
-        "cd /root/miles && git apply - <<'PATCH'\n"
-        + MILES_BRIDGE_CP_PATCH
-        + MILES_ADAPTER_SNAPSHOT_CPU_PATCH
-        + "PATCH\n",
     )
     .run_commands(DSA_KERNEL_INSTALL)
     .add_local_python_source("spindle", ignore=ignore_config_source)

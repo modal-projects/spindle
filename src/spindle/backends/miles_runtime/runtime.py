@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -48,8 +49,17 @@ class MilesRuntime:
                 "MilesRuntime requires Miles and Ray in the trainer image"
             ) from _runtime_import_error
         self.config = config
-        # Baked into the image after resolving main, never the moving ref name.
-        self.revision = os.environ["SPINDLE_MILES_COMMIT"]
+        # Record the commit actually installed from the branch in this image.
+        self.revision = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(Path(tinker_runtime.__file__).resolve().parents[2]),
+                "rev-parse",
+                "HEAD",
+            ],
+            text=True,
+        ).strip()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run_loop,
