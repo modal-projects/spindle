@@ -1,4 +1,4 @@
-"""Live RL on one unchanged eight-GPU trainer and eight inference replicas.
+"""Live RL on one unchanged trainer deployment and eight inference replicas.
 
 Only the frontend routing setting changes between arms. The explicit initialize
 step deploys the measured inference image and permits trainer placement in any

@@ -1,12 +1,14 @@
 from pathlib import Path
 import json
 import asyncio
+from copy import deepcopy
 import runpy
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import httpx
 
 
 BENCHMARK = Path(__file__).resolve().parents[2] / "scripts/benchmarks/lora_routing"
@@ -146,3 +148,95 @@ def test_live_trainer_exit_invalidates_only_unfinished_arm(monkeypatch):
     known["trainer"]["finished_at"] = 120
     assert check(known, 100, [1, 1], 4) == "trainer"
     assert check(known, 100, [2, 2], 4) is None
+
+
+def test_supplementary_pair_rejects_changed_work_or_hardware(monkeypatch):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    check = runpy.run_path(str(BENCHMARK / "wave_report.py"))["matched_pair"]
+    sources = {"router.py": "policy-hash", "replay.py": "harness-hash"}
+    frozen = dict(source_sha256=sources)
+    raw = dict(
+        pool="same-pool",
+        workload_sha256="same-workload",
+        trace_sha256="same-trace",
+        config=dict(source_sha256=sources, work_rates={"decode": 1000}),
+        baseline=[dict(replica=str(i)) for i in range(8)],
+        final=[dict(replica=str(i)) for i in range(8)],
+    )
+    check(raw, deepcopy(raw), frozen)
+    changed = deepcopy(raw)
+    changed["final"][0]["replica"] = "replacement"
+    with pytest.raises(ValueError, match="Physical replicas changed"):
+        check(raw, changed, frozen)
+    changed = deepcopy(raw)
+    changed["config"]["work_rates"]["decode"] = 2000
+    with pytest.raises(ValueError, match="Unmatched work_rates"):
+        check(raw, changed, frozen)
+    changed = deepcopy(raw)
+    changed["trace_sha256"] = "different-trace"
+    with pytest.raises(ValueError, match="Unmatched trace_sha256"):
+        check(raw, changed, frozen)
+
+
+def test_resource_audit_deduplicates_and_does_not_count_queued_time(
+    monkeypatch, tmp_path
+):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    summarize = runpy.run_path(str(BENCHMARK / "resource_report.py"))["summarize"]
+    task = dict(
+        task_id="trainer", gpu_count=4, gpu_type="H100", started_at=100, finished_at=0
+    )
+    first, last = tmp_path / "first.json", tmp_path / "last.json"
+    first.write_text(json.dumps([task | {"started_at": 0}]))
+    last.write_text(
+        json.dumps(
+            [
+                task | {"finished_at": 3700},
+                task | {"task_id": "queued", "started_at": 0},
+            ]
+        )
+    )
+    result = summarize([first, last], 4000)
+    assert result["gpu_hours"] == 4
+    assert result["peak_gpus"] == 4
+    assert result["observed_active_gpus"] == 0
+    assert result["tasks_without_recorded_start"] == ["queued"]
+
+
+def test_preparation_retry_drains_replica_and_remains_bounded(monkeypatch):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    scope = runpy.run_path(str(BENCHMARK / "cache_replay.py"))
+    monkeypatch.setattr(scope["asyncio"], "sleep", AsyncMock())
+    setup = scope["setup_generate"]
+    node = SimpleNamespace(upstream="upstream", replica_id="replica")
+    request = httpx.Request("POST", "https://test/generate")
+    states = [
+        httpx.Response(
+            200,
+            request=request,
+            json=dict(replica="replica", active=1, work=dict(request_ids=["old"])),
+        ),
+        httpx.Response(
+            200,
+            request=request,
+            json=dict(replica="replica", active=0, work=dict(request_ids=[])),
+        ),
+    ]
+    client = SimpleNamespace(
+        post=AsyncMock(
+            side_effect=[
+                httpx.Response(502, request=request),
+                httpx.Response(200, request=request),
+            ]
+        ),
+        get=AsyncMock(side_effect=states),
+    )
+    retries = []
+    asyncio.run(setup(client, "https://test", node, {}, retries))
+    assert client.get.await_count == client.post.await_count == 2
+    assert [r["status"] for r in retries] == [502]
+    client.post = AsyncMock(return_value=httpx.Response(502, request=request))
+    client.get = AsyncMock(return_value=states[-1])
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(setup(client, "https://test", node, {}, []))
+    assert client.post.await_count == 3

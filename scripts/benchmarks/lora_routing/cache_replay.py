@@ -54,6 +54,45 @@ async def gather_work(*coroutines):
         raise
 
 
+async def setup_generate(client, gateway, replica, payload, retries):
+    """Retry transient preparation responses only, before the measured clock.
+
+    Preparation generates one token and later flushes all KV state. A failed
+    response may still have reached the engine, so drain that replica before
+    another attempt. This never retries a measured generation or a pool reset.
+    """
+    headers = {"Modal-Flash-Upstream": replica.upstream}
+    for attempt in range(3):
+        response = await client.post(
+            gateway + "/generate", headers=headers, json=payload
+        )
+        if response.status_code not in {502, 503, 504} or attempt == 2:
+            response.raise_for_status()
+            return response
+        retries.append(
+            dict(
+                replica=replica.replica_id,
+                status=response.status_code,
+                attempt=attempt + 1,
+                time=time.time(),
+            )
+        )
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            state_response = await client.get(
+                gateway + "/benchmark-state", headers=headers, timeout=10
+            )
+            state_response.raise_for_status()
+            state = state_response.json()
+            if state["replica"] != replica.replica_id:
+                raise RuntimeError("Replica replaced during preparation recovery")
+            if state["active"] == 0 and not state["work"]["request_ids"]:
+                break
+        else:
+            raise RuntimeError("Preparation request did not drain before retry")
+
+
 def make_router(pool, gateway, arm, config):
     policy = arm.removesuffix("-cohort")
     measured = policy.startswith("work") or policy in {
@@ -500,6 +539,8 @@ async def run_arm(pool, arm, clients, config, executions):
         # All arms begin with every initial adapter CPU-registered on every replica.
         # GPU slots hold the last seven adapters plus the base model; the trace
         # therefore isolates placement and GPU/KV churn from registration I/O.
+        preparation_retries = []
+
         async def warm(replica):
             registered = previous[replica.replica_id]["work"]["cpu_adapters"]
             if registered:
@@ -515,10 +556,11 @@ async def run_arm(pool, arm, clients, config, executions):
                     if config.get("cold_versions")
                     else source["versions"]
                 ):
-                    response = await setup_client.post(
-                        gateway + "/generate",
-                        headers={"Modal-Flash-Upstream": replica.upstream},
-                        json={
+                    response = await setup_generate(
+                        setup_client,
+                        gateway,
+                        replica,
+                        {
                             "input_ids": source["prompts"][0][:16],
                             "weight_run_id": source["model_id"],
                             "weight_version": {
@@ -532,6 +574,7 @@ async def run_arm(pool, arm, clients, config, executions):
                             },
                             "return_logprob": True,
                         },
+                        preparation_retries,
                     )
                     response.raise_for_status()
                     meta = response.json()["meta_info"]
@@ -542,10 +585,11 @@ async def run_arm(pool, arm, clients, config, executions):
                     )
             # Engine health probes also use the base-model slot. Materialize it
             # explicitly so every trial starts with exactly the same GPU set.
-            response = await setup_client.post(
-                gateway + "/generate",
-                headers={"Modal-Flash-Upstream": replica.upstream},
-                json={
+            response = await setup_generate(
+                setup_client,
+                gateway,
+                replica,
+                {
                     "input_ids": [0],
                     "sampling_params": {
                         "max_new_tokens": 1,
@@ -553,6 +597,7 @@ async def run_arm(pool, arm, clients, config, executions):
                         "temperature": 0,
                     },
                 },
+                preparation_retries,
             )
             response.raise_for_status()
             response = await setup_client.post(
@@ -908,6 +953,7 @@ async def run_arm(pool, arm, clients, config, executions):
             "trace_sha256": trace_hash,
             "workload_sha256": workload_hash,
             "wall_started": wall_started,
+            "preparation_retries": preparation_retries,
             "seconds": elapsed,
             "requests": requests,
             "baseline": baseline,

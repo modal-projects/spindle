@@ -57,6 +57,8 @@ def summarize_pairs(frozen, roots):
             arms[arm] = analyzed(raw)
             arms[arm]["workload_sha256"] = raw["workload_sha256"]
             arms[arm]["source_sha256"] = recorded
+            arms[arm]["pool"] = raw["pool"]
+            arms[arm]["replicas"] = sorted(s["replica"] for s in raw["baseline"])
             arms[arm]["raw_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             arms[arm]["raw_path"] = str(path)
             attempts = [a["attrs"] for r in raw["requests"] for a in r["attempts"]]
@@ -80,6 +82,10 @@ def summarize_pairs(frozen, roots):
         ), f"Mixed harness/CPU placement within {job['name']}"
         if len({a["workload_sha256"] for a in arms.values()}) != 1:
             raise ValueError(f"Unmatched workload: {job['name']}")
+        if len({a["pool"] for a in arms.values()}) != 1 or len(
+            {tuple(a["replicas"]) for a in arms.values()}
+        ) != 1:
+            raise ValueError(f"Unmatched physical pool: {job['name']}")
         candidate = arms[frozen["candidate"]]
         for baseline in ("kv", *frozen["controls"]):
             for metric in METRICS:
