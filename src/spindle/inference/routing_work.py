@@ -183,6 +183,7 @@ class WorkRouter(LoraRouter):
                 work=group_prefill / count + decode,
                 group_prefill_seconds=group_prefill,
                 placement_group_size=count,
+                requested_decode_tokens=output_tokens,
             )
         candidates = self.placement_candidates(model, adapter, candidates, count)
         chosen = min(candidates, key=lambda h: candidates[h]["score"])
@@ -201,7 +202,10 @@ class WorkRouter(LoraRouter):
             if len(self.group_routes) > 8192:
                 self.group_routes.popitem(last=False)
         self.reservations[reservation_id] = dict(
-            host=chosen, adapter=adapter, work=candidates[chosen]["work"]
+            host=chosen,
+            adapter=adapter,
+            work=candidates[chosen]["work"],
+            decode_tokens=output_tokens,
         )
         self.host_reservations.setdefault(chosen, {})[reservation_id] = (
             self.reservations[reservation_id]

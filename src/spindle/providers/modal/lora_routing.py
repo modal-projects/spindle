@@ -10,6 +10,7 @@ from spindle.inference.lora_routing import LoraRouter, Replica
 from spindle.inference.routing_work import WorkRates, WorkRouter
 from spindle.inference.routing_domains import DomainRouter
 from spindle.inference.routing_simple import SimpleRouter
+from spindle.inference.routing_capacity import CapacityRouter
 
 from .fft_pool import proxy_auth_headers
 
@@ -27,6 +28,8 @@ def create_router(
     stable_domains: bool = False,
     prefill_once: bool = False,
     simple_policy: str | None = None,
+    capacity_aware: bool = False,
+    capacity_tie_seed: str | None = None,
 ) -> LoraRouter:
     containers = []
     discovered = 0.0
@@ -111,6 +114,11 @@ def create_router(
             raise ValueError("Simple controls require rates and no domain flags")
         router_type = SimpleRouter
         extra["policy"] = simple_policy
+    if capacity_aware:
+        if work_rates is None or domains or simple_policy is not None:
+            raise ValueError("Capacity routing requires rates and no placement flags")
+        router_type = CapacityRouter
+        extra["tie_seed"] = capacity_tie_seed
     return router_type(
         discover,
         target=target,

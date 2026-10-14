@@ -82,6 +82,12 @@ def create_app(
                 rows.update(
                     (rid, row) for rid, row in current.items() if rid not in rows
                 )
+                adapter_decode_maxima = {}
+                for row in rows.values():
+                    adapter = row["adapter"]
+                    adapter_decode_maxima[adapter] = max(
+                        adapter_decode_maxima.get(adapter, 0), row["decode_tokens"]
+                    )
                 work = dict(
                     age_seconds=time.time() - snapshot["timestamp"],
                     incarnation=snapshot["incarnation"],
@@ -93,6 +99,7 @@ def create_app(
                     pending_adapters=list({r["adapter"] for r in rows.values()}),
                     prefill_tokens=sum(r["prefill_tokens"] for r in rows.values()),
                     decode_tokens=sum(r["decode_tokens"] for r in rows.values()),
+                    adapter_decode_maxima=adapter_decode_maxima,
                     snapshot_seconds=snapshot["snapshot_seconds"],
                     cache_kind=snapshot["cache_kind"],
                 )

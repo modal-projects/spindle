@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import httpx
 from fastapi.testclient import TestClient
@@ -21,6 +22,42 @@ def _publish(tmp_path, version):
     bulletin = SnapshotBulletin(tmp_path / "bulletin")
     bulletin.publish(VersionRef("model-a", version), source)
     return bulletin
+
+
+def test_decode_maxima_merge_engine_progress_with_unobserved_ingress(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SGLANG_SPINDLE_ROUTING_OBSERVATIONS", "1")
+    app = create_app(_publish(tmp_path, 3), "http://sglang")
+
+    def row(rid, adapter, decode):
+        return dict(rid=rid, adapter=adapter, prefill_tokens=0, decode_tokens=decode)
+
+    with TestClient(app) as client:
+        app.state.routing_read_at = time.monotonic()
+        app.state.routing_requests = {
+            r["rid"]: r
+            for r in [
+                row("running", "m/v1", 100),
+                row("new", "m/v1", 80),
+                row("version2", "m/v2", 90),
+            ]
+        }
+        app.state.routing_snapshot = dict(
+            timestamp=time.time(),
+            incarnation=1,
+            sequence=1,
+            prefixes=[],
+            cpu_adapters=["m/v1", "m/v2"],
+            gpu_adapters=["m/v1"],
+            requests=[row("running", "m/v1", 20), row("completed", "m/v3", 1000)],
+            snapshot_seconds=0.001,
+            cache_kind="RadixCache",
+        )
+        work = client.get("/routing-state").json()["work"]
+        assert work["decode_tokens"] == 190
+        assert work["adapter_decode_maxima"] == {"m/v1": 80, "m/v2": 90}
+        assert set(work["request_ids"]) == {"running", "new", "version2"}
 
 
 def test_prefix_hints_are_scoped_to_the_resolved_adapter_version(tmp_path):

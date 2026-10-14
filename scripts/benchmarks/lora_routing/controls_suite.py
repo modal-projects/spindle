@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -69,7 +70,12 @@ def main():
         records.append(record)
         write(target, records)
         with (args.root / (job["name"] + ".log")).open("w") as log:
-            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+            result = subprocess.run(
+                command,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, "MODAL_ENVIRONMENT": "lilo-deploy"},
+            )
         record.update(
             end=time.time(),
             returncode=result.returncode,

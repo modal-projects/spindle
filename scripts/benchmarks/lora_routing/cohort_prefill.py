@@ -15,7 +15,9 @@ from spindle.inference.lora_routing import prefix_key
 from spindle.inference.routing_work import token_prefixes
 
 
-async def prepare_cohort(task, gateway, client, router, records, *, native=False):
+async def prepare_cohort(
+    task, gateway, client, router, records, *, native=False, timeout=240
+):
     prompt = task["payload"]["prompt"]["chunks"][0]["tokens"]
     count = task["payload"]["num_samples"]
     boundary = (len(prompt) - 1) // 64 * 64
@@ -72,7 +74,7 @@ async def prepare_cohort(task, gateway, client, router, records, *, native=False
             response = await client.post(
                 gateway + "/generate",
                 headers=headers,
-                timeout=240,
+                timeout=timeout,
                 json=dict(
                     rid="cohort-" + uuid.uuid4().hex,
                     input_ids=prompt[:boundary],

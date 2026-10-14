@@ -356,6 +356,7 @@ def test_execute_sample_routes_lora_models_to_shared_pool(monkeypatch) -> None:
     [
         "work",
         "domains",
+        "capacity",
         "adapter-home",
         "adapter-two",
         "adapter-spill",
@@ -419,8 +420,9 @@ def test_execute_sample_uses_one_calibrated_router_per_pool(monkeypatch, routing
     assert options["balanced_domains"] is (routing == "domains")
     assert options["stable_domains"] is (routing == "domains")
     assert options["simple_policy"] == (
-        None if routing in {"work", "domains"} else routing
+        None if routing in {"work", "domains", "capacity"} else routing
     )
+    assert options["capacity_aware"] is (routing == "capacity")
     assert not options.get("prefill_once", False)
 
 

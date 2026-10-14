@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--run", required=True)
     parser.add_argument(
         "--policy",
-        choices=["naive", "affinity", "work", "domains", *SIMPLE_POLICIES],
+        choices=["naive", "affinity", "work", "domains", "capacity", *SIMPLE_POLICIES],
         required=True,
     )
     parser.add_argument("--work-rates", type=Path, required=True)

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 import runpy
@@ -11,6 +12,31 @@ BENCHMARK = Path(__file__).resolve().parents[2] / "scripts/benchmarks/lora_routi
 @pytest.fixture(autouse=True)
 def benchmark_import_path(monkeypatch):
     monkeypatch.syspath_prepend(str(BENCHMARK))
+
+
+def test_failed_work_drains_other_requests_before_transport_can_close():
+    gather_work = runpy.run_path(str(BENCHMARK / "cache_replay.py"))["gather_work"]
+
+    async def run():
+        started, cleaned = asyncio.Event(), asyncio.Event()
+
+        async def pending():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+
+        async def failed():
+            await started.wait()
+            raise RuntimeError("transport failed")
+
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await gather_work(pending(), failed())
+        assert cleaned.is_set()
+
+    asyncio.run(run())
 
 
 def test_gpu_hit_counters_count_each_request_once_and_exclude_base(

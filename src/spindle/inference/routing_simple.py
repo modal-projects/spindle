@@ -17,6 +17,8 @@ SIMPLE_POLICIES = (
     "balanced-spill",
     "model-home",
     "model-spill",
+    "model-wave",
+    "model-idle",
     "bounded-kv",
 )
 
@@ -61,12 +63,28 @@ class SimpleRouter(DomainRouter):
             "balanced-spill",
             "model-home",
             "model-spill",
+            "model-wave",
+            "model-idle",
         }:
             hosts = self.placement_topology(adapter)
             ranking = self.primary_placement(adapter, hosts)
             available = [h for h in ranking if h in candidates]
+            home = available[0]
+            capacity = self.rates.decode_concurrency
+            if self.policy == "model-wave":
+                # Keep locality while its queue is within one engine batch of
+                # the least-loaded destination. This is a request-count budget,
+                # not a claim about equal completion times for unequal lengths.
+                limit = min(loads.values()) + capacity
+                return {home: candidates[home]} if loads[home] <= limit else candidates
+            if self.policy == "model-idle":
+                # Require observed pressure at home before breaking placement;
+                # local reservations alone cannot establish remote congestion.
+                spare = {h: c for h, c in candidates.items() if loads[h] < capacity}
+                if self.replicas[home].active < capacity or not spare:
+                    return {home: candidates[home]}
+                return spare
             if self.policy.endswith("-spill"):
-                home = available[0]
                 return {home: candidates[home]} if loads[home] <= limit else candidates
             width = 2 if self.policy == "adapter-two" else 1
             return {h: candidates[h] for h in available[:width]}

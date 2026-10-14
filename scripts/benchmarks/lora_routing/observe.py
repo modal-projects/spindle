@@ -36,6 +36,7 @@ async def replicas(app_name):
     secrets=[modal.Secret.from_name("lilo-proxy")],
     timeout=10800,
     region="us-west",
+    nonpreemptible=True,
 )
 async def observe(app_names, seconds, benchmark=False, compact=False):
     deadline = time.monotonic() + seconds

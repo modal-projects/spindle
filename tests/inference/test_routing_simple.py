@@ -86,6 +86,26 @@ def test_balanced_home_equalizes_small_catalog_even_when_slots_are_plentiful():
     assert {assignments.count(h) for h in hosts} == {2}
 
 
+def test_wave_overflow_uses_engine_capacity_and_preserves_nearby_home():
+    router = pool("model-wave")
+    home = choose(router, "first")
+    router.release(home, "m-0/v1", reservation_id="first")
+    router.replicas[home].active = 8
+    assert choose(router, "within-one-batch") == home
+    assert choose(router, "beyond-one-batch") != home
+
+
+def test_idle_overflow_requires_observed_pressure_and_available_capacity():
+    router = pool("model-idle")
+    home = choose(router, "first")
+    assert {choose(router, str(i)) for i in range(20)} == {home}
+    router.replicas[home].active = 8
+    assert choose(router, "overflow") != home
+    for replica in router.replicas.values():
+        replica.active = 8
+    assert choose(router, "all-busy") == home
+
+
 def test_model_homes_survive_independent_version_arrivals_without_cache_credit():
     router = pool("model-home")
     hosts = tuple(router.replicas)

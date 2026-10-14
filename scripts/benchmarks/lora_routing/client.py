@@ -137,10 +137,28 @@ class Client:
                 for n in ["tinker", "transformers", "numpy"]
             },
         )
+        metadata["source_sha256"] = {}
+        for name in ("client.py", "sdk_affinity.py"):
+            content = (ROOT / name).read_bytes()
+            metadata["source_sha256"][name] = hashlib.sha256(content).hexdigest()
+            target = root / "source" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
         (root / "manifest.json").write_text(json.dumps(metadata, indent=2))
         self.event("client_create_start")
         self.trainer = create_trainer(self.service, cfg["model"], cfg["rank"])
         self.event("client_created", model_id=self.trainer.model_id)
+        if cfg.get("initial_state_paths"):
+            source = cfg["initial_state_paths"][client_index]
+            began = time.time()
+            self.trainer.load_state(source).result(timeout=1800)
+            self.event("initial_state_loaded", path=source, seconds=time.time() - began)
+        if cfg.get("save_initial_state", False):
+            began = time.time()
+            checkpoint = self.trainer.save_state("routing-initial").result(timeout=1800)
+            self.event(
+                "initial_state_saved", path=checkpoint.path, seconds=time.time() - began
+            )
         self.next_group = 0
 
     def event(self, event, **fields):
@@ -231,11 +249,15 @@ class Client:
         start = time.time()
         kept = []
         all_groups = []
+        filtered = unused = 0
         self.event("rollout_start", update=update, policy_version=snapshot[1])
         with ThreadPoolExecutor(self.cfg["groups_per_update"]) as pool:
             while len(kept) < self.cfg["groups_per_update"]:
                 count = min(
-                    self.cfg["groups_per_update"] - len(kept),
+                    max(
+                        self.cfg["groups_per_update"] - len(kept),
+                        cfg.get("minimum_refill_groups", 1),
+                    ),
                     self.cfg["max_candidate_groups"] - len(all_groups),
                 )
                 if count <= 0:
@@ -246,12 +268,16 @@ class Client:
                 self.next_group += count
                 groups = list(pool.map(lambda i: self.group(i, snapshot), indices))
                 all_groups.extend(groups)
-                kept.extend(
+                eligible = [
                     g
                     for g in groups
                     if not cfg.get("dynamic_group_filtering", True)
                     or len({s["reward"] for s in g["sequences"]}) > 1
-                )
+                ]
+                needed = cfg["groups_per_update"] - len(kept)
+                kept.extend(eligible[:needed])
+                filtered += len(groups) - len(eligible)
+                unused += max(0, len(eligible) - needed)
         lengths = [len(s["tokens"]) for g in all_groups for s in g["sequences"]]
         generated = sum(lengths)
         trained = sum(len(s["tokens"]) for g in kept for s in g["sequences"])
@@ -269,7 +295,9 @@ class Client:
             started_at=start,
             seconds=time.time() - start,
             groups_sampled=len(all_groups),
-            groups_filtered=len(all_groups) - len(kept),
+            groups_filtered=filtered,
+            groups_unused=unused,
+            groups_retained=len(kept),
             mixed_reward_groups=sum(
                 len({s["reward"] for s in g["sequences"]}) > 1 for g in kept
             ),

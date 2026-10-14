@@ -78,8 +78,10 @@ def summarize_live(root, observations=None):
         reward_mean=statistics.mean(r for g in groups for r in g["rewards"]),
         sampled_groups=len(groups),
         filtered_groups=sum(r["groups_filtered"] for r in rollouts),
+        unused_mixed_groups=sum(r.get("groups_unused", 0) for r in rollouts),
         retained_groups=sum(
-            r["groups_sampled"] - r["groups_filtered"] for r in rollouts
+            r["groups_sampled"] - r["groups_filtered"] - r.get("groups_unused", 0)
+            for r in rollouts
         ),
         training_with_wait_mean_s=statistics.mean(train_seconds),
         publication_remaining_wait_mean_s=statistics.mean(publish_seconds),
@@ -105,6 +107,52 @@ def summarize_live(root, observations=None):
         after = {s["replica"]: s for s in complete[-1]["replicas"]}
         assert before.keys() == after.keys()
         assert all(s["active"] == 0 for s in after.values())
+        measured = [
+            r
+            for r in complete
+            if result["measured_start"] <= r["time"] <= result["measured_end"]
+        ]
+        gaps = [b["time"] - a["time"] for a, b in zip(measured, measured[1:])]
+        observed_seconds = sum(gap for gap in gaps if gap <= 15)
+        queued_seconds = unused_slots = load_cv = 0.0
+        for row, gap in zip(measured, gaps):
+            if gap > 15:
+                continue
+            loads = [
+                load
+                for replica in row["replicas"]
+                for load in replica["engine"]["loads"]
+            ]
+            if not any(load["num_waiting_reqs"] for load in loads):
+                continue
+            queued_seconds += gap
+            total_capacity = sum(load["max_running_requests"] for load in loads)
+            unused_slots += (
+                gap
+                * sum(
+                    max(0, load["max_running_requests"] - load["num_running_reqs"])
+                    for load in loads
+                )
+                / total_capacity
+            )
+            requests = [
+                load["num_running_reqs"] + load["num_waiting_reqs"] for load in loads
+            ]
+            load_cv += gap * statistics.pstdev(requests) / statistics.mean(requests)
+        result["observations"] = dict(
+            complete_samples=len(measured),
+            max_gap_seconds=max(gaps, default=0),
+            observed_seconds=observed_seconds,
+            coverage_fraction=observed_seconds / result["elapsed_seconds"],
+            seconds_with_any_native_queue=queued_seconds,
+            unused_sequence_capacity_fraction_while_queued=unused_slots / queued_seconds
+            if queued_seconds
+            else None,
+            request_load_cv_while_queued=load_cv / queued_seconds
+            if queued_seconds
+            else None,
+            note="Time-weighted native scheduler observations; gaps over 15 seconds are excluded, not interpolated. Unused sequence slots do not prove usable GPU compute capacity.",
+        )
         counters = {}
         for key in (
             "gpu_loads",

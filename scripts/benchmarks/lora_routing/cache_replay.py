@@ -18,8 +18,9 @@ import time
 
 import httpx
 import modal
+import h2_diagnostics
 
-from spindle.inference.sampling import TCP_KEEPALIVE_OPTIONS, sample_task
+from spindle.inference.sampling import keepalive_transport, sample_task
 from cohort_prefill import prepare_cohort
 from spindle.providers.modal.fft_pool import proxy_auth_headers
 from spindle.providers.modal.image_dependencies import (
@@ -37,8 +38,20 @@ image = (
     .apt_install("git")
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE, "h2>=4,<5")
     .env({"MODAL_ENVIRONMENT": "lilo-deploy"})
-    .add_local_python_source("spindle", "cohort_prefill")
+    .add_local_python_source("spindle", "cohort_prefill", "h2_diagnostics")
 )
+
+
+async def gather_work(*coroutines):
+    """Drain sibling cancellation before closing shared clients after failure."""
+    tasks = [asyncio.create_task(c) for c in coroutines]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 def make_router(pool, gateway, arm, config):
@@ -47,6 +60,8 @@ def make_router(pool, gateway, arm, config):
         "domains",
         "balanced",
         "stable",
+        "capacity",
+        "capacity-random",
         *SIMPLE_POLICIES,
     }
     return create_router(
@@ -61,6 +76,10 @@ def make_router(pool, gateway, arm, config):
         stable_domains=policy == "stable",
         prefill_once=arm.endswith("-cohort"),
         simple_policy=policy if policy in SIMPLE_POLICIES else None,
+        capacity_aware=policy.startswith("capacity"),
+        capacity_tie_seed=os.environ["MODAL_TASK_ID"]
+        if policy == "capacity-random"
+        else None,
     )
 
 
@@ -138,6 +157,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     client's update proceeds, matching client.py without cross-client barriers.
     """
     policy = arm.removesuffix("-cohort")
+    h2_diagnostics.enable()
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     router = make_router(pool, gateway, arm, config)
     rows, rollouts, prefills = [], [], []
@@ -146,221 +166,221 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
         {"shard": shard, "frontend": os.environ["MODAL_TASK_ID"]}, partition="ready"
     )
     start_at = await startup.get.aio(timeout=180, partition=f"start-{shard}")
-    limits = httpx.Limits(max_connections=512, max_keepalive_connections=256)
-    async with httpx.AsyncClient(
-        headers=proxy_auth_headers(),
-        timeout=240,
-        trust_env=False,
-        transport=httpx.AsyncHTTPTransport(
-            http2=config.get("http2", False),
-            limits=limits,
-            socket_options=list(TCP_KEEPALIVE_OPTIONS),
-            trust_env=False,
-        ),
-    ) as client:
 
-        async def group(
-            source,
-            round_index,
-            group_index,
-            version,
-            *,
-            history=None,
-            trajectory=None,
-            dialogue_turn=0,
-        ):
-            client_index = source["client_index"]
-            problem = (
-                0 if config.get("repeat_prefixes") else round_index * config["groups"]
-            ) + group_index
-            prompt = source["prompts"][problem % len(source["prompts"])]
-            if config.get("long_prefix"):
-                prompt = long_prompt(source, round_index, group_index)
-            if history is not None:
-                prompt = history
-            count = config["samples"]
-            if client_index == 0 and config["hot_samples"]:
-                count = config["hot_samples"]
-            elif client_index < config.get("large_group_clients", 0):
-                count = config["groups"] * config["samples"]
-            if trajectory is not None:
-                count = 1
-            ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
-            if dialogue_turn:
-                ident += f"-trajectory-{trajectory}-turn-{dialogue_turn}"
-            task = {
-                "request_id": ident,
-                "sampling_session_id": f"dapo-{source['model_id']}-{version}",
-                "model_id": source["model_id"],
-                "publish_version": version,
-                "payload": {
-                    "prompt": {"chunks": [{"type": "encoded_text", "tokens": prompt}]},
-                    "num_samples": count,
-                    "cache_affinity_key": config.get("affinity_salt", "")
-                    + f"problem-{problem % len(source['prompts'])}",
-                    "sampling_params": {
-                        "max_tokens": config["decode_tokens"],
-                        "stop": [],
-                        "temperature": 1.0,
-                        "seed": 4242 + round_index * 100 + group_index,
-                    },
+    async def group(
+        source,
+        round_index,
+        group_index,
+        version,
+        *,
+        history=None,
+        trajectory=None,
+        dialogue_turn=0,
+    ):
+        client_index = source["client_index"]
+        problem = (
+            0 if config.get("repeat_prefixes") else round_index * config["groups"]
+        ) + group_index
+        prompt = source["prompts"][problem % len(source["prompts"])]
+        if config.get("long_prefix"):
+            prompt = long_prompt(source, round_index, group_index)
+        if history is not None:
+            prompt = history
+        count = config["samples"]
+        if client_index == 0 and config["hot_samples"]:
+            count = config["hot_samples"]
+        elif client_index < config.get("large_group_clients", 0):
+            count = config["groups"] * config["samples"]
+        if trajectory is not None:
+            count = 1
+        ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
+        if dialogue_turn:
+            ident += f"-trajectory-{trajectory}-turn-{dialogue_turn}"
+        task = {
+            "request_id": ident,
+            "sampling_session_id": f"dapo-{source['model_id']}-{version}",
+            "model_id": source["model_id"],
+            "publish_version": version,
+            "payload": {
+                "prompt": {"chunks": [{"type": "encoded_text", "tokens": prompt}]},
+                "num_samples": count,
+                "cache_affinity_key": config.get("affinity_salt", "")
+                + f"problem-{problem % len(source['prompts'])}",
+                "sampling_params": {
+                    "max_tokens": config["decode_tokens"],
+                    "stop": [],
+                    "temperature": 1.0,
+                    "seed": 4242 + round_index * 100 + group_index,
                 },
-            }
-            events, stats = [], {}
-            began = time.time()
-            if arm.endswith("-cohort"):
+            },
+        }
+        events, stats = [], {}
+        began = time.time()
+        if arm.endswith("-cohort"):
+            # Match the short transport lifetime used by normal sample tasks.
+            # Long-lived multiplexed preparation connections failed under burst
+            # pressure; HTTP/1 preparation also stalled after engines drained.
+            async with httpx.AsyncClient(
+                headers=proxy_auth_headers(),
+                transport=keepalive_transport(http2=config.get("http2", False)),
+                timeout=240,
+                trust_env=False,
+            ) as preparation_client:
                 await prepare_cohort(
-                    task, gateway, client, router, prefills, native=policy == "kv"
+                    task,
+                    gateway,
+                    preparation_client,
+                    router,
+                    prefills,
+                    native=policy == "kv",
+                    timeout=config.get("request_timeout", 240),
                 )
-            result = await sample_task(
-                task,
-                gateway,
-                client=client,
-                lora_router=router if policy not in {"kv", "default"} else None,
-                stats=stats,
-                on_event=events.append,
-                timeout=config.get("request_timeout", 240),
-                retry_timeout=900,
-            )
-            ended = time.time()
-            attempts = [e for e in events if e.get("name") == "sample_attempt"]
-            assert len(result["sequences"]) == count
-            for index, sequence in enumerate(result["sequences"]):
-                seq_attempts = [
-                    e for e in attempts if e["attrs"]["sequence_index"] == index
-                ]
-                successful = [e for e in seq_attempts if e["attrs"].get("ok")]
-                assert len(successful) == 1
-                event = successful[0]
-                meta = event["attrs"]["backend_timing"]
-                assert (
-                    meta["weight_version_start"]
-                    == meta["weight_version_end"]
-                    == version
-                )
-                assert (
-                    len(sequence["tokens"])
-                    == len(sequence["logprobs"])
-                    == config["decode_tokens"]
-                )
-                assert sequence["stop_reason"] == "length"
-                assert all(math.isfinite(x) for x in sequence["logprobs"])
-                assert 0 <= meta["cached_tokens"] <= len(prompt)
-                rows.append(
-                    {
-                        "id": f"{ident}-sample-{index}",
-                        "client": client_index,
-                        "turn": round_index,
-                        "adapter_index": client_index * 2
-                        + source["versions"].index(version),
-                        "conversation": problem,
-                        "model_id": source["model_id"],
-                        "version": version,
-                        "start": began - start_at,
-                        "end": event["t1"] - start_at,
-                        "seconds": event["t1"] - began,
-                        "group_seconds": ended - began,
-                        "dialogue_turn": dialogue_turn,
-                        "trajectory": trajectory if trajectory is not None else index,
-                        "prompt_sha256": hashlib.sha256(
-                            json.dumps(prompt).encode()
-                        ).hexdigest(),
-                        "prompt_tokens": len(prompt),
-                        "decode_tokens": len(sequence["tokens"]),
-                        "cached_tokens": meta["cached_tokens"],
-                        "output_sha256": hashlib.sha256(
-                            json.dumps(sequence["tokens"]).encode()
-                        ).hexdigest(),
-                        "stats": stats["sequence_stats"][index],
-                        "attempts": seq_attempts,
-                    }
-                )
-
-            if dialogue_turn + 1 < config.get("dialogue_turns", 1):
-
-                async def continuation(index, sequence):
-                    branch = index if trajectory is None else trajectory
-                    # A fixed-length synthetic tool reply follows the actual model
-                    # response. Each branch depends on its own preceding response.
-                    tool_reply = random.Random(
-                        8000
-                        + client_index * 10000
-                        + round_index * 1000
-                        + group_index * 100
-                        + branch * 10
-                        + dialogue_turn
-                    ).choices(source["vocabulary"], k=256)
-                    await group(
-                        source,
-                        round_index,
-                        group_index,
-                        version,
-                        history=prompt + sequence["tokens"] + tool_reply,
-                        trajectory=branch,
-                        dialogue_turn=dialogue_turn + 1,
-                    )
-
-                await asyncio.gather(
-                    *(continuation(i, seq) for i, seq in enumerate(result["sequences"]))
-                )
-
-        async def rollout(source, round_index):
-            version = source["versions"][
-                0 if round_index < 2 or not config.get("version_turnover", True) else 1
+        result = await sample_task(
+            task,
+            gateway,
+            headers=proxy_auth_headers(),
+            transport=keepalive_transport(http2=config.get("http2", False)),
+            lora_router=router if policy not in {"kv", "default"} else None,
+            stats=stats,
+            on_event=events.append,
+            timeout=config.get("request_timeout", 240),
+            retry_timeout=900,
+        )
+        ended = time.time()
+        attempts = [e for e in events if e.get("name") == "sample_attempt"]
+        assert len(result["sequences"]) == count
+        for index, sequence in enumerate(result["sequences"]):
+            seq_attempts = [
+                e for e in attempts if e["attrs"]["sequence_index"] == index
             ]
-            began = time.time()
-            groups = (
-                1
-                if source["client_index"] < config.get("large_group_clients", 0)
-                or (source["client_index"] == 0 and config["hot_samples"])
-                else config["groups"]
+            successful = [e for e in seq_attempts if e["attrs"].get("ok")]
+            assert len(successful) == 1
+            event = successful[0]
+            meta = event["attrs"]["backend_timing"]
+            assert meta["weight_version_start"] == meta["weight_version_end"] == version
+            assert (
+                len(sequence["tokens"])
+                == len(sequence["logprobs"])
+                == config["decode_tokens"]
             )
-            await asyncio.gather(
-                *(group(source, round_index, g, version) for g in range(groups))
-            )
-            rollouts.append(
+            assert sequence["stop_reason"] == "length"
+            assert all(math.isfinite(x) for x in sequence["logprobs"])
+            assert 0 <= meta["cached_tokens"] <= len(prompt)
+            rows.append(
                 {
-                    "client": source["client_index"],
-                    "round": round_index,
+                    "id": f"{ident}-sample-{index}",
+                    "client": client_index,
+                    "turn": round_index,
+                    "adapter_index": client_index * 2
+                    + source["versions"].index(version),
+                    "conversation": problem,
+                    "model_id": source["model_id"],
                     "version": version,
                     "start": began - start_at,
-                    "end": time.time() - start_at,
-                    "seconds": time.time() - began,
-                    "groups": groups,
+                    "end": event["t1"] - start_at,
+                    "seconds": event["t1"] - began,
+                    "group_seconds": ended - began,
+                    "dialogue_turn": dialogue_turn,
+                    "trajectory": trajectory if trajectory is not None else index,
+                    "prompt_sha256": hashlib.sha256(
+                        json.dumps(prompt).encode()
+                    ).hexdigest(),
+                    "prompt_tokens": len(prompt),
+                    "decode_tokens": len(sequence["tokens"]),
+                    "cached_tokens": meta["cached_tokens"],
+                    "output_sha256": hashlib.sha256(
+                        json.dumps(sequence["tokens"]).encode()
+                    ).hexdigest(),
+                    "stats": stats["sequence_stats"][index],
+                    "attempts": seq_attempts,
                 }
             )
-            print(
-                f"{arm}: client {source['client_index']} rollout {round_index} finished in {time.time() - began:.1f}s",
-                flush=True,
-            )
 
-        async def training_client(source):
-            await asyncio.sleep(
-                max(
-                    0,
-                    start_at
-                    + source["client_index"] * config["stagger_seconds"]
-                    - time.time(),
-                )
-            )
-            await rollout(source, 0)
-            for round_index in range(1, config["rounds"]):
-                if (
-                    config.get("duration_seconds")
-                    and time.time() - start_at >= config["duration_seconds"]
-                ):
-                    break
-                # Preserve independent prefetch/update overlap. Saved checkpoint
-                # arrivals replay publication; these sleeps are not optimizer work.
-                await asyncio.gather(
-                    rollout(source, round_index),
-                    asyncio.sleep(source["update_seconds"]),
+        if dialogue_turn + 1 < config.get("dialogue_turns", 1):
+
+            async def continuation(index, sequence):
+                branch = index if trajectory is None else trajectory
+                # A fixed-length synthetic tool reply follows the actual model
+                # response. Each branch depends on its own preceding response.
+                tool_reply = random.Random(
+                    8000
+                    + client_index * 10000
+                    + round_index * 1000
+                    + group_index * 100
+                    + branch * 10
+                    + dialogue_turn
+                ).choices(source["vocabulary"], k=256)
+                await group(
+                    source,
+                    round_index,
+                    group_index,
+                    version,
+                    history=prompt + sequence["tokens"] + tool_reply,
+                    trajectory=branch,
+                    dialogue_turn=dialogue_turn + 1,
                 )
 
-        try:
-            await asyncio.gather(*(training_client(source) for source in clients))
-        finally:
-            await router.aclose()
+            await gather_work(
+                *(continuation(i, seq) for i, seq in enumerate(result["sequences"]))
+            )
+
+    async def rollout(source, round_index):
+        version = source["versions"][
+            0 if round_index < 2 or not config.get("version_turnover", True) else 1
+        ]
+        began = time.time()
+        groups = (
+            1
+            if source["client_index"] < config.get("large_group_clients", 0)
+            or (source["client_index"] == 0 and config["hot_samples"])
+            else config["groups"]
+        )
+        await gather_work(
+            *(group(source, round_index, g, version) for g in range(groups))
+        )
+        rollouts.append(
+            {
+                "client": source["client_index"],
+                "round": round_index,
+                "version": version,
+                "start": began - start_at,
+                "end": time.time() - start_at,
+                "seconds": time.time() - began,
+                "groups": groups,
+            }
+        )
+        print(
+            f"{arm}: client {source['client_index']} rollout {round_index} finished in {time.time() - began:.1f}s",
+            flush=True,
+        )
+
+    async def training_client(source):
+        await asyncio.sleep(
+            max(
+                0,
+                start_at
+                + source["client_index"] * config["stagger_seconds"]
+                - time.time(),
+            )
+        )
+        await rollout(source, 0)
+        for round_index in range(1, config["rounds"]):
+            if (
+                config.get("duration_seconds")
+                and time.time() - start_at >= config["duration_seconds"]
+            ):
+                break
+            # Preserve independent prefetch/update overlap. Saved checkpoint
+            # arrivals replay publication; these sleeps are not optimizer work.
+            await gather_work(
+                rollout(source, round_index),
+                asyncio.sleep(source["update_seconds"]),
+            )
+
+    try:
+        await gather_work(*(training_client(source) for source in clients))
+    finally:
+        await router.aclose()
     return {
         "requests": rows,
         "rollouts": rollouts,
@@ -562,6 +582,14 @@ async def run_arm(pool, arm, clients, config):
             await router.refresh()
         baseline = await inspect()
         assert all(s["active"] == 0 and s["gpu_lora"] for s in baseline)
+        if policy.startswith("capacity"):
+            assert all("adapter_decode_maxima" in s["work"] for s in baseline)
+            assert all(
+                load["max_running_requests"]
+                == config["work_rates"]["decode_concurrency"]
+                for s in baseline
+                for load in s["engine"]["loads"]
+            ), "Capacity calibration does not match the deployed engine"
         registered_versions = [
             (c, v)
             for c in clients
@@ -930,6 +958,10 @@ def main():
             "balanced-cohort",
             "stable",
             "stable-cohort",
+            "capacity",
+            "capacity-cohort",
+            "capacity-random",
+            "capacity-random-cohort",
             *SIMPLE_POLICIES,
             *(p + "-cohort" for p in SIMPLE_POLICIES),
         ),
@@ -944,7 +976,8 @@ def main():
                 if p["arm"]
                 == (
                     "work"
-                    if arm.removesuffix("-cohort") in SIMPLE_POLICIES
+                    if arm.removesuffix("-cohort")
+                    in {*SIMPLE_POLICIES, "capacity", "capacity-random"}
                     else "domains"
                     if arm.startswith(("balanced", "stable"))
                     else arm.removesuffix("-cohort")
@@ -959,6 +992,7 @@ def main():
                 p["arm"].startswith("work")
                 or p["arm"].startswith(("domains", "balanced", "stable"))
                 or p["arm"].removesuffix("-cohort") in SIMPLE_POLICIES
+                or p["arm"].startswith("capacity")
             )
             for p in pools
         )
@@ -1005,6 +1039,11 @@ def main():
             repeat_prefixes=args.repeat_prefixes,
             version_turnover=not args.fixed_version,
             cold_versions=args.cold_versions,
+            separate_cohort_transport=True,
+            generation_transport_scope="sample_task",
+            preparation_http_version="HTTP/2" if args.http2 else "HTTP/1.1",
+            preparation_transport_scope="sample_task",
+            preparation_request_timeout=args.request_timeout,
             duration_seconds=args.duration_seconds,
             work_rates=json.loads(args.work_rates.read_text())
             if args.work_rates
@@ -1029,18 +1068,27 @@ def main():
     config["source_sha256"] = {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
         for name in (
+            "src/spindle/inference/lora_routing.py",
             "src/spindle/inference/routing_work.py",
             "src/spindle/inference/routing_domains.py",
             "src/spindle/inference/routing_simple.py",
+            "src/spindle/inference/routing_capacity.py",
             "src/spindle/inference/sampling.py",
             "src/spindle/providers/modal/lora_routing.py",
             "scripts/benchmarks/lora_routing/cache_replay.py",
             "scripts/benchmarks/lora_routing/cohort_prefill.py",
+            "scripts/benchmarks/lora_routing/h2_diagnostics.py",
         )
     }
     if args.work_rates:
         config["work_rates"] = json.loads(args.work_rates.read_text())
     args.output.mkdir(parents=True, exist_ok=True)
+    for name, expected in config["source_sha256"].items():
+        content = (root / name).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == expected
+        target = args.output / "source" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
 
     async def run():
         async def one(pool):

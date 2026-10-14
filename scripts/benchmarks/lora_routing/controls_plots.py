@@ -27,6 +27,7 @@ ORDER = [
     "lora",
     "work",
     "stable",
+    "capacity",
 ]
 LABELS = dict(
     zip(
@@ -45,6 +46,7 @@ LABELS = dict(
             "Legacy LoRA",
             "Work",
             "Domains",
+            "Batch capacity",
         ],
         strict=True,
     )
@@ -75,7 +77,10 @@ def main():
     for job, arms in json.loads(args.metrics.read_text()).items():
         if not job.startswith("screen-"):
             continue
-        target = grouped.setdefault(job.removesuffix("-supplement"), {})
+        name = job.removesuffix("-supplement").removesuffix("-recovery")
+        if any(r["config"].get("separate_cohort_transport") for r in arms.values()):
+            name += "-separate-preparation"
+        target = grouped.setdefault(name, {})
         assert not (target.keys() & arms.keys())
         target.update(arms)
     for job, arms in grouped.items():
@@ -153,7 +158,18 @@ def main():
                     "stable",
                 },
             ),
-            ("load", {"kv", "least-load", "bounded-kv", "lora", "work", "stable"}),
+            (
+                "load",
+                {
+                    "kv",
+                    "least-load",
+                    "bounded-kv",
+                    "lora",
+                    "work",
+                    "stable",
+                    "capacity",
+                },
+            ),
         ]:
             fig, axes = plt.subplots(2, 2, figsize=(10, 5.7), layout="constrained")
             for arm in ordered:

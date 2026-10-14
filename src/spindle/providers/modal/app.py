@@ -293,8 +293,15 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         routing = definition.recipe.inference_lora_routing
-        measured = routing in {"work", "domains", *SIMPLE_POLICIES}
-        if routing not in {"affinity", "naive", "work", "domains", *SIMPLE_POLICIES}:
+        measured = routing in {"work", "domains", "capacity", *SIMPLE_POLICIES}
+        if routing not in {
+            "affinity",
+            "naive",
+            "work",
+            "domains",
+            "capacity",
+            *SIMPLE_POLICIES,
+        }:
             raise ValueError(f"unknown LoRA routing policy: {routing}")
         router = None
         if routing != "naive" and task.get("model_id") is not None:
@@ -315,6 +322,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                     balanced_domains=routing == "domains",
                     stable_domains=routing == "domains",
                     simple_policy=routing if routing in SIMPLE_POLICIES else None,
+                    capacity_aware=routing == "capacity",
                 )
             router = _lora_routers[spec.app_name]
 
