@@ -7,6 +7,8 @@ class Config(Parent):
         "max_context_length": 65536,
         "miles_cfg.tensor_model_parallel_size": 2,
         "inference_min_replicas": 8,
+        "inference_target_concurrency": 64,
+        "sglang_cfg.max_running_requests": 128,
     }
 
 
