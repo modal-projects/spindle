@@ -39,6 +39,15 @@ except ModuleNotFoundError as exc:
         raise
     _runtime_import_error = exc
 
+try:
+    # Miles v0.1.2 runs the trainer controller as a worker reached by handle.
+    from miles.backends.megatron_utils.megatron_config import compute_trainer_args
+    from miles.ray.placement_group import create_trainer_handles
+    from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_configs
+    from miles.ray.wiring import shutdown_worker_manager
+except ImportError:
+    create_trainer_handles = None
+
 
 class MilesRuntime:
     """Synchronous owner of Miles's asynchronous Ray trainer controller."""
@@ -334,22 +343,32 @@ class MilesRuntime:
         self._worker_manager = launch_worker_manager(args)
         object_store.init_instance(args, contribute_segment=False)
         self._owns_object_store = True
-        self._trainer = TrainerController(
-            args=args,
-            role="actor",
-            with_ref=False,
-            with_opd_teacher=False,
-            inference_controller=None,
-            rollout_executor=None,
-        )
-        await self._trainer.init()
+        if create_trainer_handles is not None:
+            configs = compute_trainer_configs(args)
+            (actor_config,) = [c for c in configs if c.role == ACTOR_ROLE]
+            handles = create_trainer_handles(args, trainer_configs=configs)
+            self._trainer = handles[actor_config.trainer_id]
+            await self._trainer.init(compute_trainer_args(args, actor_config))
+        else:
+            self._trainer = TrainerController(
+                args=args,
+                role="actor",
+                with_ref=False,
+                with_opd_teacher=False,
+                inference_controller=None,
+                rollout_executor=None,
+            )
+            await self._trainer.init()
         self._bridge = tinker_runtime.MilesBackend(
             self._trainer, router_url="", dp_size=1
         )
 
     async def _close(self) -> None:
         try:
-            if self._trainer is not None:
+            if self._trainer is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await self._trainer.dispose()
+            elif self._trainer is not None:
                 cell_ids = list(self._trainer.cell_ids)
                 try:
                     await self._trainer.dispose()
@@ -358,7 +377,10 @@ class MilesRuntime:
                         with suppress(BaseException):
                             await self._worker_manager.stop_cells.remote(cell_ids)
         finally:
-            if self._worker_manager is not None:
+            if self._worker_manager is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await shutdown_worker_manager(self._worker_manager)
+            elif self._worker_manager is not None:
                 with suppress(BaseException):
                     ray.kill(self._worker_manager, no_restart=True)
             if self._owns_object_store:
