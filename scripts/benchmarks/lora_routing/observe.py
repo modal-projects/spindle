@@ -37,7 +37,7 @@ async def replicas(app_name):
     timeout=3600,
     region="us-west",
 )
-async def observe(app_names, seconds):
+async def observe(app_names, seconds, benchmark=False):
     deadline = time.monotonic() + seconds
     async with httpx.AsyncClient(
         headers={
@@ -59,7 +59,12 @@ async def observe(app_names, seconds):
                         host = f"{node.host}:{node.port}" if node.port else node.host
                         try:
                             response = await client.get(
-                                gateway + "/routing-state",
+                                gateway
+                                + (
+                                    "/benchmark-state"
+                                    if benchmark
+                                    else "/routing-state"
+                                ),
                                 headers={"Modal-Flash-Upstream": host},
                             )
                             response.raise_for_status()
@@ -83,9 +88,14 @@ def main():
     p.add_argument("--apps", nargs="+", required=True)
     p.add_argument("--seconds", type=int, default=1800)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Read GPU loads and engine cache counters from measured image",
+    )
     args = p.parse_args()
     with modal.enable_output(), app.run(), args.output.open("a") as out:
-        for row in observe.remote_gen(args.apps, args.seconds):
+        for row in observe.remote_gen(args.apps, args.seconds, args.benchmark):
             out.write(json.dumps(row) + "\n")
             out.flush()
 

@@ -7,7 +7,7 @@ not merely on native KV affinity in the 64-version workload.
 
 ## Controls and decision process
 
-All custom policies share observations, exact-version cache identity, local
+All new controls share observations, exact-version cache identity, local
 reservations, chunk sizes, failure handling, and Flash transport. Compare:
 
 - Native Flash KV affinity.
@@ -17,11 +17,26 @@ reservations, chunk sizes, failure handling, and Flash transport. Compare:
   the value of simply packing adapters into the aggregate GPU slot budget.
 - Two-choice adapter placement: the balanced primary and a deterministic
   secondary, choosing the less loaded replica by request count.
+- Adapter placement with overflow: retain the balanced primary until its load
+  exceeds 1.25 times pool mean plus one placement chunk, then use least load.
+- Even-count static placement and its overflow variant. The original primary
+  map balances slot budgets, so a catalog smaller than total GPU slot capacity
+  can still have unequal adapter counts. These stronger controls assign the
+  next adapter to a replica with the fewest assigned primaries, using rendezvous
+  order to break ties. They isolate that mapping choice from dynamic scheduling.
 - Bounded cache affinity: maximize actual reusable prefix among replicas with
   request count at most 1.25 times the mean plus one incoming placement chunk;
   break ties by request count. This rule ignores adapter residency.
 - Unrestricted measured-work routing.
 - The previously reported Domains policy, without changing its algorithm.
+
+The adapter-overflow control was added while the first KV arm was running,
+before any screening results were available. It will run as a supplemental
+job because the first seven-policy command was already submitted. The prior
+LoRA/affinity heuristic is also retained as an implementation baseline in the
+single-sequence serving comparison, with its existing behavior unchanged.
+The even-count controls were added after the first static serving result and
+before any turnover screening result; they also run as supplemental jobs.
 
 First screen every policy on the original 64-version serving shape and a
 fixed-work 1,024-output turnover shape. The latter uses three full rounds, so
@@ -37,6 +52,11 @@ reuse/version turnover, and dependent multi-turn generation. Include longer
 outputs and natural-prompt cases; do not select a winner solely by an aggregate
 across workloads that hides a large regression in one family. Record seeds,
 commands, source hashes, request counts, and completion of every scheduled arm.
+Held-out trial seeds also shuffle which saved adapter receives each client's
+start offset and demand profile, and salt the affinity identities consistently
+through warmup and replay. Merely changing token contents would leave the same
+affinity-to-replica collisions in every trial. Screening retains the original
+client order and affinity identities for direct comparison with the first study.
 
 For comparisons with cohort preparation, give it to every policy and include
 its time and input work. Also evaluate the selected path without preparation

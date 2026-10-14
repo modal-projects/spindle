@@ -18,6 +18,7 @@ class DomainRouter(WorkRouter):
         super().__init__(*args, **kwargs)
         self.balanced = balanced
         self.stable = stable
+        self.even_primaries = False
         self.catalog_key = None
         self.primary_hosts = {}
         self.host_seen = {}
@@ -60,7 +61,12 @@ class DomainRouter(WorkRouter):
                 # Fill each replica's adapter-slot budget before placing an
                 # additional budget's worth anywhere. With <= N*S catalog
                 # entries this yields at most S preferred primaries per replica.
-                host = min(rank, key=lambda h: assigned[h] // self.slots)
+                host = min(
+                    rank,
+                    key=lambda h: assigned[h]
+                    if self.even_primaries
+                    else assigned[h] // self.slots,
+                )
                 assigned[host] += 1
                 self.primary_hosts[name] = host
             self.catalog_key = key

@@ -38,6 +38,8 @@ def requests(reqs, resident_ids):
             continue
         seen_requests.add(req.rid)
         counts["request_lora_hits" if req.lora_id in resident_ids else "request_lora_misses"] += 1
+        counts["first_admission_input_tokens"] += len(req.origin_input_ids)
+        counts["first_admission_cached_tokens"] += req.cached_tokens
         changed = True
     flush(force=changed)
 

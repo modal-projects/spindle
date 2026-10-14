@@ -196,7 +196,8 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                 "payload": {
                     "prompt": {"chunks": [{"type": "encoded_text", "tokens": prompt}]},
                     "num_samples": count,
-                    "cache_affinity_key": f"problem-{problem % len(source['prompts'])}",
+                    "cache_affinity_key": config.get("affinity_salt", "")
+                    + f"problem-{problem % len(source['prompts'])}",
                     "sampling_params": {
                         "max_tokens": config["decode_tokens"],
                         "stop": [],
@@ -538,7 +539,8 @@ async def run_arm(pool, arm, clients, config):
                                     ]
                                 },
                                 num_samples=1,
-                                cache_affinity_key=f"problem-{group % len(source['prompts'])}",
+                                cache_affinity_key=config.get("affinity_salt", "")
+                                + f"problem-{group % len(source['prompts'])}",
                                 sampling_params=dict(
                                     max_tokens=1, stop=[], temperature=0
                                 ),
@@ -676,7 +678,8 @@ async def run_arm(pool, arm, clients, config):
                 }
                 if arm != "default":
                     task["payload"]["cache_affinity_key"] = (
-                        f"conversation-{stream['conversation']}"
+                        config.get("affinity_salt", "")
+                        + f"conversation-{stream['conversation']}"
                     )
                 events, stats = [], {}
                 request_started = time.monotonic()
@@ -883,6 +886,11 @@ def main():
     parser.add_argument("--shared-tokens", type=int, default=7168)
     parser.add_argument("--decode-tokens", type=int, default=512)
     parser.add_argument("--seed", type=int, default=12026)
+    parser.add_argument(
+        "--vary-placement",
+        action="store_true",
+        help="Seed client order and affinity identities as well as prompt contents",
+    )
     parser.add_argument("--arrival-rate", type=float, default=0)
     parser.add_argument("--request-timeout", type=float, default=240)
     parser.add_argument("--http2", action="store_true")
@@ -958,6 +966,11 @@ def main():
     ):
         parser.error("measured-work policies require --work-rates from calibration")
     clients = json.loads(args.clients.read_text())
+    if args.vary_placement:
+        random.Random(args.seed).shuffle(clients)
+        for index, source in enumerate(clients):
+            source["original_client_index"] = source["client_index"]
+            source["client_index"] = index
     for source in clients:
         source["prompt_seed"] = args.seed
         source["vocabulary"] = sorted(
@@ -1003,6 +1016,9 @@ def main():
         config["expected_requests"] = per_round * args.rounds * args.dialogue_turns
         config["max_concurrency"] = per_round
     config["adapter_count"] = sum(len(c["versions"]) for c in clients)
+    if args.vary_placement:
+        config["affinity_salt"] = f"trial-{args.seed}:"
+        config["vary_placement"] = True
     config["arrival_rate"] = args.arrival_rate
     config["request_timeout"] = args.request_timeout
     if args.http2:

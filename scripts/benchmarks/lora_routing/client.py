@@ -18,6 +18,7 @@ import numpy as np
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
+from sdk_affinity import PromptAffinityTransport
 
 ROOT = Path(__file__).resolve().parent
 
@@ -71,13 +72,19 @@ def read_config(path):
 
 
 class Client:
-    def __init__(self, cfg, root, base_url):
+    def __init__(self, cfg, root, base_url, client_index=0):
         self.cfg, self.root = cfg, root
+        self.client_index = client_index
         self.base_url = base_url
         root.mkdir(parents=True, exist_ok=False)
-        self.service = tinker.ServiceClient(
-            **({"base_url": base_url} if base_url else {})
-        )
+        options = {"base_url": base_url} if base_url else {}
+        if cfg.get("prompt_affinity", False):
+            if not base_url:
+                raise ValueError("Prompt affinity is a Spindle API extension")
+            options["http_client"] = httpx.AsyncClient(
+                transport=PromptAffinityTransport(), timeout=300, trust_env=False
+            )
+        self.service = tinker.ServiceClient(**options)
         self.tokenizer = AutoTokenizer.from_pretrained(
             cfg["model"], revision=cfg["tokenizer_revision"]
         )
@@ -121,6 +128,8 @@ class Client:
                 (ROOT / "dapo.jsonl").read_bytes()
             ).hexdigest(),
             initialization_seed=None,
+            client_index=client_index,
+            problem_offset=client_index * cfg.get("client_problem_stride", 0),
             stop_token_ids=self.stops,
             base_url=base_url or "Tinker SDK default",
             packages={
@@ -151,6 +160,7 @@ class Client:
         self.event(
             "publish",
             update=update,
+            model_path=path,
             seconds=time.time() - start,
             weights_seconds=saved - start,
             sampling_client_seconds=time.time() - saved,
@@ -160,10 +170,13 @@ class Client:
     def group(self, index, snapshot):
         sampler, version = snapshot
         cfg = self.cfg
-        # All eight independent clients use the same task/seed schedule as the
-        # single-client Tinker comparison. Client identity never changes inputs.
-        row = self.rows[index % len(self.rows)]
-        prompt = self.prompts[index % len(self.prompts)]
+        # The optional offset gives independent jobs different problem streams;
+        # client indices and offsets are identical across paired routing arms.
+        row_index = (
+            index + self.client_index * cfg.get("client_problem_stride", 0)
+        ) % len(self.rows)
+        row = self.rows[row_index]
+        prompt = self.prompts[row_index]
         start = time.time()
         result = sampler.sample(
             types.ModelInput.from_ints(prompt),
@@ -201,11 +214,12 @@ class Client:
             )
         saved = dict(
             group=index,
-            row=index % len(self.rows),
+            row=row_index,
             policy_version=version,
             prompt=prompt,
             start=start,
             end=time.time(),
+            first_sequence_cached_tokens=result.prompt_cache_hit_tokens,
             sequences=sequences,
         )
         with gzip.open(self.root / f"group-{index:06d}.json.gz", "wt") as f:
@@ -389,8 +403,11 @@ def main():
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base-url", default=os.environ.get("TINKER_BASE_URL"))
+    parser.add_argument("--client-index", type=int, default=0)
     args = parser.parse_args()
-    client = Client(read_config(args.config), args.output, args.base_url)
+    client = Client(
+        read_config(args.config), args.output, args.base_url, args.client_index
+    )
     try:
         client.run()
     except Exception as exc:

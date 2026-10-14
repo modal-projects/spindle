@@ -36,15 +36,11 @@ class Config(Parent):
     }
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--run", required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+def measured_image():
     # Copy Spindle explicitly: the production image mounts it at runtime, while
     # the benchmark-only endpoint must be part of this derived image.
     root = Path(__file__).resolve().parents[3]
-    measured_image = (
+    return (
         base_image.add_local_dir(
             root / "src/spindle", "/opt/cache-benchmark/spindle", copy=True
         )
@@ -58,12 +54,19 @@ def main():
         )
         .env({"PYTHONPATH": "/opt/cache-benchmark", "PYTHONSAFEPATH": "1"})
     )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with modal.enable_output():
         recipe = Config(name=f"cache27-{args.run}")
         deployment = DeploymentConfig.create(recipe)
         pool = LoraPoolSpec(deployment.definition_id)
-        app, _ = build_rollout_app(deployment, pool, image=measured_image)
+        app, _ = build_rollout_app(deployment, pool, image=measured_image())
         app.deploy(environment_name="lilo-deploy")
     assignments = [
         {

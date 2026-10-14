@@ -34,8 +34,10 @@ TCP_KEEPALIVE_OPTIONS = (
 GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 
 
-def keepalive_transport() -> httpx.AsyncHTTPTransport:
-    return httpx.AsyncHTTPTransport(socket_options=list(TCP_KEEPALIVE_OPTIONS))
+def keepalive_transport(*, http2: bool = False) -> httpx.AsyncHTTPTransport:
+    return httpx.AsyncHTTPTransport(
+        http2=http2, socket_options=list(TCP_KEEPALIVE_OPTIONS)
+    )
 
 
 async def sample_task(

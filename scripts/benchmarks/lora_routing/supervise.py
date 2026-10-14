@@ -121,6 +121,8 @@ def main():
                     str(output),
                     "--base-url",
                     args.base_url,
+                    "--client-index",
+                    str(index),
                 ],
                 stdout=log,
                 stderr=subprocess.STDOUT,

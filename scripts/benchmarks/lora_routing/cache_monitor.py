@@ -16,14 +16,32 @@ def main():
     parser.add_argument(
         "--deadline", type=float, help="Absolute UTC epoch shutdown time"
     )
+    parser.add_argument("--owned-apps", type=Path, help="Explicit live-RL app manifest")
+    parser.add_argument("--max-gpus", type=int, default=16)
     args = parser.parse_args()
-    owned = sorted(
-        {p["pool"] for p in json.loads((args.root / "pools.json").read_text())}
-    )
-    assert 1 <= len(owned) <= 3 and all(
-        p.startswith("spindle-lora-cache27-") for p in owned
-    )
-    gpu_limit = 8 * len(owned)
+    if args.owned_apps:
+        owned = json.loads(args.owned_apps.read_text())
+        assert 1 <= len(owned) <= 4 and all(
+            p.startswith(
+                (
+                    "spindle-routing27-live-",
+                    "spindle-trainer-routing27-live-",
+                    "spindle-inference-routing27-live-",
+                    "spindle-lora-routing27-live-",
+                )
+            )
+            for p in owned
+        )
+        assert 1 <= args.max_gpus <= 48
+        gpu_limit = args.max_gpus
+    else:
+        owned = sorted(
+            {p["pool"] for p in json.loads((args.root / "pools.json").read_text())}
+        )
+        assert 1 <= len(owned) <= 3 and all(
+            p.startswith("spindle-lora-cache27-") for p in owned
+        )
+        gpu_limit = 8 * len(owned)
     lifetimes = args.root / "gpu-lifetimes.json"
     known = (
         {r["task_id"]: r for r in json.loads(lifetimes.read_text())}

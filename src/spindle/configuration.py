@@ -59,6 +59,7 @@ class BaseConfig:
     inference_env = {}
     inference_lora_routing = "affinity"
     inference_routing_work_rates = None
+    inference_http2 = False
 
     miles_cfg = {}
     megatron_cfg = {}

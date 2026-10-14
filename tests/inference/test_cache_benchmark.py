@@ -2,9 +2,15 @@ import json
 from pathlib import Path
 import runpy
 from types import SimpleNamespace
+import pytest
 
 
 BENCHMARK = Path(__file__).resolve().parents[2] / "scripts/benchmarks/lora_routing"
+
+
+@pytest.fixture(autouse=True)
+def benchmark_import_path(monkeypatch):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
 
 
 def test_gpu_hit_counters_count_each_request_once_and_exclude_base(
@@ -17,14 +23,20 @@ def test_gpu_hit_counters_count_each_request_once_and_exclude_base(
     metrics = {}
     exec(code, metrics)
     requests = [
-        SimpleNamespace(rid="a", lora_id="hot"),
-        SimpleNamespace(rid="b", lora_id="cold"),
+        SimpleNamespace(
+            rid="a", lora_id="hot", origin_input_ids=[1, 2, 3], cached_tokens=2
+        ),
+        SimpleNamespace(
+            rid="b", lora_id="cold", origin_input_ids=[4, 5], cached_tokens=0
+        ),
         SimpleNamespace(rid="c", lora_id=None),
     ]
     metrics["requests"](requests, {"hot"})
     metrics["requests"](requests, {"hot", "cold"})
     counts = metrics["counts"]
     assert counts["request_lora_hits"] == counts["request_lora_misses"] == 1
+    assert counts["first_admission_input_tokens"] == 5
+    assert counts["first_admission_cached_tokens"] == 2
     refs = {uid: SimpleNamespace(lora_name=uid + "/v1") for uid in ("hot", "cold")}
     metrics["loaded"]({None, "hot"}, {"hot", "cold"}, refs, 0.2)
     assert counts["gpu_loads"] == 1

@@ -8,7 +8,15 @@ to the more complex work/domain policy.
 from .routing_domains import DomainRouter
 
 
-SIMPLE_POLICIES = ("least-load", "adapter-home", "adapter-two", "bounded-kv")
+SIMPLE_POLICIES = (
+    "least-load",
+    "adapter-home",
+    "adapter-two",
+    "adapter-spill",
+    "balanced-home",
+    "balanced-spill",
+    "bounded-kv",
+)
 
 
 class SimpleRouter(DomainRouter):
@@ -17,6 +25,10 @@ class SimpleRouter(DomainRouter):
             raise ValueError(f"Unknown simple routing policy: {policy}")
         super().__init__(*args, balanced=True, stable=True, **kwargs)
         self.policy = policy
+        if policy.startswith("balanced-"):
+            # Round-robin adapter counts with rendezvous tie breaking. Unlike
+            # the original slot-budget map this also balances a small catalog.
+            self.even_primaries = True
 
     def placement_candidates(self, model, adapter, candidates, count):
         loads = {}
@@ -31,16 +43,25 @@ class SimpleRouter(DomainRouter):
             candidate["score"] = float(loads[host])
         if len(candidates) == 1 or self.policy == "least-load":
             return candidates
-        if self.policy in {"adapter-home", "adapter-two"}:
+        limit = 1.25 * sum(loads.values()) / len(loads) + count
+        if self.policy in {
+            "adapter-home",
+            "adapter-two",
+            "adapter-spill",
+            "balanced-home",
+            "balanced-spill",
+        }:
             hosts = self.placement_topology(adapter)
             ranking = self.primary_placement(adapter, hosts)
             available = [h for h in ranking if h in candidates]
-            width = 1 if self.policy == "adapter-home" else 2
+            if self.policy in {"adapter-spill", "balanced-spill"}:
+                home = available[0]
+                return {home: candidates[home]} if loads[home] <= limit else candidates
+            width = 2 if self.policy == "adapter-two" else 1
             return {h: candidates[h] for h in available[:width]}
         # A classic bounded-load locality control: retain the best actual KV
         # match only among replicas within 25% of mean load plus one chunk.
         # The chunk allowance is explicit, rather than hidden in a score term.
-        limit = 1.25 * sum(loads.values()) / len(loads) + count
         eligible = {h: c for h, c in candidates.items() if loads[h] <= limit}
         longest = max(c["cached_tokens"] for c in eligible.values())
         return {h: c for h, c in eligible.items() if c["cached_tokens"] == longest}

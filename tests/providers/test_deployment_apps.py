@@ -109,7 +109,20 @@ def test_trainer_declaration_and_executor_configuration(
 
 
 @pytest.mark.parametrize(
-    "policy,observed", [("affinity", False), ("work", True), ("domains", True)]
+    "policy,observed",
+    [
+        ("affinity", False),
+        ("naive", False),
+        ("work", True),
+        ("domains", True),
+        ("adapter-home", True),
+        ("adapter-two", True),
+        ("adapter-spill", True),
+        ("balanced-home", True),
+        ("balanced-spill", True),
+        ("bounded-kv", True),
+        ("least-load", True),
+    ],
 )
 def test_measured_policies_enable_engine_observations(builders, policy, observed):
     row = deployment()

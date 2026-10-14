@@ -70,6 +70,22 @@ def test_two_choices_balance_only_within_fixed_adapter_pair():
     assert all(choices.count(h) == 20 for h in set(choices))
 
 
+@pytest.mark.parametrize("policy", ["adapter-spill", "balanced-spill"])
+def test_adapter_spill_preserves_home_until_it_is_overloaded(policy):
+    router = pool(policy)
+    home = choose(router, "first")
+    router.replicas[home].active = 100
+    assert choose(router, "overflow") != home
+
+
+def test_balanced_home_equalizes_small_catalog_even_when_slots_are_plentiful():
+    router = pool("balanced-home")
+    router.slots = 32
+    hosts = tuple(router.replicas)
+    assignments = [router.primary_placement(f"m-{i}/v1", hosts)[0] for i in range(8)]
+    assert {assignments.count(h) for h in hosts} == {2}
+
+
 def test_least_load_counts_observed_local_request_only_once():
     router = pool("least-load")
     first = choose(router, "first")

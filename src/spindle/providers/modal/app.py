@@ -14,7 +14,8 @@ from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
 from spindle.deployments import validate_frontend
-from spindle.inference.sampling import sample_task
+from spindle.inference.sampling import keepalive_transport, sample_task
+from spindle.inference.routing_simple import SIMPLE_POLICIES
 from spindle.providers.contracts import (
     Parameterization,
     SamplingTask,
@@ -292,14 +293,12 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         routing = definition.recipe.inference_lora_routing
-        if routing not in {"affinity", "naive", "work", "domains"}:
+        measured = routing in {"work", "domains", *SIMPLE_POLICIES}
+        if routing not in {"affinity", "naive", "work", "domains", *SIMPLE_POLICIES}:
             raise ValueError(f"unknown LoRA routing policy: {routing}")
         router = None
         if routing != "naive" and task.get("model_id") is not None:
-            if (
-                routing in {"work", "domains"}
-                and definition.recipe.inference_routing_work_rates is None
-            ):
+            if measured and definition.recipe.inference_routing_work_rates is None:
                 raise ValueError(
                     f"{routing} routing requires measured inference_routing_work_rates"
                 )
@@ -310,11 +309,12 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                     target=definition.recipe.inference_target_concurrency,
                     slots=definition.inference_settings.get("max_loras_per_batch", 8),
                     work_rates=definition.recipe.inference_routing_work_rates
-                    if routing in {"work", "domains"}
+                    if measured
                     else None,
                     domains=routing == "domains",
                     balanced_domains=routing == "domains",
                     stable_domains=routing == "domains",
+                    simple_policy=routing if routing in SIMPLE_POLICIES else None,
                 )
             router = _lora_routers[spec.app_name]
 
@@ -332,6 +332,9 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             on_wait=keep_pool_ready,
             stats=stats,
             lora_router=router,
+            transport=keepalive_transport(http2=True)
+            if definition.recipe.inference_http2
+            else None,
         )
     spec = (
         FFTPoolSpec.base(definition_id)
@@ -352,6 +355,9 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         on_wait=lambda: _touch_fft_pool(spec),
         context_length=definition.max_context_length,
         stats=stats,
+        transport=keepalive_transport(http2=True)
+        if definition.recipe.inference_http2
+        else None,
     )
 
 
