@@ -73,6 +73,9 @@ def main():
     parser.add_argument("--work-rates", type=Path, required=True)
     parser.add_argument("--trainer-gpu", choices=["H100", "H200"], default="H200")
     parser.add_argument("--trainer-tp", type=int, choices=[2, 4], default=2)
+    parser.add_argument(
+        "--region", choices=["us-west", "us-east", "any"], default="us-west"
+    )
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument(
@@ -95,6 +98,7 @@ def main():
         overrides={
             "platform.frontend": f"spindle-routing27-live-{args.run}",
             "miles_cfg.tensor_model_parallel_size": args.trainer_tp,
+            "platform.modal.region": None if args.region == "any" else args.region,
         },
     )
     deployment = DeploymentConfig.create(recipe)
@@ -118,7 +122,10 @@ def main():
     if args.prepare_only:
         return
     monitor = json.loads((args.root / "monitor.json").read_text())
-    if time.time() - monitor["updated"] > 60 or monitor["deadline"] - time.time() < 1800:
+    if (
+        time.time() - monitor["updated"] > 60
+        or monitor["deadline"] - time.time() < 1800
+    ):
         raise RuntimeError("Start the allocation watchdog before deploying live RL")
     deploy([deployment])
     if args.initialize:

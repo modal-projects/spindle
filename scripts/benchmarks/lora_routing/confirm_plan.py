@@ -60,7 +60,7 @@ def make_jobs(candidate, control):
                 "--decode-tokens",
                 "512",
             ],
-            False,
+            1800,
         ),
         "long1024": (
             "clients16.json",
@@ -86,7 +86,7 @@ def make_jobs(candidate, control):
                 "--hot-samples",
                 "128",
             ],
-            True,
+            3600,
         ),
         "dialogue1024": (
             "clients16.json",
@@ -110,21 +110,23 @@ def make_jobs(candidate, control):
                 "--dialogue-turns",
                 "3",
             ],
-            True,
+            3600,
         ),
     }
     jobs = []
     for trial in range(5):
-        for index, (name, (clients, arguments, cohort)) in enumerate(workloads.items()):
+        for index, (name, (clients, arguments, minimum_remaining)) in enumerate(
+            workloads.items()
+        ):
             order = orders[(trial + index * 2) % len(orders)]
             jobs.append(
                 dict(
                     name=f"confirm-{name}-r{trial}",
                     clients=clients,
-                    minimum_remaining_seconds=3600 if cohort else 1800,
+                    minimum_remaining_seconds=minimum_remaining,
                     arguments=arguments
                     + ["--seed", str(14101 + trial), "--vary-placement"],
-                    arms=[p + ("-cohort" if cohort else "") for p in order],
+                    arms=list(order),
                     trial=trial,
                     family=name,
                 )

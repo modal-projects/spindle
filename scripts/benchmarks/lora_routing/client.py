@@ -156,6 +156,7 @@ class Client:
         if cfg.get("save_initial_state", False):
             began = time.time()
             checkpoint = self.trainer.save_state("routing-initial").result(timeout=1800)
+            self.initial_state_path = checkpoint.path
             self.event(
                 "initial_state_saved", path=checkpoint.path, seconds=time.time() - began
             )
@@ -408,6 +409,9 @@ class Client:
                     policy_lag=lag,
                 )
         self.event("completed", updates=cfg["updates"], seconds=time.time() - started)
+        self.unload()
+
+    def unload(self):
         if self.base_url:
             # The supervisor owns final deployment cleanup. A timed-out unload
             # may still finish on the engine; it must not abort other clients'
@@ -422,8 +426,11 @@ class Client:
                 response.raise_for_status()
             except httpx.HTTPError as exc:
                 self.event("cleanup_warning", error=str(exc))
+                return False
             else:
                 self.event("unloaded")
+                return True
+        return False
 
 
 def main():

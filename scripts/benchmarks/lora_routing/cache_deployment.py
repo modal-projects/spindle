@@ -60,10 +60,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--region", choices=["us-west", "us-east", "any"], default="us-west"
+    )
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with modal.enable_output():
-        recipe = Config(name=f"cache27-{args.run}")
+        recipe = Config(
+            name=f"cache27-{args.run}",
+            overrides={
+                "platform.modal.region": None if args.region == "any" else args.region
+            },
+        )
         deployment = DeploymentConfig.create(recipe)
         pool = LoraPoolSpec(deployment.definition_id)
         app, _ = build_rollout_app(deployment, pool, image=measured_image())
