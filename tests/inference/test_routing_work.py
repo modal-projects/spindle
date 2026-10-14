@@ -145,6 +145,16 @@ def test_group_cost_preserves_kv_when_individual_greedy_placement_would_spill():
     assert choose(pool, "group", group_id="g", group_size=8) == "a"
 
 
+def test_cohort_prefill_is_charged_once_only_when_admission_prepares_it():
+    pool = router(a=state(cpu_adapters=["m/v1"], gpu_adapters=["m/v1"]))
+    pool.rates = WorkRates(1000, 100, 0.1, 2, decode_concurrency=8)
+    pool.prefill_once = True
+    detail = {}
+    choose(pool, "group", group_id="g", group_size=8, details=detail)
+    assert detail["group_prefill_seconds"] == (960 + 8 * 64) / 1000
+    assert detail["score"] == 1.472 + 8
+
+
 def test_prefix_preparation_never_uses_affinity_lookup_and_is_group_specific():
     async def run():
         pool = router(a=state())

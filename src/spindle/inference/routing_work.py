@@ -48,10 +48,18 @@ class WorkRates:
 
 
 class WorkRouter(LoraRouter):
-    def __init__(self, *args, rates: WorkRates, adapter_costs: bool = True, **kwargs):
+    def __init__(
+        self,
+        *args,
+        rates: WorkRates,
+        adapter_costs: bool = True,
+        prefill_once: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.rates = rates
         self.adapter_costs = adapter_costs
+        self.prefill_once = prefill_once
         self.reservations = {}
         self.host_reservations = {}
         self.group_routes = OrderedDict()
@@ -151,11 +159,20 @@ class WorkRouter(LoraRouter):
                     transfer = rates.gpu_lora_seconds
             prefill = (len(prompt) - hit) / rates.prefill_tokens_per_second
             decode = output_tokens / rates.decode_tokens_per_second
+            group_prefill = count * prefill
+            if self.prefill_once and count > 1:
+                boundary = (len(prompt) - 1) // 64 * 64
+                # The cohort admission path prepares this boundary once, then
+                # releases siblings on the planned host. Account for that shared
+                # work once, plus each sibling's unavoidable suffix computation.
+                group_prefill = (
+                    max(0, boundary - hit) + count * (len(prompt) - max(hit, boundary))
+                ) / rates.prefill_tokens_per_second
             # Optimize a known generation group together. Greedily optimizing
             # each sibling scatters one prompt over every replica and can evict
             # the very shared prefixes we want to preserve. Large groups split
             # at the measured engine running capacity, not Flash's scale target.
-            score = work + registration + transfer + count * (prefill + decode)
+            score = work + registration + transfer + group_prefill + count * decode
             candidates[host] = dict(
                 score=score,
                 backlog_seconds=work,
@@ -163,9 +180,11 @@ class WorkRouter(LoraRouter):
                 transfer_seconds=transfer,
                 prefill_seconds=prefill,
                 cached_tokens=hit,
-                work=prefill + decode,
+                work=group_prefill / count + decode,
+                group_prefill_seconds=group_prefill,
                 placement_group_size=count,
             )
+        candidates = self.placement_candidates(model, adapter, candidates, count)
         chosen = min(candidates, key=lambda h: candidates[h]["score"])
         # Retain locality only inside a narrow numerical tie. No arbitrary
         # target-concurrency allowance or multiplicative affinity bonus.
@@ -192,6 +211,9 @@ class WorkRouter(LoraRouter):
             details.update(candidates[chosen])
             details["selection_seconds"] = time.monotonic() - now
         return chosen
+
+    def placement_candidates(self, model, adapter, candidates, count):
+        return candidates
 
     def release(self, upstream, adapter, *, failed=False, reservation_id=None):
         reservation = self.reservations.pop(reservation_id, None)

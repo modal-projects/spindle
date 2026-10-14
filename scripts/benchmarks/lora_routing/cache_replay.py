@@ -20,6 +20,7 @@ import httpx
 import modal
 
 from spindle.inference.sampling import TCP_KEEPALIVE_OPTIONS, sample_task
+from cohort_prefill import prepare_cohort
 from spindle.providers.modal.fft_pool import proxy_auth_headers
 from spindle.providers.modal.image_dependencies import (
     CORE_PACKAGES,
@@ -33,9 +34,9 @@ app = modal.App("spindle-cache-routing-experiment")
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
+    .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE, "h2>=4,<5")
     .env({"MODAL_ENVIRONMENT": "lilo-deploy"})
-    .add_local_python_source("spindle")
+    .add_local_python_source("spindle", "cohort_prefill")
 )
 
 
@@ -108,16 +109,23 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     are delays, not new optimizer work. One rollout is prefetched while that
     client's update proceeds, matching client.py without cross-client barriers.
     """
+    policy = arm.removesuffix("-cohort")
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     router = create_router(
         pool,
         gateway,
         target=64,
         slots=8,
-        work_rates=config.get("work_rates") if arm.startswith("work") else None,
-        adapter_costs=arm != "work-no-adapter",
+        work_rates=config.get("work_rates")
+        if policy.startswith("work") or policy in {"domains", "balanced", "stable"}
+        else None,
+        adapter_costs=policy != "work-no-adapter",
+        domains=policy in {"domains", "balanced", "stable"},
+        balanced_domains=policy in {"balanced", "stable"},
+        stable_domains=policy == "stable",
+        prefill_once=arm.endswith("-cohort"),
     )
-    rows, rollouts = [], []
+    rows, rollouts, prefills = [], [], []
     await router.refresh()
     await startup.put.aio(
         {"shard": shard, "frontend": os.environ["MODAL_TASK_ID"]}, partition="ready"
@@ -129,13 +137,23 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
         timeout=240,
         trust_env=False,
         transport=httpx.AsyncHTTPTransport(
+            http2=config.get("http2", False),
             limits=limits,
             socket_options=list(TCP_KEEPALIVE_OPTIONS),
             trust_env=False,
         ),
     ) as client:
 
-        async def group(source, round_index, group_index, version):
+        async def group(
+            source,
+            round_index,
+            group_index,
+            version,
+            *,
+            history=None,
+            trajectory=None,
+            dialogue_turn=0,
+        ):
             client_index = source["client_index"]
             problem = (
                 0 if config.get("repeat_prefixes") else round_index * config["groups"]
@@ -143,12 +161,18 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
             prompt = source["prompts"][problem % len(source["prompts"])]
             if config.get("long_prefix"):
                 prompt = long_prompt(source, round_index, group_index)
+            if history is not None:
+                prompt = history
             count = config["samples"]
             if client_index == 0 and config["hot_samples"]:
                 count = config["hot_samples"]
             elif client_index < config.get("large_group_clients", 0):
                 count = config["groups"] * config["samples"]
+            if trajectory is not None:
+                count = 1
             ident = f"client-{client_index}-round-{round_index}-group-{group_index}"
+            if dialogue_turn:
+                ident += f"-trajectory-{trajectory}-turn-{dialogue_turn}"
             task = {
                 "request_id": ident,
                 "sampling_session_id": f"dapo-{source['model_id']}-{version}",
@@ -168,16 +192,21 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
             }
             events, stats = [], {}
             began = time.time()
+            if arm.endswith("-cohort"):
+                await prepare_cohort(
+                    task, gateway, client, router, prefills, native=policy == "kv"
+                )
             result = await sample_task(
                 task,
                 gateway,
                 client=client,
                 lora_router=router
-                if arm in {"lora", "work", "work-no-adapter"}
+                if policy
+                in {"lora", "work", "work-no-adapter", "domains", "balanced", "stable"}
                 else None,
                 stats=stats,
                 on_event=events.append,
-                timeout=240,
+                timeout=config.get("request_timeout", 240),
                 retry_timeout=900,
             )
             ended = time.time()
@@ -218,6 +247,11 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                         "end": event["t1"] - start_at,
                         "seconds": event["t1"] - began,
                         "group_seconds": ended - began,
+                        "dialogue_turn": dialogue_turn,
+                        "trajectory": trajectory if trajectory is not None else index,
+                        "prompt_sha256": hashlib.sha256(
+                            json.dumps(prompt).encode()
+                        ).hexdigest(),
                         "prompt_tokens": len(prompt),
                         "decode_tokens": len(sequence["tokens"]),
                         "cached_tokens": meta["cached_tokens"],
@@ -227,6 +261,34 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                         "stats": stats["sequence_stats"][index],
                         "attempts": seq_attempts,
                     }
+                )
+
+            if dialogue_turn + 1 < config.get("dialogue_turns", 1):
+
+                async def continuation(index, sequence):
+                    branch = index if trajectory is None else trajectory
+                    # A fixed-length synthetic tool reply follows the actual model
+                    # response. Each branch depends on its own preceding response.
+                    tool_reply = random.Random(
+                        8000
+                        + client_index * 10000
+                        + round_index * 1000
+                        + group_index * 100
+                        + branch * 10
+                        + dialogue_turn
+                    ).choices(source["vocabulary"], k=256)
+                    await group(
+                        source,
+                        round_index,
+                        group_index,
+                        version,
+                        history=prompt + sequence["tokens"] + tool_reply,
+                        trajectory=branch,
+                        dialogue_turn=dialogue_turn + 1,
+                    )
+
+                await asyncio.gather(
+                    *(continuation(i, seq) for i, seq in enumerate(result["sequences"]))
                 )
 
         async def rollout(source, round_index):
@@ -289,6 +351,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     return {
         "requests": rows,
         "rollouts": rollouts,
+        "prefills": prefills,
         "frontend": os.environ["MODAL_TASK_ID"],
         "prefix_homes": dict(router.prefix_homes),
         "lookup_metrics": dict(
@@ -310,6 +373,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     nonpreemptible=True,
 )
 async def run_arm(pool, arm, clients, config):
+    policy = arm.removesuffix("-cohort")
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     routers = [
         create_router(
@@ -317,14 +381,21 @@ async def run_arm(pool, arm, clients, config):
             gateway,
             target=64,
             slots=8,
-            work_rates=config.get("work_rates") if arm.startswith("work") else None,
-            adapter_costs=arm != "work-no-adapter",
+            work_rates=config.get("work_rates")
+            if policy.startswith("work") or policy in {"domains", "balanced", "stable"}
+            else None,
+            adapter_costs=policy != "work-no-adapter",
+            domains=policy in {"domains", "balanced", "stable"},
+            balanced_domains=policy in {"balanced", "stable"},
+            stable_domains=policy == "stable",
+            prefill_once=arm.endswith("-cohort"),
         )
         for _ in range(8)
     ]
     deadline = time.monotonic() + 1100
     async with httpx.AsyncClient(
         headers=proxy_auth_headers(),
+        http2=config.get("http2", False),
         timeout=900,
         trust_env=False,
         limits=httpx.Limits(max_connections=1024, max_keepalive_connections=512),
@@ -353,21 +424,20 @@ async def run_arm(pool, arm, clients, config):
 
             return await asyncio.gather(*(one(r) for r in replicas.values()))
 
-        # All arms begin with every adapter CPU-registered on every replica.
+        # Remove the previous trial's catalog, including adapters absent from
+        # this workload. Otherwise domain placement depends on experiment order.
+        previous = {s["replica"]: s for s in await inspect()}
+
+        # All arms begin with every initial adapter CPU-registered on every replica.
         # GPU slots hold the last seven adapters plus the base model; the trace
         # therefore isolates placement and GPU/KV churn from registration I/O.
         async def warm(replica):
-            if config.get("cold_versions"):
+            registered = previous[replica.replica_id]["work"]["cpu_adapters"]
+            if registered:
                 response = await client.post(
                     gateway + "/benchmark-unregister",
                     headers={"Modal-Flash-Upstream": replica.upstream},
-                    json={
-                        "adapters": [
-                            f"{c['model_id']}/weight_v{v:06d}"
-                            for c in clients
-                            for v in c["versions"]
-                        ]
-                    },
+                    json={"adapters": registered},
                 )
                 response.raise_for_status()
             for source in clients:
@@ -487,10 +557,48 @@ async def run_arm(pool, arm, clients, config):
         trace = (
             {"clients": clients, "config": config}
             if training
-            else make_trace(clients, **config)
+            else make_trace(
+                clients,
+                **{
+                    k: config[k]
+                    for k in (
+                        "streams",
+                        "conversations",
+                        "turns",
+                        "prompt_tokens",
+                        "shared_tokens",
+                        "decode_tokens",
+                        "seed",
+                    )
+                },
+            )
         )
+        if not training and config.get("arrival_rate", 0):
+            expanded = [
+                stream | {"prompts": [prompt], "turn_offset": turn}
+                for stream in trace
+                for turn, prompt in enumerate(stream["prompts"])
+            ]
+            rng = random.Random(config["seed"] + 17)
+            rng.shuffle(expanded)
+            arrival = 0.0
+            for stream in expanded:
+                arrival += rng.expovariate(config["arrival_rate"])
+                stream["arrival"] = arrival
+            trace = expanded
         trace_hash = hashlib.sha256(
             json.dumps(trace, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        workload_spec = {
+            "clients": clients,
+            "config": {
+                k: v
+                for k, v in config.items()
+                if k not in {"source_sha256", "work_rates"}
+            },
+        }
+        workload_hash = hashlib.sha256(
+            json.dumps(workload_spec, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         requests, observations = [], []
         started = time.monotonic()
@@ -516,8 +624,16 @@ async def run_arm(pool, arm, clients, config):
 
         async def logical_client(index, stream):
             # A bounded launch ramp avoids a single event-loop dispatch artifact.
-            await asyncio.sleep(index / len(trace) * 2)
+            await asyncio.sleep(
+                max(
+                    0,
+                    started
+                    + stream.get("arrival", index / len(trace) * 2)
+                    - time.monotonic(),
+                )
+            )
             for turn, prompt in enumerate(stream["prompts"]):
+                turn += stream.get("turn_offset", 0)
                 ident = f"trace-{index}-{turn}"
                 task = {
                     "request_id": ident,
@@ -549,11 +665,19 @@ async def run_arm(pool, arm, clients, config):
                     gateway,
                     client=client,
                     lora_router=routers[index % 8]
-                    if arm in {"lora", "work", "work-no-adapter"}
+                    if policy
+                    in {
+                        "lora",
+                        "work",
+                        "work-no-adapter",
+                        "domains",
+                        "balanced",
+                        "stable",
+                    }
                     else None,
                     stats=stats,
                     on_event=events.append,
-                    timeout=240,
+                    timeout=config.get("request_timeout", 240),
                     retry_timeout=900,
                 )
                 sequence = result["sequences"][0]
@@ -579,6 +703,7 @@ async def run_arm(pool, arm, clients, config):
                         "conversation": stream["conversation"],
                         "model_id": stream["model_id"],
                         "version": stream["version"],
+                        "scheduled_arrival": stream.get("arrival"),
                         "start": request_started - started,
                         "end": time.monotonic() - started,
                         "seconds": time.monotonic() - request_started,
@@ -596,7 +721,7 @@ async def run_arm(pool, arm, clients, config):
                 )
                 if len(requests) % 128 == 0:
                     print(
-                        f"{arm}: completed {len(requests)}/{len(trace) * config['turns']} requests in {time.monotonic() - started:.1f}s",
+                        f"{arm}: completed {len(requests)}/{sum(len(s['prompts']) for s in trace)} requests in {time.monotonic() - started:.1f}s",
                         flush=True,
                     )
 
@@ -658,11 +783,22 @@ async def run_arm(pool, arm, clients, config):
         await asyncio.gather(*(router.aclose() for router in routers))
         if error is None:
             assert all(s["active"] == 0 for s in final)
+            if config.get("http2"):
+                assert all(
+                    any(
+                        t["event"].startswith("http2.")
+                        for t in a["attrs"]["http_trace"]
+                    )
+                    for row in requests
+                    for a in row["attempts"]
+                    if a["attrs"].get("ok")
+                ), "The HTTP/2 comparison must actually negotiate HTTP/2"
         return {
             "arm": arm,
             "pool": pool,
             "config": config,
             "trace_sha256": trace_hash,
+            "workload_sha256": workload_hash,
             "wall_started": wall_started,
             "seconds": elapsed,
             "requests": requests,
@@ -670,6 +806,7 @@ async def run_arm(pool, arm, clients, config):
             "final": final,
             "observations": observations,
             "warmup": warmup,
+            "prefills": [p for r in results for p in r["prefills"]] if training else [],
             "error": error,
             "frontends": [r["frontend"] for r in results] if training else [],
             "rollouts": [s for r in results for s in r["rollouts"]] if training else [],
@@ -702,10 +839,14 @@ def main():
     parser.add_argument("--shared-tokens", type=int, default=7168)
     parser.add_argument("--decode-tokens", type=int, default=512)
     parser.add_argument("--seed", type=int, default=12026)
+    parser.add_argument("--arrival-rate", type=float, default=0)
+    parser.add_argument("--request-timeout", type=float, default=240)
+    parser.add_argument("--http2", action="store_true")
     parser.add_argument(
         "--workload", choices=("synthetic", "dapo"), default="synthetic"
     )
     parser.add_argument("--groups", type=int, default=16)
+    parser.add_argument("--dialogue-turns", type=int, default=1)
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--duration-seconds", type=float, default=0)
@@ -723,13 +864,49 @@ def main():
     parser.add_argument(
         "--arms",
         nargs="+",
-        choices=("default", "lora", "kv", "work", "work-no-adapter"),
+        choices=(
+            "default",
+            "lora",
+            "kv",
+            "work",
+            "work-no-adapter",
+            "domains",
+            "kv-cohort",
+            "work-cohort",
+            "domains-cohort",
+            "balanced",
+            "balanced-cohort",
+            "stable",
+            "stable-cohort",
+        ),
     )
     args = parser.parse_args()
     pools = json.loads(args.pools.read_text())
     if args.arms:
-        pools = [next(p for p in pools if p["arm"] == arm) for arm in args.arms]
-    if any(p["arm"].startswith("work") for p in pools) and args.work_rates is None:
+        pools = [
+            next(
+                p
+                for p in pools
+                if p["arm"]
+                == (
+                    "domains"
+                    if arm.startswith(("balanced", "stable"))
+                    else arm.removesuffix("-cohort")
+                )
+            )
+            | {"arm": arm}
+            for arm in args.arms
+        ]
+    if (
+        any(
+            (
+                p["arm"].startswith("work")
+                or p["arm"].startswith(("domains", "balanced", "stable"))
+            )
+            for p in pools
+        )
+        and args.work_rates is None
+    ):
         parser.error("measured-work policies require --work-rates from calibration")
     clients = json.loads(args.clients.read_text())
     for source in clients:
@@ -752,6 +929,7 @@ def main():
         config = dict(
             workload="dapo",
             groups=args.groups,
+            dialogue_turns=args.dialogue_turns,
             samples=args.samples,
             rounds=args.rounds,
             stagger_seconds=args.stagger_seconds,
@@ -771,8 +949,27 @@ def main():
         per_round = len(clients) * args.groups * args.samples
         if args.hot_samples:
             per_round += args.hot_samples - args.groups * args.samples
-        config["expected_requests"] = per_round * args.rounds
+        config["expected_requests"] = per_round * args.rounds * args.dialogue_turns
         config["max_concurrency"] = per_round
+    config["adapter_count"] = sum(len(c["versions"]) for c in clients)
+    config["arrival_rate"] = args.arrival_rate
+    config["request_timeout"] = args.request_timeout
+    if args.http2:
+        config["http2"] = True
+    root = Path(__file__).resolve().parents[3]
+    config["source_sha256"] = {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in (
+            "src/spindle/inference/routing_work.py",
+            "src/spindle/inference/routing_domains.py",
+            "src/spindle/inference/sampling.py",
+            "src/spindle/providers/modal/lora_routing.py",
+            "scripts/benchmarks/lora_routing/cache_replay.py",
+            "scripts/benchmarks/lora_routing/cohort_prefill.py",
+        )
+    }
+    if args.work_rates:
+        config["work_rates"] = json.loads(args.work_rates.read_text())
     args.output.mkdir(parents=True, exist_ok=True)
 
     async def run():

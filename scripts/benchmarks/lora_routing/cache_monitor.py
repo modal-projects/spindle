@@ -13,6 +13,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--minutes", type=float, default=60)
+    parser.add_argument(
+        "--deadline", type=float, help="Absolute UTC epoch shutdown time"
+    )
     args = parser.parse_args()
     owned = sorted(
         {p["pool"] for p in json.loads((args.root / "pools.json").read_text())}
@@ -21,9 +24,16 @@ def main():
         p.startswith("spindle-lora-cache27-") for p in owned
     )
     gpu_limit = 8 * len(owned)
-    known = {}
+    lifetimes = args.root / "gpu-lifetimes.json"
+    known = (
+        {r["task_id"]: r for r in json.loads(lifetimes.read_text())}
+        if lifetimes.exists()
+        else {}
+    )
     observed_peak = 0
-    deadline = time.time() + args.minutes * 60
+    deadline = (
+        args.deadline if args.deadline is not None else time.time() + args.minutes * 60
+    )
     error = None
     try:
         while time.time() < deadline and not (args.root / "STOP").exists():

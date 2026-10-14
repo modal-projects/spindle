@@ -71,7 +71,7 @@ def main():
             "pool": pool.app_name,
             "deployment": json.loads(deployment.model_dump_json()),
         }
-        for arm in ("default", "lora", "kv", "work", "work-no-adapter")
+        for arm in ("default", "lora", "kv", "work", "work-no-adapter", "domains")
     ]
     args.output.write_text(json.dumps(assignments, indent=2) + "\n")
 

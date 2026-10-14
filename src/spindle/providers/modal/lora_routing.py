@@ -8,6 +8,7 @@ from stitch.pools.modal_flash import list_flash_containers_async
 
 from spindle.inference.lora_routing import LoraRouter, Replica
 from spindle.inference.routing_work import WorkRates, WorkRouter
+from spindle.inference.routing_domains import DomainRouter
 
 from .fft_pool import proxy_auth_headers
 
@@ -20,6 +21,10 @@ def create_router(
     slots: int,
     work_rates: dict | None = None,
     adapter_costs: bool = True,
+    domains: bool = False,
+    balanced_domains: bool = False,
+    stable_domains: bool = False,
+    prefill_once: bool = False,
 ) -> LoraRouter:
     containers = []
     discovered = 0.0
@@ -82,12 +87,23 @@ def create_router(
         response.raise_for_status()
         return response.json()["replica"]
 
-    router_type = WorkRouter if work_rates is not None else LoraRouter
+    router_type = (
+        (DomainRouter if domains else WorkRouter)
+        if work_rates is not None
+        else LoraRouter
+    )
     extra = (
-        dict(rates=WorkRates(**work_rates), adapter_costs=adapter_costs)
+        dict(
+            rates=WorkRates(**work_rates),
+            adapter_costs=adapter_costs,
+            prefill_once=prefill_once,
+        )
         if work_rates is not None
         else {}
     )
+    if domains:
+        extra["balanced"] = balanced_domains
+        extra["stable"] = stable_domains
     return router_type(
         discover,
         target=target,

@@ -14,10 +14,23 @@ import numpy as np
 
 LABELS = {"default": "Default Flash", "lora": "LoRA-aware", "kv": "KV affinity"}
 LABELS.update({"work": "Measured work", "work-no-adapter": "Work without adapter cost"})
+LABELS["domains"] = "Adapter domains"
 COLORS = {"default": "#d84b43", "lora": "#287fba", "kv": "#15947a"}
 COLORS.update({"work": "#6a48af", "work-no-adapter": "#d89519"})
+COLORS["domains"] = "#c9512c"
 STYLES = {"default": "--", "lora": "-", "kv": "-."}
 STYLES.update({"work": "-", "work-no-adapter": ":"})
+STYLES["domains"] = "--"
+LABELS["balanced"] = "Balanced adapter domains"
+COLORS["balanced"] = "#ac2f63"
+STYLES["balanced"] = "-"
+LABELS["stable"] = "Stable adapter domains"
+COLORS["stable"] = "#174d82"
+STYLES["stable"] = "-"
+for base in ("kv", "work", "domains", "balanced", "stable"):
+    LABELS[base + "-cohort"] = LABELS[base] + " + cohort prefill"
+    COLORS[base + "-cohort"] = COLORS[base]
+    STYLES[base + "-cohort"] = ":"
 COUNTERS = (
     "request_lora_hits",
     "request_lora_misses",
@@ -68,7 +81,7 @@ def summarize(data):
     expected = (
         config["expected_requests"]
         if training
-        else 32 * config["streams"] * config["turns"]
+        else config.get("adapter_count", 32) * config["streams"] * config["turns"]
     )
     if config.get("duration_seconds"):
         expected = len(rows)
@@ -102,7 +115,13 @@ def summarize(data):
     # A transport timeout can happen after engine admission. Keep this duplicate
     # work in the comparison, bounded by the recorded physical attempts, rather
     # than treating all native admissions as distinct logical requests.
-    assert expected <= admissions <= attempts, (expected, admissions, attempts)
+    prefills = data.get("prefills", [])
+    assert expected + len(prefills) <= admissions <= attempts + len(prefills), (
+        expected,
+        admissions,
+        attempts,
+        len(prefills),
+    )
     assert counters["gpu_loads"] - counters["gpu_evictions"] == sum(
         len(s["gpu_lora"]["resident_adapters"]) for s in data["final"]
     ) - sum(len(s["gpu_lora"]["resident_adapters"]) for s in data["baseline"])
@@ -213,9 +232,12 @@ def summarize(data):
     return {
         "requests": expected,
         "physical_attempts": attempts,
+        "cohort_prefills": len(prefills),
+        "cohort_prefill_input_tokens": sum(p["prompt_tokens"] for p in prefills),
+        "cohort_prefill_output_tokens": sum(p["output_tokens"] for p in prefills),
         "engine_admissions": admissions,
-        "extra_engine_admissions": admissions - expected,
-        "attempts_without_engine_admission": attempts - admissions,
+        "extra_engine_admissions": admissions - expected - len(prefills),
+        "attempts_without_engine_admission": attempts + len(prefills) - admissions,
         "seconds": data["seconds"],
         "measurement_window": [window_start, window_end] if window_end else None,
         "steady_completed_requests": len(window) if window_end else None,
