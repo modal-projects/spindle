@@ -54,7 +54,6 @@ SGLANG_MANAGED = {
     "enable_lora",
     "max_lora_rank",
     "lora_target_modules",
-    "weight_update_staging",
     "weight_version",
     "api_key",
     "pp_size",
@@ -143,6 +142,17 @@ def serving_options(spec):
     tp = options.get("tp_size", spec.inference_gpus_per_node)
     if tp != spec.inference_gpus_per_node:
         raise ValueError("sglang.tp_size must equal the replica GPU allocation")
+    staging = {key for key in options if key.startswith("weight_update_")}
+    if spec.parameterization == "lora" and staging:
+        raise ValueError("weight update staging applies to full parameterization only")
+    mode = options.get("weight_update_staging", "cpu")
+    if mode not in ("cpu", "disk"):
+        raise ValueError("sglang.weight_update_staging must be cpu or disk")
+    if mode == "disk" and not options.get("weight_update_local_checkpoint_dir"):
+        raise ValueError(
+            "sglang.weight_update_staging: disk requires "
+            "sglang.weight_update_local_checkpoint_dir"
+        )
     return options
 
 
@@ -166,5 +176,6 @@ def resolve_backend_settings(spec, asset_path):
         inference.setdefault("max_loaded_loras", 64)
         inference.setdefault("max_loras_per_batch", 8)
     else:
-        inference.update(weight_update_staging="cpu", weight_version="0")
+        inference.setdefault("weight_update_staging", "cpu")
+        inference["weight_version"] = "0"
     return trainer, inference

@@ -289,6 +289,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                         **kwargs,
                         run_id=pool.model_id,
                         pinned_version=None if pool.latest else pool.version,
+                        staging_mode=options["weight_update_staging"],
+                        local_checkpoint_dir=options.get(
+                            "weight_update_local_checkpoint_dir"
+                        ),
                     )
                 )
                 self.supervisor = supervise_children(self.sglang, self.sidecar)

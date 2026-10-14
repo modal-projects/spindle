@@ -24,6 +24,8 @@ def main() -> None:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--pinned-version", type=int)
     parser.add_argument("--scoped-registry")
+    parser.add_argument("--staging-mode", choices=("cpu", "disk"), default="cpu")
+    parser.add_argument("--local-checkpoint-dir")
     args = parser.parse_args()
 
     refresh = None
@@ -44,7 +46,8 @@ def main() -> None:
         )
     engine = SGLangEngine(
         args.upstream_url,
-        delta_update_mode="cpu",
+        args.local_checkpoint_dir,
+        delta_update_mode=args.staging_mode,
     )
     if args.scoped_registry:
         import modal

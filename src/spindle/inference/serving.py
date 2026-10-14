@@ -160,11 +160,15 @@ def start_fft_sidecar(
     run_id: str,
     pinned_version: int | None = None,
     scoped_registry: str | None = None,
+    staging_mode: str = "cpu",
+    local_checkpoint_dir: str | None = None,
 ) -> subprocess.Popen:
     command = [
         sys.executable,
         "-m",
         "spindle.inference.fft_sidecar",
+        "--staging-mode",
+        staging_mode,
         "--port",
         str(port),
         "--upstream-url",
@@ -176,6 +180,8 @@ def start_fft_sidecar(
         "--run-id",
         run_id,
     ]
+    if local_checkpoint_dir is not None:
+        command.extend(["--local-checkpoint-dir", local_checkpoint_dir])
     if scoped_registry is not None:
         command.extend(["--scoped-registry", scoped_registry])
     if pinned_version is not None:

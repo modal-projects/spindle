@@ -53,9 +53,8 @@ image = (
     .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
     .run_commands(
         MEGATRON_RUNTIME_CHECK,
-        'python -c "from miles.backends.megatron_utils.actor import MegatronTrainRayActor; '
-        "from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_states; "
-        "from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_hf_weight_iterator; "
+        # GPU-only modules cannot be imported while building; check what loads on CPU.
+        'python -c "from miles.ray.train.group import TrainerController; '
         'from megatron.core import dist_checkpointing"',
     )
     .add_local_python_source("spindle", ignore=ignore_config_source)
