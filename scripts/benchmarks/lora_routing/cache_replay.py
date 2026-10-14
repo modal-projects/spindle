@@ -28,6 +28,7 @@ from spindle.providers.modal.image_dependencies import (
     TINKER_PACKAGE,
 )
 from spindle.providers.modal.lora_routing import create_router
+from spindle.inference.routing_simple import SIMPLE_POLICIES
 
 
 app = modal.App("spindle-cache-routing-experiment")
@@ -38,6 +39,29 @@ image = (
     .env({"MODAL_ENVIRONMENT": "lilo-deploy"})
     .add_local_python_source("spindle", "cohort_prefill")
 )
+
+
+def make_router(pool, gateway, arm, config):
+    policy = arm.removesuffix("-cohort")
+    measured = policy.startswith("work") or policy in {
+        "domains",
+        "balanced",
+        "stable",
+        *SIMPLE_POLICIES,
+    }
+    return create_router(
+        pool,
+        gateway,
+        target=64,
+        slots=8,
+        work_rates=config.get("work_rates") if measured else None,
+        adapter_costs=policy != "work-no-adapter",
+        domains=policy in {"domains", "balanced", "stable"},
+        balanced_domains=policy in {"balanced", "stable"},
+        stable_domains=policy == "stable",
+        prefill_once=arm.endswith("-cohort"),
+        simple_policy=policy if policy in SIMPLE_POLICIES else None,
+    )
 
 
 def make_trace(
@@ -83,11 +107,15 @@ def make_trace(
 def long_prompt(source, round_index, group_index):
     client_index = source["client_index"]
     vocabulary = source["vocabulary"]
-    shared = random.Random(12026 + client_index * 1000 + group_index).choices(
-        vocabulary, k=7168
-    )
+    shared = random.Random(
+        source.get("prompt_seed", 12026) + client_index * 1000 + group_index
+    ).choices(vocabulary, k=7168)
     suffix = random.Random(
-        24026 + client_index * 10000 + round_index * 100 + group_index
+        source.get("prompt_seed", 12026)
+        + 12000
+        + client_index * 10000
+        + round_index * 100
+        + group_index
     ).choices(vocabulary, k=1024)
     return shared + suffix
 
@@ -111,20 +139,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     """
     policy = arm.removesuffix("-cohort")
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
-    router = create_router(
-        pool,
-        gateway,
-        target=64,
-        slots=8,
-        work_rates=config.get("work_rates")
-        if policy.startswith("work") or policy in {"domains", "balanced", "stable"}
-        else None,
-        adapter_costs=policy != "work-no-adapter",
-        domains=policy in {"domains", "balanced", "stable"},
-        balanced_domains=policy in {"balanced", "stable"},
-        stable_domains=policy == "stable",
-        prefill_once=arm.endswith("-cohort"),
-    )
+    router = make_router(pool, gateway, arm, config)
     rows, rollouts, prefills = [], [], []
     await router.refresh()
     await startup.put.aio(
@@ -200,10 +215,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
                 task,
                 gateway,
                 client=client,
-                lora_router=router
-                if policy
-                in {"lora", "work", "work-no-adapter", "domains", "balanced", "stable"}
-                else None,
+                lora_router=router if policy not in {"kv", "default"} else None,
                 stats=stats,
                 on_event=events.append,
                 timeout=config.get("request_timeout", 240),
@@ -375,23 +387,7 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
 async def run_arm(pool, arm, clients, config):
     policy = arm.removesuffix("-cohort")
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
-    routers = [
-        create_router(
-            pool,
-            gateway,
-            target=64,
-            slots=8,
-            work_rates=config.get("work_rates")
-            if policy.startswith("work") or policy in {"domains", "balanced", "stable"}
-            else None,
-            adapter_costs=policy != "work-no-adapter",
-            domains=policy in {"domains", "balanced", "stable"},
-            balanced_domains=policy in {"balanced", "stable"},
-            stable_domains=policy == "stable",
-            prefill_once=arm.endswith("-cohort"),
-        )
-        for _ in range(8)
-    ]
+    routers = [make_router(pool, gateway, arm, config) for _ in range(8)]
     deadline = time.monotonic() + 1100
     async with (
         httpx.AsyncClient(
@@ -689,15 +685,7 @@ async def run_arm(pool, arm, clients, config):
                     gateway,
                     client=generation_clients[index % len(generation_clients)],
                     lora_router=routers[index % 8]
-                    if policy
-                    in {
-                        "lora",
-                        "work",
-                        "work-no-adapter",
-                        "domains",
-                        "balanced",
-                        "stable",
-                    }
+                    if policy not in {"kv", "default"}
                     else None,
                     stats=stats,
                     on_event=events.append,
@@ -934,6 +922,8 @@ def main():
             "balanced-cohort",
             "stable",
             "stable-cohort",
+            *SIMPLE_POLICIES,
+            *(p + "-cohort" for p in SIMPLE_POLICIES),
         ),
     )
     args = parser.parse_args()
@@ -945,7 +935,9 @@ def main():
                 for p in pools
                 if p["arm"]
                 == (
-                    "domains"
+                    "work"
+                    if arm.removesuffix("-cohort") in SIMPLE_POLICIES
+                    else "domains"
                     if arm.startswith(("balanced", "stable"))
                     else arm.removesuffix("-cohort")
                 )
@@ -958,6 +950,7 @@ def main():
             (
                 p["arm"].startswith("work")
                 or p["arm"].startswith(("domains", "balanced", "stable"))
+                or p["arm"].removesuffix("-cohort") in SIMPLE_POLICIES
             )
             for p in pools
         )
@@ -966,6 +959,7 @@ def main():
         parser.error("measured-work policies require --work-rates from calibration")
     clients = json.loads(args.clients.read_text())
     for source in clients:
+        source["prompt_seed"] = args.seed
         source["vocabulary"] = sorted(
             {token for prompt in source["prompts"] for token in prompt}
         )
@@ -984,6 +978,7 @@ def main():
     if args.workload == "dapo":
         config = dict(
             workload="dapo",
+            seed=args.seed,
             groups=args.groups,
             dialogue_turns=args.dialogue_turns,
             samples=args.samples,
@@ -1020,6 +1015,7 @@ def main():
         for name in (
             "src/spindle/inference/routing_work.py",
             "src/spindle/inference/routing_domains.py",
+            "src/spindle/inference/routing_simple.py",
             "src/spindle/inference/sampling.py",
             "src/spindle/providers/modal/lora_routing.py",
             "scripts/benchmarks/lora_routing/cache_replay.py",

@@ -1,0 +1,46 @@
+"""Simple routing controls sharing the same observations and reservations.
+
+These deliberately omit the measured-work score. They test whether request
+counts and a small amount of locality are sufficient, before attributing gains
+to the more complex work/domain policy.
+"""
+
+from .routing_domains import DomainRouter
+
+
+SIMPLE_POLICIES = ("least-load", "adapter-home", "adapter-two", "bounded-kv")
+
+
+class SimpleRouter(DomainRouter):
+    def __init__(self, *args, policy, **kwargs):
+        if policy not in SIMPLE_POLICIES:
+            raise ValueError(f"Unknown simple routing policy: {policy}")
+        super().__init__(*args, balanced=True, stable=True, **kwargs)
+        self.policy = policy
+
+    def placement_candidates(self, model, adapter, candidates, count):
+        loads = {}
+        for host, candidate in candidates.items():
+            replica = self.replicas[host]
+            observed = replica.work["request_ids"]
+            local = sum(
+                rid not in observed for rid in self.host_reservations.get(host, {})
+            )
+            loads[host] = replica.active + local
+            candidate["observed_and_reserved_requests"] = loads[host]
+            candidate["score"] = float(loads[host])
+        if len(candidates) == 1 or self.policy == "least-load":
+            return candidates
+        if self.policy in {"adapter-home", "adapter-two"}:
+            hosts = self.placement_topology(adapter)
+            ranking = self.primary_placement(adapter, hosts)
+            available = [h for h in ranking if h in candidates]
+            width = 1 if self.policy == "adapter-home" else 2
+            return {h: candidates[h] for h in available[:width]}
+        # A classic bounded-load locality control: retain the best actual KV
+        # match only among replicas within 25% of mean load plus one chunk.
+        # The chunk allowance is explicit, rather than hidden in a score term.
+        limit = 1.25 * sum(loads.values()) / len(loads) + count
+        eligible = {h: c for h, c in candidates.items() if loads[h] <= limit}
+        longest = max(c["cached_tokens"] for c in eligible.values())
+        return {h: c for h, c in eligible.items() if c["cached_tokens"] == longest}
