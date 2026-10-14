@@ -109,6 +109,39 @@ def test_warm_boundary_needs_no_auxiliary_generation():
     asyncio.run(run())
 
 
+def test_one_failed_seed_cancels_other_hosts_before_releasing_reservations():
+    async def run():
+        router, task = setup()
+        entered, cancelled = [], []
+        both_entered = asyncio.Event()
+
+        async def send(request):
+            host = request.headers["Modal-Flash-Upstream"]
+            entered.append(host)
+            if len(entered) == 2:
+                both_entered.set()
+            await both_entered.wait()
+            if host == "a":
+                raise httpx.ReadError("injected seed failure")
+            try:
+                await asyncio.Future()
+            finally:
+                # The failed caller must still account for the other seed
+                # until that request's cancellation has completed.
+                assert len(router.reservations) == 8
+                cancelled.append(host)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(send)) as client:
+            with pytest.raises(httpx.ReadError, match="injected seed failure"):
+                await prepare_cohort(task, "https://pool", client, router, [])
+        assert sorted(entered) == ["a", "b"]
+        assert cancelled == ["b"]
+        assert not router.reservations and not router.host_reservations
+        assert not any(router.local.values())
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("failure", ["transport", "version", "cancel"])
 def test_failed_or_cancelled_preparation_releases_every_reservation(failure):
     async def run():

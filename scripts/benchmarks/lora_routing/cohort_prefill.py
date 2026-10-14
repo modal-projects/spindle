@@ -103,9 +103,19 @@ async def prepare_cohort(task, gateway, client, router, records, *, native=False
                 )
             )
 
-        await asyncio.gather(
-            *(prefill(h, headers) for h, headers in destinations.items())
-        )
+        pending = [
+            asyncio.create_task(prefill(h, headers))
+            for h, headers in destinations.items()
+        ]
+        try:
+            await asyncio.gather(*pending)
+        except BaseException:
+            # gather propagates an individual failure without cancelling its
+            # siblings. Drain their cancellation before releasing reservations.
+            for request in pending:
+                request.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise
     finally:
         for rid, host in reservations:
             router.release(host, adapter, reservation_id=rid)
