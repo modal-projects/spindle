@@ -28,7 +28,8 @@ from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import (
     get_hf_weight_iterator,
 )
-from miles.backends.training_utils import checkpoint_io
+from miles.backends.megatron_utils import hf_export
+from miles.backends.training_utils.checkpoint import io as checkpoint_io
 from miles.backends.training_utils.data.rollout import (
     get_data_iterator,
     get_rollout_data,
@@ -38,12 +39,15 @@ from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.hf_weight_iterator import (
     WeightUpdatePlacement,
 )
+from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 
 from spindle.backends.megatron_runtime.fft.delta import FFTDeltaWriter
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
-from .actor import _sync_checkpoint_volume
+from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volume
+
+install_cross_node_checkpoint_publish(checkpoint_io, snapshot_publisher, hf_export)
 
 _MODEL_KEY = "model"
 _OPTIMIZER_KEY = "optimizer"
@@ -168,11 +172,11 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             dist_checkpointing.save(sharded, str(checkpoint_dir))
 
         checkpoint_io.write_checkpoint_dir(path, write, metadata=metadata)
-        _sync_checkpoint_volume("commit")
+        sync_checkpoint_volume("commit")
 
     def load_checkpoint(self, path: str, restore_optimizer: bool) -> None:
         self._heartbeat.bump()
-        _sync_checkpoint_volume("reload")
+        sync_checkpoint_volume("reload")
         model_state = self._chunk.sharded_state_dict()
         shells = {_MODEL_KEY: model_state}
         if restore_optimizer:

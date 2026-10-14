@@ -121,6 +121,10 @@ class MilesBackendConfig:
             raise ValueError("parameterization must be lora or full")
         if not self.full and self.pipeline_model_parallel_size != 1:
             raise ValueError("pipeline parallelism requires full parameterization")
+        if self.full and self.context_parallel_size != 1:
+            raise ValueError(
+                "full parameterization on Miles does not support context parallelism"
+            )
         if self.megatron_to_hf_mode not in ("bridge", "raw"):
             raise ValueError("megatron_to_hf_mode must be bridge or raw")
         if not self.full and self.megatron_to_hf_mode != "bridge":

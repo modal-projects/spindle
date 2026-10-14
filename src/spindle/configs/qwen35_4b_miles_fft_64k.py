@@ -13,7 +13,6 @@ class Config(BaseConfig):
     miles_cfg = {
         "model_type": "qwen3.5-4B",
         "tensor_model_parallel_size": 2,
-        "context_parallel_size": 2,
         "max_tokens_per_gpu": 65536,
         "cli_options": {
             "recompute_granularity": "full",

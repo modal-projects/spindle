@@ -126,6 +126,11 @@ def test_lora_config_rejects_pipeline_parallelism() -> None:
         _config(parameterization="lora", pipeline_model_parallel_size=2).validate()
 
 
+def test_full_config_rejects_context_parallelism() -> None:
+    with pytest.raises(ValueError, match="context parallelism"):
+        _config(context_parallel_size=2).validate()
+
+
 def test_export_mode_is_selectable_for_full_models_only() -> None:
     arguments = _config(megatron_to_hf_mode="raw").miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"

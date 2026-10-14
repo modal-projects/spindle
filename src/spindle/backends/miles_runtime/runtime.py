@@ -30,7 +30,7 @@ try:
     from miles.tinker import runtime as tinker_runtime
     from miles.utils import object_store
     from miles.utils.arguments import parse_args
-    from miles.utils.audit_utils.process_identity import MainProcessIdentity
+    from miles.utils.audit_utils import process_identity
     from miles.utils.external_utils.model_args_utils import load_model_args
     from miles.utils.logging_utils import configure_logger
     from miles.utils.lora import arguments as lora_arguments
@@ -303,7 +303,7 @@ class MilesRuntime:
         args.lora_A_init_method = "kaiming"
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
-        configure_logger(args, source=MainProcessIdentity())
+        configure_logger(args, source=_main_process_identity())
 
         if ray.is_initialized():
             raise RuntimeError("MilesRuntime requires exclusive ownership of Ray")
@@ -430,6 +430,13 @@ def _check_result(result) -> None:
 
 def _first(results):
     return results[0]
+
+
+def _main_process_identity():
+    # Miles v0.1.2 folded the per-process identity classes into one.
+    if hasattr(process_identity, "MainProcessIdentity"):
+        return process_identity.MainProcessIdentity()
+    return process_identity.SimpleProcessIdentity(component="main")
 
 
 _ACTOR_CLASSES = {

@@ -1,3 +1,4 @@
+import importlib
 import importlib.util
 import sys
 import threading
@@ -76,9 +77,10 @@ def _distributed_actor(monkeypatch, identities: list[str], via_task_id: bool = T
     Ranks share a process, so the per-rank ``MODAL_TASK_ID`` and hostname are
     resolved from the calling thread's rank rather than from the environment.
     """
-    actor = _load_actor(monkeypatch)
+    _load_actor(monkeypatch)
+    volumes = sys.modules["spindle.backends.miles_runtime.volumes"]
     fake_dist = FakeDist(identities)
-    actor.dist = fake_dist
+    volumes.dist = fake_dist
 
     class Environ:
         @staticmethod
@@ -89,16 +91,17 @@ def _distributed_actor(monkeypatch, identities: list[str], via_task_id: bool = T
                 return fake_dist.identity()
             return default
 
-    monkeypatch.setattr(actor, "os", types.SimpleNamespace(environ=Environ))
+    monkeypatch.setattr(volumes, "os", types.SimpleNamespace(environ=Environ))
     monkeypatch.setattr(
-        actor.socket,
+        volumes.socket,
         "gethostname",
         (lambda: "modal") if via_task_id else fake_dist.identity,
     )
-    return actor, fake_dist
+    return volumes, fake_dist
 
 
 def _load_actor(monkeypatch):
+    importlib.import_module("spindle.backends.miles_runtime")
     _module(monkeypatch, "modal")
     torch = _module(monkeypatch, "torch")
     _module(monkeypatch, "torch.distributed")
@@ -184,13 +187,21 @@ def _load_actor(monkeypatch):
     ).enabled = lambda: False
     _module(monkeypatch, "spindle.backends.miles_runtime.host_syncs").install = dict
 
-    path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
+    runtime_dir = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime"
+    volumes_spec = importlib.util.spec_from_file_location(
+        "spindle.backends.miles_runtime.volumes", runtime_dir / "volumes.py"
+    )
+    assert volumes_spec is not None and volumes_spec.loader is not None
+    volumes = importlib.util.module_from_spec(volumes_spec)
+    monkeypatch.setitem(sys.modules, "spindle.backends.miles_runtime.volumes", volumes)
+    volumes_spec.loader.exec_module(volumes)
     spec = importlib.util.spec_from_file_location(
-        "spindle.backends.miles_runtime._test_actor", path
+        "spindle.backends.miles_runtime._test_actor", runtime_dir / "actor.py"
     )
     assert spec is not None and spec.loader is not None
     actor = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(actor)
+    actor.volumes = volumes
     return actor
 
 
@@ -222,7 +233,7 @@ def test_checkpoint_is_published_from_committed_state(monkeypatch, tmp_path) -> 
     monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "spindle-checkpoints")
     monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", str(tmp_path))
     events: list = []
-    actor.modal.Volume = types.SimpleNamespace(
+    actor.volumes.modal.Volume = types.SimpleNamespace(
         from_name=lambda name: _FakeVolume(events)
     )
     actor.dist.is_available = lambda: False
@@ -234,8 +245,8 @@ def test_checkpoint_is_published_from_committed_state(monkeypatch, tmp_path) -> 
     actor.checkpoint_io.write_checkpoint_dir = original
     actor._publish_checkpoints_across_nodes()
     monkeypatch.setattr(
-        actor,
-        "_sync_checkpoint_volume",
+        actor.volumes,
+        "sync_checkpoint_volume",
         lambda action: events.append(("sync", action)),
     )
 
@@ -265,12 +276,14 @@ def test_publishing_leaves_rank_zero_its_own_files(monkeypatch, tmp_path) -> Non
     actor = _load_actor(monkeypatch)
     monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "spindle-checkpoints")
     monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", str(tmp_path))
-    actor.modal.Volume = types.SimpleNamespace(from_name=lambda name: _FakeVolume([]))
+    actor.volumes.modal.Volume = types.SimpleNamespace(
+        from_name=lambda name: _FakeVolume([])
+    )
     actor.dist.is_available = lambda: False
     actor.dist.is_initialized = lambda: False
     actor.checkpoint_io.write_checkpoint_dir = lambda *args, **kwargs: None
     actor._publish_checkpoints_across_nodes()
-    monkeypatch.setattr(actor, "_sync_checkpoint_volume", lambda action: None)
+    monkeypatch.setattr(actor.volumes, "sync_checkpoint_volume", lambda action: None)
 
     path = tmp_path / "sampler" / "snapshot"
     actor.checkpoint_io.write_checkpoint_dir(
@@ -289,14 +302,18 @@ def test_a_checkpoint_missing_a_peer_shard_is_not_published(
     actor = _load_actor(monkeypatch)
     monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "spindle-checkpoints")
     monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", str(tmp_path))
-    actor.modal.Volume = types.SimpleNamespace(from_name=lambda name: _FakeVolume([]))
+    actor.volumes.modal.Volume = types.SimpleNamespace(
+        from_name=lambda name: _FakeVolume([])
+    )
     actor.dist.is_available = lambda: False
     actor.dist.is_initialized = lambda: False
     actor.checkpoint_io.write_checkpoint_dir = lambda *args, **kwargs: None
     actor._publish_checkpoints_across_nodes()
-    monkeypatch.setattr(actor, "_sync_checkpoint_volume", lambda action: None)
+    monkeypatch.setattr(actor.volumes, "sync_checkpoint_volume", lambda action: None)
     monkeypatch.setattr(
-        actor, "_written_shard_names", lambda tmp: {"__0_0.distcp", "__8_0.distcp"}
+        actor.volumes,
+        "_written_shard_names",
+        lambda tmp: {"__0_0.distcp", "__8_0.distcp"},
     )
     monkeypatch.setattr(
         _FakeVolume, "listdir", lambda self, path: []
@@ -345,7 +362,7 @@ def test_sync_checkpoint_volume_commits_once_per_node(monkeypatch) -> None:
 
     actor._volume_action = volume_action
 
-    futures = fake_dist.run_ranks(lambda rank: actor._sync_checkpoint_volume("commit"))
+    futures = fake_dist.run_ranks(lambda rank: actor.sync_checkpoint_volume("commit"))
 
     assert [future.exception() for future in futures] == [None] * 4
     assert sorted(actions) == [(0, "commit"), (2, "commit")]
@@ -365,7 +382,7 @@ def test_committing_never_reloads_the_committing_node(monkeypatch) -> None:
 
     actor._volume_action = volume_action
 
-    futures = fake_dist.run_ranks(lambda rank: actor._sync_checkpoint_volume("commit"))
+    futures = fake_dist.run_ranks(lambda rank: actor.sync_checkpoint_volume("commit"))
 
     assert [future.exception() for future in futures] == [None] * 2
     assert sorted(actions) == [(0, "commit"), (1, "commit")]
@@ -384,7 +401,7 @@ def test_sync_checkpoint_volume_falls_back_to_hostnames(monkeypatch) -> None:
 
     actor._volume_action = volume_action
 
-    futures = fake_dist.run_ranks(lambda rank: actor._sync_checkpoint_volume("commit"))
+    futures = fake_dist.run_ranks(lambda rank: actor.sync_checkpoint_volume("commit"))
 
     assert [future.exception() for future in futures] == [None] * 2
     assert sorted(actions) == [(0, "commit"), (1, "commit")]
@@ -402,7 +419,7 @@ def test_sync_checkpoint_volume_fails_on_every_rank(monkeypatch) -> None:
 
     actor._volume_action = volume_action
 
-    futures = fake_dist.run_ranks(lambda rank: actor._sync_checkpoint_volume("commit"))
+    futures = fake_dist.run_ranks(lambda rank: actor.sync_checkpoint_volume("commit"))
 
     errors = [future.exception() for future in futures]
     assert all(isinstance(error, RuntimeError) for error in errors)
