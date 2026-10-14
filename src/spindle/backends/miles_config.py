@@ -62,6 +62,7 @@ class MilesBackendConfig:
     actor_num_gpus_per_node: int
     actor_num_nodes: int = 1
     parameterization: str = "lora"
+    megatron_to_hf_mode: str = "bridge"
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
@@ -120,6 +121,10 @@ class MilesBackendConfig:
             raise ValueError("parameterization must be lora or full")
         if not self.full and self.pipeline_model_parallel_size != 1:
             raise ValueError("pipeline parallelism requires full parameterization")
+        if self.megatron_to_hf_mode not in ("bridge", "raw"):
+            raise ValueError("megatron_to_hf_mode must be bridge or raw")
+        if not self.full and self.megatron_to_hf_mode != "bridge":
+            raise ValueError("LoRA adapters are exported through the bridge")
         positive = {
             "actor_num_gpus_per_node": self.actor_num_gpus_per_node,
             "actor_num_nodes": self.actor_num_nodes,
@@ -187,7 +192,7 @@ class MilesBackendConfig:
             "--pretrained-checkpoint",
             self.hf_checkpoint,
             "--megatron-to-hf-mode",
-            "bridge",
+            self.megatron_to_hf_mode,
             "--debug-train-only",
             "--rollout-num-gpus",
             "0",

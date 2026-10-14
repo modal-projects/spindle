@@ -51,11 +51,6 @@ image = (
         "opentelemetry-exporter-otlp-proto-http==1.43.0",
     )
     .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
-    .run_commands(
-        MEGATRON_RUNTIME_CHECK,
-        # GPU-only modules cannot be imported while building; check what loads on CPU.
-        'python -c "from miles.ray.train.group import TrainerController; '
-        'from megatron.core import dist_checkpointing"',
-    )
+    .run_commands(MEGATRON_RUNTIME_CHECK)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )

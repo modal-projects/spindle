@@ -126,6 +126,15 @@ def test_lora_config_rejects_pipeline_parallelism() -> None:
         _config(parameterization="lora", pipeline_model_parallel_size=2).validate()
 
 
+def test_export_mode_is_selectable_for_full_models_only() -> None:
+    arguments = _config(megatron_to_hf_mode="raw").miles_arguments()
+    assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
+    with pytest.raises(ValueError, match="bridge"):
+        _config(parameterization="lora", megatron_to_hf_mode="raw").validate()
+    with pytest.raises(ValueError, match="bridge or raw"):
+        _config(megatron_to_hf_mode="direct").validate()
+
+
 def test_backend_hosts_one_full_model(tmp_path) -> None:
     backend, runtime = _backend(tmp_path)
     with pytest.raises(ValueError, match="full parameterization"):
