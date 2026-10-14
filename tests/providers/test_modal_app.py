@@ -971,3 +971,58 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+def test_prepare_model_assets_applies_the_recipe_transform(monkeypatch) -> None:
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    original = modal_app.module_for(FULL_DEFINITION)
+    definition = DeploymentConfig.create(
+        BaseConfig(**{**vars(original.recipe), "asset_transform": "dequantize_bf16"})
+    )
+    events = []
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+    monkeypatch.setattr(
+        "spindle.providers.modal.app.snapshot_download",
+        lambda *, repo_id, local_dir: events.append(("download", repo_id, local_dir)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "apply_transform",
+        lambda name, source, target: events.append(
+            ("transform", name, str(source), str(target))
+        ),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "model_assets",
+        SimpleNamespace(commit=lambda: events.append(("commit",))),
+    )
+
+    modal_app.prepare_model_assets.local(FULL_DEFINITION)
+
+    assert events == [
+        ("download", definition.model, f"{definition.asset_path}.release"),
+        ("commit",),
+        (
+            "transform",
+            "dequantize_bf16",
+            f"{definition.asset_path}.release",
+            definition.asset_path,
+        ),
+        ("commit",),
+    ]
+
+
+def test_unknown_asset_transform_is_rejected_at_creation() -> None:
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    original = modal_app.module_for(FULL_DEFINITION)
+    with pytest.raises(ValueError, match="asset_transform"):
+        DeploymentConfig.create(
+            BaseConfig(**{**vars(original.recipe), "asset_transform": "fp4"})
+        )
