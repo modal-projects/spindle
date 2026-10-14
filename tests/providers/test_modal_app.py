@@ -351,6 +351,51 @@ def test_execute_sample_routes_lora_models_to_shared_pool(monkeypatch) -> None:
     }
 
 
+@pytest.mark.parametrize("routing", ["work", "domains"])
+def test_execute_sample_uses_one_calibrated_router_per_pool(monkeypatch, routing):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    definition = modal_app.module_for(LORA_DEFINITION)
+    rates = {"prefill_tokens_per_second": 1000}
+    monkeypatch.setattr(definition.recipe, "inference_lora_routing", routing)
+    monkeypatch.setattr(definition.recipe, "inference_routing_work_rates", rates)
+    monkeypatch.setattr(modal_app, "_lora_routers", {})
+    created, used = [], []
+    router = object()
+
+    async def ready(spec):
+        return "https://gateway"
+
+    def create(*args, **options):
+        created.append((args, options))
+        return router
+
+    async def sample(task, gateway, *, lora_router, **options):
+        used.append(lora_router)
+        return {}
+
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
+    monkeypatch.setattr(modal_app, "_ready_lora_pool", ready)
+    monkeypatch.setattr(modal_app, "create_router", create)
+    monkeypatch.setattr(modal_app, "sample_task", sample)
+
+    async def run():
+        for model in ("model-a", "model-b"):
+            await modal_app._execute_sample(
+                {"engine_definition_id": LORA_DEFINITION, "model_id": model}, {}
+            )
+
+    asyncio.run(run())
+    assert used == [router, router]
+    assert len(created) == 1
+    options = created[0][1]
+    assert options["work_rates"] is rates
+    assert options["domains"] is (routing == "domains")
+    assert options["balanced_domains"] is (routing == "domains")
+    assert options["stable_domains"] is (routing == "domains")
+    assert not options.get("prefill_once", False)
+
+
 def test_ensure_lora_pool_records_deployment(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     registry = InMemoryKeyValueStore()

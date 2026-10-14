@@ -17,6 +17,15 @@ results against native KV affinity. The default remains `"affinity"`, whose
 policy is described below. Measured-work routing currently requires one DP
 replica and one pipeline stage per container.
 
+The experimental `"domains"` option uses the same measured rates and observations,
+but restricts placement to stable adapter domains and replicas with reusable KV
+state, with an estimated-work escape for congestion. Domains expand with demand;
+their primary assignments account for GPU adapter slots. The
+[research paper](paper/paper.pdf) reports its design, controlled comparisons,
+and limitations. This option is available to `execute_sample` but does not enable
+the paper's benchmark-only cohort preparation (`+P`). Neither experimental policy
+is the default. Calibration depends on the model, hardware, and engine settings.
+
 `inference_lora_routing = "affinity"` enables routing; `"naive"` keeps the existing
 adapter-independent Flash behavior for comparisons. Base-model sampling and FFT
 routing keep their existing paths.

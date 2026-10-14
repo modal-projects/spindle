@@ -225,7 +225,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         env=deployment_env(recipe.inference_env)
         | (
             {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
-            if recipe.inference_lora_routing == "work"
+            if recipe.inference_lora_routing in {"work", "domains"}
             else {}
         ),
         min_containers=minimum,
