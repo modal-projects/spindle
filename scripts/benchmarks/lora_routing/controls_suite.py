@@ -57,7 +57,7 @@ def main():
             str(args.root / job["name"]),
             "--request-timeout",
             "600",
-            "--http2",
+            *(["--http2"] if job.get("http2", True) else []),
             "--sequential",
             "--keep-pools",
             *job["arguments"],

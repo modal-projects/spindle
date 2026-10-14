@@ -252,7 +252,7 @@ def summarize(data):
         a["attrs"]["routing"]["selection_seconds"]
         for r in rows
         for a in r["attempts"]
-        if a["attrs"].get("routing")
+        if "selection_seconds" in a["attrs"].get("routing", {})
     ]
     snapshot_times = [s["work"]["snapshot_seconds"] for s in snapshots if s.get("work")]
     return {
@@ -265,6 +265,13 @@ def summarize(data):
         "engine_admissions": admissions,
         "extra_engine_admissions": admissions - expected - len(prefills),
         "attempts_without_engine_admission": attempts + len(prefills) - admissions,
+        "timed_routing_selections": len(selections),
+        "untimed_routing_attempts": sum(
+            bool(a["attrs"].get("routing"))
+            and "selection_seconds" not in a["attrs"]["routing"]
+            for r in rows
+            for a in r["attempts"]
+        ),
         "seconds": data["seconds"],
         "measurement_window": [window_start, window_end] if window_end else None,
         "steady_completed_requests": len(window) if window_end else None,

@@ -1,13 +1,12 @@
 """Freeze a selected policy and create counterbalanced held-out comparisons.
 
 This writes a plan; it does not deploy or launch GPU work. Each comparison must
-run its three arms sequentially on one unchanged pool. Independent comparisons
+run its arms sequentially on one unchanged pool. Independent comparisons
 may be assigned to separately monitored pools with --partition.
 """
 
 import argparse
 import hashlib
-import itertools
 from pathlib import Path
 import subprocess
 import time
@@ -30,6 +29,7 @@ SOURCES = (
     "src/spindle/inference/sglang_routing_observer.py",
     "scripts/benchmarks/lora_routing/cache_instrumentation.py",
     "scripts/benchmarks/lora_routing/cache_deployment.py",
+    "scripts/benchmarks/lora_routing/controls_suite.py",
 )
 
 
@@ -38,11 +38,14 @@ def source_hashes():
     return {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in SOURCES}
 
 
-def make_jobs(candidate, control):
-    policies = ("kv", control, candidate)
-    if len(set(policies)) != 3 or any(p.endswith("-cohort") for p in policies):
-        raise ValueError("Supply three distinct base policies, without -cohort")
-    orders = list(itertools.permutations(policies))
+def make_jobs(candidate, controls, trials=5):
+    policies = ("kv", *controls, candidate)
+    if len(set(policies)) != len(policies) or any(
+        p.endswith("-cohort") for p in policies
+    ):
+        raise ValueError("Supply distinct base policies, without -cohort")
+    # Rotate the order so each arm appears in each position before reuse.
+    orders = [policies[i:] + policies[:i] for i in range(len(policies))]
     workloads = {
         "serving64": (
             "clients64.json",
@@ -114,16 +117,16 @@ def make_jobs(candidate, control):
         ),
     }
     jobs = []
-    for trial in range(5):
+    for trial in range(trials):
         for index, (name, (clients, arguments, minimum_remaining)) in enumerate(
             workloads.items()
         ):
-            order = orders[(trial + index * 2) % len(orders)]
+            order = orders[(trial + index) % len(orders)]
             jobs.append(
                 dict(
                     name=f"confirm-{name}-r{trial}",
                     clients=clients,
-                    minimum_remaining_seconds=minimum_remaining,
+                    minimum_remaining_seconds=minimum_remaining * len(policies) / 3,
                     arguments=arguments
                     + ["--seed", str(14101 + trial), "--vary-placement"],
                     arms=list(order),
@@ -137,28 +140,35 @@ def make_jobs(candidate, control):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--control", required=True)
+    parser.add_argument("--controls", nargs="+", required=True)
+    parser.add_argument("--trials", type=int, choices=(3, 5), default=5)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--partition", type=int, default=1)
+    parser.add_argument("--http2", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     if args.output.exists() or args.partition < 1:
         raise ValueError("Use a new output directory and a positive partition count")
-    jobs = make_jobs(args.candidate, args.control)
+    jobs = make_jobs(args.candidate, args.controls, args.trials)
+    for job in jobs:
+        job["http2"] = args.http2
     args.output.mkdir(parents=True)
     frozen = dict(
         frozen_at=time.time(),
         candidate=args.candidate,
-        control=args.control,
+        controls=args.controls,
+        trials=args.trials,
         git_commit=subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
         source_sha256=source_hashes(),
-        interpretation="Five held-out paired trials per family; report every trial. Screening data do not enter confirmatory estimates.",
+        interpretation=f"{args.trials} held-out paired trials per family; report every trial. Screening data do not enter confirmatory estimates.",
         jobs=jobs,
     )
     write(args.output / "freeze.json", frozen)
     for partition in range(args.partition):
-        write(args.output / f"jobs-{partition}.json", jobs[partition :: args.partition])
+        start = len(jobs) * partition // args.partition
+        end = len(jobs) * (partition + 1) // args.partition
+        write(args.output / f"jobs-{partition}.json", jobs[start:end])
 
 
 if __name__ == "__main__":

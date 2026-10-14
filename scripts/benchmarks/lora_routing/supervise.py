@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+import httpx
+
 from modal._utils.async_utils import synchronize_api
 from modal.client import _Client
 from modal_proto import api_pb2
@@ -71,6 +73,10 @@ def main():
     p.add_argument("--environment", default="lilo-deploy")
     p.add_argument("--owned-apps", nargs="+", required=True)
     p.add_argument(
+        "--initialization-model",
+        help="Release this prepared model after the first measured client attaches",
+    )
+    p.add_argument(
         "--resource-since",
         type=float,
         default=0.0,
@@ -105,6 +111,7 @@ def main():
     known = {}
     anchor = None
     last_collect = 0
+    initialization_model = args.initialization_model
     error = None
 
     def launch(index):
@@ -146,6 +153,18 @@ def main():
                 events(args.root / f"client-{i:02d}" / "events.jsonl")
                 for i in range(len(processes))
             ]
+            if initialization_model and any(
+                r["event"] == "client_created" for r in traces[0]
+            ):
+                response = httpx.post(
+                    args.base_url + "/api/v1/unload_model",
+                    headers={"x-api-key": os.environ["TINKER_API_KEY"]},
+                    json={"model_id": initialization_model},
+                    timeout=120,
+                )
+                response.raise_for_status()
+                state["initialization_model_released_at"] = time.time()
+                initialization_model = None
             if anchor is None and any(r["event"] == "ready" for r in traces[0]):
                 anchor = time.monotonic()
                 state["stagger_started_at"] = now

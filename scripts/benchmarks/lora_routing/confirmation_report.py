@@ -57,7 +57,7 @@ def summarize_pairs(frozen, roots):
             raise ValueError(f"Unmatched workload: {job['name']}")
         results[job["name"]] = arms
         candidate = arms[frozen["candidate"]]
-        for baseline in ("kv", frozen["control"]):
+        for baseline in ("kv", *frozen["controls"]):
             for metric in METRICS:
                 a, b = candidate[metric], arms[baseline][metric]
                 if a is None or b in (None, 0):
@@ -80,10 +80,11 @@ def summarize_pairs(frozen, roots):
             logs = [math.log(v) for v in values]
             mean = statistics.mean(logs)
             estimate["geometric_mean_ratio"] = math.exp(mean)
-            if len(values) == 5:
-                # Two-sided Student t(4), 97.5th percentile. The unit is a
+            if len(values) == frozen["trials"]:
+                # A two-sided Student t interval. The unit is a
                 # complete paired workload trial, never an individual request.
-                radius = 2.7764451051977987 * statistics.stdev(logs) / math.sqrt(5)
+                critical = {3: 4.302652729696142, 5: 2.7764451051977987}[len(values)]
+                radius = critical * statistics.stdev(logs) / math.sqrt(len(values))
                 estimate["geometric_mean_ratio_95pct_interval"] = [
                     math.exp(mean - radius),
                     math.exp(mean + radius),
@@ -91,12 +92,12 @@ def summarize_pairs(frozen, roots):
         aggregates[key] = estimate
     return dict(
         candidate=frozen["candidate"],
-        control=frozen["control"],
+        controls=frozen["controls"],
         complete=not missing,
         missing=missing,
         paired=aggregates,
         runs=results,
-        uncertainty="Five paired workload seeds; t interval on log ratios assumes independent trial-level log ratios. All trials and ranges are retained. Requests within a trial are not independent replicates; exploratory screens are excluded.",
+        uncertainty=f"{frozen['trials']} paired workload seeds per family; t interval on log ratios assumes independent trial-level log ratios. All trials and ranges are retained. Requests within a trial are not independent replicates; exploratory screens are excluded.",
     )
 
 

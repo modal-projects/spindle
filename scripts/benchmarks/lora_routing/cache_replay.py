@@ -856,7 +856,7 @@ async def run_arm(pool, arm, clients, config):
         await asyncio.gather(*(router.aclose() for router in routers))
         if error is None:
             assert all(s["active"] == 0 for s in final)
-            if config.get("http2_client_shards"):
+            if not training:
                 capacity = sum(
                     load["max_running_requests"]
                     for state in baseline
@@ -870,16 +870,13 @@ async def run_arm(pool, arm, clients, config):
                     )
                     >= capacity
                 ), "General-serving replay did not reach pool admission pressure"
-            if config.get("http2"):
-                assert all(
-                    any(
-                        t["event"].startswith("http2.")
-                        for t in a["attrs"]["http_trace"]
-                    )
-                    for row in requests
-                    for a in row["attempts"]
-                    if a["attrs"].get("ok")
-                ), "The HTTP/2 comparison must actually negotiate HTTP/2"
+            protocol = "http2." if config.get("http2") else "http11."
+            assert all(
+                any(t["event"].startswith(protocol) for t in a["attrs"]["http_trace"])
+                for row in requests
+                for a in row["attempts"]
+                if a["attrs"].get("ok")
+            ), "Every successful attempt must use the configured HTTP version"
         return {
             "arm": arm,
             "pool": pool,

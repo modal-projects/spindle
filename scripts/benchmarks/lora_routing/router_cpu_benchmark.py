@@ -44,6 +44,7 @@ def correlated_burst(policy="stable", *, warm=False):
             host: Replica(
                 host,
                 work=dict(
+                    admission_supported=True,
                     age_seconds=0,
                     prefixes=frozenset(),
                     prefill_tokens=0,
@@ -138,6 +139,7 @@ def run():
                         active=36,
                         adapters={adapters[(i * 8 + j) % 64]: 4 for j in range(8)},
                         work=dict(
+                            admission_supported=True,
                             age_seconds=0,
                             prefixes=frozenset(
                                 h for a in adapters[i % 8 :: 8] for h, n in prefixes[a]

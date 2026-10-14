@@ -1,5 +1,7 @@
 from pathlib import Path
+import json
 import runpy
+import sys
 
 import pytest
 
@@ -48,3 +50,66 @@ def test_refills_stop_at_candidate_budget_without_training_constant_reward_group
     with pytest.raises(RuntimeError, match="Too few mixed-reward"):
         runner.rollout((None, 0), 1)
     assert runner.next_group == 4
+
+
+def test_state_preparation_preserves_saved_states_and_keeps_trainer_nonempty(
+    monkeypatch, tmp_path
+):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    scope = runpy.run_path(str(BENCHMARK / "prepare_states.py"))
+    active = set()
+    first_creation = True
+
+    class PreparedClient:
+        def __init__(self, cfg, root, base_url, index):
+            nonlocal first_creation
+            if not first_creation:
+                assert active, "The trainer must not become empty between preparations"
+            first_creation = False
+            self.index = index
+            self.initial_state_path = f"saved-{index}"
+            self.trainer = type("Trainer", (), {"model_id": f"model-{index}"})()
+            active.add(index)
+
+        def unload(self):
+            active.remove(self.index)
+            return True
+
+    scope["main"].__globals__["Client"] = PreparedClient
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            dict(
+                model="Qwen/Qwen3.8-27B",
+                updates=4,
+                max_tokens=8192,
+                context_tokens=16384,
+            )
+        )
+    )
+    previous = tmp_path / "previous.json"
+    previous.write_text(json.dumps(["saved-0"]))
+    output = tmp_path / "prepared"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_states.py",
+            "--config",
+            str(config),
+            "--root",
+            str(output),
+            "--base-url",
+            "http://test",
+            "--clients",
+            "4",
+            "--resume-from",
+            str(previous),
+        ],
+    )
+    scope["main"]()
+    assert active == {1}
+    assert json.loads((output / "initialization-model.json").read_text()) == "model-1"
+    measured = json.loads((output / "measured-config.json").read_text())
+    assert measured["initial_state_paths"] == [f"saved-{i}" for i in range(4)]
+    assert measured["save_initial_state"] is False
