@@ -35,6 +35,7 @@ def test_kernel_cache_creates_one_v2_volume_without_live_lookup() -> None:
     assert module["KERNEL_CACHE_ENV"] == {
         "TRITON_CACHE_DIR": "/root/.cache/kernel-cache/triton",
         "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/kernel-cache/inductor",
+        "TILELANG_CACHE_DIR": "/root/.cache/kernel-cache/tilelang",
     }
 
 
