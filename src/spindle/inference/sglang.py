@@ -10,8 +10,11 @@ from sglang.srt.plugins import load_plugins
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import kill_process_tree
 
+from spindle.startup_timing import timeline
+
 
 def main():
+    timeline("sampler-sglang").mark("sglang_imports_done")
     load_plugins()
     args = ServerArgs(
         model_path=sys.argv[1],

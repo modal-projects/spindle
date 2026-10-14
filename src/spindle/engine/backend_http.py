@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 
 from spindle.errors import BackendFailed
 from spindle.request_timing import mark
+from spindle.startup_timing import BACKEND_COMPONENT, StartupTimeline, timeline
 from spindle.telemetry import backend as telemetry
 from spindle.telemetry.otlp import provider
 
@@ -57,7 +58,9 @@ class SnapshotBody(ExecuteBody):
     capture: Any = None
 
 
-def create_backend_app(executor: Executor) -> FastAPI:
+def create_backend_app(
+    executor: Executor, *, startup: StartupTimeline | None = None
+) -> FastAPI:
     app = FastAPI()
     app.state.executor_closed = False
 
@@ -116,8 +119,11 @@ def create_backend_app(executor: Executor) -> FastAPI:
             return respond({"error": str(exc)}, status=500)
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "startup": None if startup is None else startup.as_dict(),
+        }
 
     @app.post("/accept_model")
     async def accept_model(body: ModelBody) -> JSONResponse:
@@ -405,13 +411,18 @@ def main() -> None:
 
     reference, port = sys.argv[1], int(sys.argv[2])
     module_name, _, attr = reference.partition(":")
-    executor = getattr(importlib.import_module(module_name), attr)()
+    startup = timeline(BACKEND_COMPONENT, rank=int(os.environ.get("RANK", "0")))
+    startup.mark("backend_process_started")
+    module = importlib.import_module(module_name)
+    startup.mark("backend_imports_done")
+    executor = getattr(module, attr)()
+    startup.mark("backend_executor_built")
     if int(os.environ.get("RANK", "0")) > 0:
         executor.run_follower_loop()
         return
     import uvicorn
 
-    app = create_backend_app(executor)
+    app = create_backend_app(executor, startup=startup)
     try:
         uvicorn.run(app, host="127.0.0.1", port=port)
     finally:

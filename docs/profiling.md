@@ -94,3 +94,50 @@ What to look for:
   the cost of tensor/context/data parallelism.
 - **Time outside the labelled phases**: work between steps that is not
   training, such as weight export or checkpoint writes.
+
+## 4. Where a cold start spends its time
+
+A step trace explains steady-state speed. A cold start is different: the first
+`forward_backward` on a fresh deployment waits for a GPU to be scheduled, the
+container to boot, the model to load, and kernels to compile. Spindle times each
+of these phases on every container, with no configuration needed, and prints one
+JSON line per phase boundary to the container's log:
+
+```json
+{"event": "spindle_startup_mark", "component": "trainer-backend", "mark": "trainer_actors_initialized", "ts": 1792012345.1, "since_start_s": 212.4, "phase_s": 148.9}
+```
+
+- `since_start_s` is the time since that container's process started.
+- `phase_s` is the time since the previous mark in the same component, so it is
+  the cost of the phase that ends at this mark.
+
+Trainer marks, in order (`component` in parentheses):
+
+| Mark | Phase that ends here |
+| --- | --- |
+| `trainer_function_entered` (trainer) | Container boot and Modal runtime start. The line also carries `queue_s`, the wait between the control plane requesting the trainer and the container starting, once the engine record is read. |
+| `assets_reloaded` / `ray_cluster_joined` (trainer) | Volume reload, or Ray cluster formation for multi-node trainers. |
+| `backend_spawned` (trainer) | Backend process launched. |
+| `backend_imports_done` (trainer-backend) | Importing Torch, Megatron and Miles. |
+| `miles_args_parsed`, `ray_started`, `ray_workers_launched` (trainer-backend) | Ray startup and per-GPU worker actors. |
+| `actor_model_loaded` (trainer-rank0) | Rank 0 built the Megatron model and loaded the base weights from the assets volume. |
+| `trainer_actors_initialized`, `miles_backend_ready` (trainer-backend) | All ranks finished loading. |
+| `backend_ready`, `engine_serving` (trainer) | The engine answered its health check and is reachable; `since_spawn_s` is the total from request to ready. |
+| `first_slot_loaded`, `first_forward_backward_done`, `first_optim_step_done`, `first_sampler_export_done` (trainer-backend) | The first client's work, including kernel compilation. `duration_s` is the call itself. |
+
+Sampler replica marks: `server_enter`, `sglang_healthy` (base model loaded and
+CUDA graphs captured), `sidecar_healthy`, then `first_adapter_loaded`
+(`sampler-sidecar`) when the first LoRA adapter is applied. The one-time pool
+deployment prints `pool_deployed` (`sampler-pool`), and the model asset
+download prints `assets_ready` (`model-assets`).
+
+The control plane also keeps `spawned_at`, `started_at`, `ready_at` and the
+phase breakdown on each trainer instance record, next to its state.
+
+To turn the logs into one table per container:
+
+```bash
+uv run modal app logs spindle-trainer-<config> > trainer.log
+uv run modal app logs spindle-lora-<definition id> > sampler.log
+uv run scripts/cold_start_report.py trainer.log sampler.log
+```

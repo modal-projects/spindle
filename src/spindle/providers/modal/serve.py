@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -18,6 +19,7 @@ import uvicorn
 from spindle.engine import Engine
 from spindle.engine.backend_http import HttpBackendClient
 from spindle.engine.http import create_engine_app
+from spindle.startup_timing import TRAINER_COMPONENT, timeline
 from spindle.telemetry.trainer import TrainerTelemetry
 
 from .engines import EngineInstanceRecord, instance_key
@@ -51,7 +53,11 @@ async def serve_engine(
     revision: str,
     instance_id: str,
     notify_reconciler: bool = True,
+    backend_startup: Callable[[], dict | None] | None = None,
 ) -> None:
+    startup = timeline(TRAINER_COMPONENT, instance_id=instance_id)
+    spawned = await kv.get(instance_key(instance_id))
+    spawned_at = spawned.get("spawned_at") if isinstance(spawned, dict) else None
     record = EngineInstanceRecord(
         instance_id=instance_id,
         definition_id=definition_id,
@@ -59,12 +65,19 @@ async def serve_engine(
         state="starting",
         call_id=modal.current_function_call_id(),
         boot_id=uuid.uuid4().hex,
+        spawned_at=spawned_at,
+        started_at=startup.origin,
     )
     await kv.put(instance_key(instance_id), record.model_dump(mode="json"))
+    startup.mark(
+        "engine_record_starting",
+        queue_s=None if spawned_at is None else round(startup.origin - spawned_at, 3),
+    )
     engine = None
     trainer_telemetry = None
     try:
         engine = await make_server()
+        startup.mark("backend_ready")
 
         trainer_telemetry = TrainerTelemetry(
             instance_id,
@@ -76,8 +89,26 @@ async def serve_engine(
         token = secrets.token_urlsafe(16)
         engine_app = create_engine_app(engine, token=token)
         with modal.forward(ENGINE_PORT) as tunnel:
+            ready_at = time.time()
+            startup.mark(
+                "engine_serving",
+                since_spawn_s=None
+                if spawned_at is None
+                else round(ready_at - spawned_at, 3),
+            )
             record = record.model_copy(
-                update={"state": "running", "url": tunnel.url, "token": token}
+                update={
+                    "state": "running",
+                    "url": tunnel.url,
+                    "token": token,
+                    "ready_at": ready_at,
+                    "startup": {
+                        "trainer": startup.as_dict(),
+                        "backend": None
+                        if backend_startup is None
+                        else backend_startup(),
+                    },
+                }
             )
             await kv.put(instance_key(instance_id), record.model_dump(mode="json"))
             try:
@@ -152,6 +183,8 @@ def run_engine_with_backend(
         env=env,
         start_new_session=True,
     )
+    timeline(TRAINER_COMPONENT, instance_id=instance_id).mark("backend_spawned")
+    backend_startup: dict | None = None
 
     def signal_backend(sig: signal.Signals) -> None:
         try:
@@ -171,7 +204,7 @@ def run_engine_with_backend(
     ready = False
 
     async def make_server() -> Engine:
-        nonlocal ready
+        nonlocal ready, backend_startup
         try:
             async with asyncio.timeout(startup_timeout):
                 while True:
@@ -180,8 +213,13 @@ def run_engine_with_backend(
                             f"backend exited with code {backend.returncode}"
                         )
                     try:
-                        if (await executor.http.get("/healthz")).is_success:
+                        health = await executor.http.get("/healthz")
+                        if health.is_success:
                             ready = True
+                            try:
+                                backend_startup = health.json().get("startup")
+                            except ValueError:
+                                backend_startup = None
                             return Engine(
                                 executor,
                                 max_models=max_models,
@@ -206,6 +244,7 @@ def run_engine_with_backend(
                 revision=revision,
                 instance_id=instance_id,
                 notify_reconciler=notify_reconciler,
+                backend_startup=lambda: backend_startup,
             )
         )
         try:
