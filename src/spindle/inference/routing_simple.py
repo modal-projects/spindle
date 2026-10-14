@@ -15,6 +15,8 @@ SIMPLE_POLICIES = (
     "adapter-spill",
     "balanced-home",
     "balanced-spill",
+    "model-home",
+    "model-spill",
     "bounded-kv",
 )
 
@@ -25,10 +27,17 @@ class SimpleRouter(DomainRouter):
             raise ValueError(f"Unknown simple routing policy: {policy}")
         super().__init__(*args, balanced=True, stable=True, **kwargs)
         self.policy = policy
-        if policy.startswith("balanced-"):
+        if policy.startswith(("balanced-", "model-")):
             # Round-robin adapter counts with rendezvous tie breaking. Unlike
             # the original slot-budget map this also balances a small catalog.
             self.even_primaries = True
+
+    def placement_identity(self, adapter):
+        # Placement may survive an optimizer publication. Cache matches, weight
+        # selection, residency, and reservations still use the exact version.
+        return (
+            adapter.rsplit("/", 1)[0] if self.policy.startswith("model-") else adapter
+        )
 
     def placement_candidates(self, model, adapter, candidates, count):
         loads = {}
@@ -50,11 +59,13 @@ class SimpleRouter(DomainRouter):
             "adapter-spill",
             "balanced-home",
             "balanced-spill",
+            "model-home",
+            "model-spill",
         }:
             hosts = self.placement_topology(adapter)
             ranking = self.primary_placement(adapter, hosts)
             available = [h for h in ranking if h in candidates]
-            if self.policy in {"adapter-spill", "balanced-spill"}:
+            if self.policy.endswith("-spill"):
                 home = available[0]
                 return {home: candidates[home]} if loads[home] <= limit else candidates
             width = 2 if self.policy == "adapter-two" else 1

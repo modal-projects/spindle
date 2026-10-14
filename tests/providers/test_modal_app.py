@@ -361,6 +361,8 @@ def test_execute_sample_routes_lora_models_to_shared_pool(monkeypatch) -> None:
         "adapter-spill",
         "balanced-home",
         "balanced-spill",
+        "model-home",
+        "model-spill",
         "bounded-kv",
         "least-load",
     ],

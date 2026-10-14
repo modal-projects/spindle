@@ -8,6 +8,7 @@ import sys
 import time
 
 from supervise import write
+from confirm_plan import source_hashes
 
 
 def main():
@@ -16,6 +17,7 @@ def main():
     parser.add_argument("--jobs", type=Path, required=True)
     parser.add_argument("--manifest", default="controls-manifest.json")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--freeze", type=Path)
     args = parser.parse_args()
     target = args.root / args.manifest
     records = json.loads(target.read_text()) if args.resume else []
@@ -28,6 +30,14 @@ def main():
     for job in jobs:
         if job["name"] in completed:
             continue
+        if args.freeze:
+            frozen = json.loads(args.freeze.read_text())
+            if source_hashes() != frozen["source_sha256"]:
+                raise RuntimeError(
+                    "Source changed after policy selection; preserve the frozen experiment"
+                )
+            if job not in frozen["jobs"]:
+                raise RuntimeError("Comparison differs from the frozen plan")
         monitor = json.loads((args.root / "monitor.json").read_text())
         if time.time() - monitor["updated"] > 60:
             raise RuntimeError("Allocation monitor is not current")

@@ -52,6 +52,7 @@ class DomainRouter(WorkRouter):
         catalog.discard("base")
         if self.stable:
             catalog.update(self.adapter_seen)
+        catalog = {self.placement_identity(a) for a in catalog}
         key = (hosts, frozenset(catalog))
         if key != self.catalog_key:
             assigned = dict.fromkeys(hosts, 0)
@@ -70,8 +71,11 @@ class DomainRouter(WorkRouter):
                 assigned[host] += 1
                 self.primary_hosts[name] = host
             self.catalog_key = key
-        primary = self.primary_hosts[adapter]
+        primary = self.primary_hosts[self.placement_identity(adapter)]
         return (primary,) + tuple(h for h in _ranking(adapter, hosts) if h != primary)
+
+    def placement_identity(self, adapter):
+        return adapter
 
     def placement_candidates(self, model, adapter, candidates, count):
         if len(candidates) <= 1:

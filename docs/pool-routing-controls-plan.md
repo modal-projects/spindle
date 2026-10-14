@@ -38,6 +38,16 @@ single-sequence serving comparison, with its existing behavior unchanged.
 The even-count controls were added after the first static serving result and
 before any turnover screening result; they also run as supplemental jobs.
 
+After the Domains and Work turnover arms, a CPU placement audit found that
+registering 16 new versions changed existing assignments 33 times with the
+even-count map (using the measured model and replica identities). The original
+slot-budget map had no such moves in this specific audit, but assigned between
+one and five initial adapters per replica. Add job-identity static and overflow
+variants to the supplemental screen, before any supplemental GPU result. These
+balance primary jobs and preserve their homes across publications; cache reuse,
+residency, reservations, and executed weights remain exact-version scoped. This
+audit is a constructed placement test, not a measured count of GPU migrations.
+
 First screen every policy on the original 64-version serving shape and a
 fixed-work 1,024-output turnover shape. The latter uses three full rounds, so
 every client reaches a new adapter version and policy-dependent admission
@@ -63,6 +73,22 @@ its time and input work. Also evaluate the selected path without preparation
 before interpreting the benchmark helper as a deployable improvement.
 
 ## Live RL
+
+During screening, run one KV-affinity baseline validation to establish actual
+output lengths, filtering cost, nonzero gradients, and independent progress.
+This two-update validation uses 16 GPUs under a 150-minute watchdog, overlapping
+the separately monitored eight-GPU screen (24 GPUs combined). It does not select
+the winning routing policy. Give each client a fixed 20-problem offset into the
+320-problem DAPO dataset, identical across compared arms, to avoid 16 copies of
+one problem stream. Use dynamic group filtering with a 64-candidate-group cap.
+The initial local SDK credential did not match the deployment secret; that run
+stopped before model creation. Its replacement authenticated successfully, but
+the eight-H200 trainer remained queued with zero runners for approximately ten
+minutes. Both allocations were stopped and audited. Continue validation with
+eight H100 trainer GPUs, TP=4/DP=2 and a 16,384-token microbatch budget, retaining
+eight H200 inference replicas. The client workload and original absolute pilot
+shutdown deadline remain unchanged. Use the deployment's existing API secret
+only in the child environment; do not print or persist its value.
 
 Once serving comparisons support a candidate, run actual independent DAPO
 clients through the SDK and command scheduling path. Use real forward/backward,

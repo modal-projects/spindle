@@ -71,6 +71,8 @@ def main():
         required=True,
     )
     parser.add_argument("--work-rates", type=Path, required=True)
+    parser.add_argument("--trainer-gpu", choices=["H100", "H200"], default="H200")
+    parser.add_argument("--trainer-tp", type=int, choices=[2, 4], default=2)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--initialize", action="store_true")
     parser.add_argument(
@@ -88,8 +90,12 @@ def main():
     recipe = Config(
         name=f"routing27-live-{args.run}",
         inference_lora_routing=args.policy,
+        trainer_gpu=args.trainer_gpu,
         inference_routing_work_rates=json.loads(args.work_rates.read_text()),
-        overrides={"platform.frontend": f"spindle-routing27-live-{args.run}"},
+        overrides={
+            "platform.frontend": f"spindle-routing27-live-{args.run}",
+            "miles_cfg.tensor_model_parallel_size": args.trainer_tp,
+        },
     )
     deployment = DeploymentConfig.create(recipe)
     pool = LoraPoolSpec(deployment.definition_id)

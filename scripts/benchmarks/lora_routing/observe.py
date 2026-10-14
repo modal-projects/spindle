@@ -34,10 +34,10 @@ async def replicas(app_name):
 @app.function(
     image=image,
     secrets=[modal.Secret.from_name("lilo-proxy")],
-    timeout=3600,
+    timeout=10800,
     region="us-west",
 )
-async def observe(app_names, seconds, benchmark=False):
+async def observe(app_names, seconds, benchmark=False, compact=False):
     deadline = time.monotonic() + seconds
     async with httpx.AsyncClient(
         headers={
@@ -70,6 +70,12 @@ async def observe(app_names, seconds, benchmark=False):
                             response.raise_for_status()
                             state = response.json()
                             assert state["replica"] == node.task_id
+                            if compact:
+                                state["prefix_count"] = len(state.pop("prefixes", []))
+                                work = state.get("work")
+                                if work is not None:
+                                    for key in ("prefixes", "request_ids"):
+                                        work[key + "_count"] = len(work.pop(key, []))
                             return state
                         except Exception as exc:
                             return {"replica": node.task_id, "error": str(exc)}
@@ -93,9 +99,16 @@ def main():
         action="store_true",
         help="Read GPU loads and engine cache counters from measured image",
     )
+    p.add_argument(
+        "--compact",
+        action="store_true",
+        help="Keep counts rather than per-token prefix hashes and request IDs",
+    )
     args = p.parse_args()
     with modal.enable_output(), app.run(), args.output.open("a") as out:
-        for row in observe.remote_gen(args.apps, args.seconds, args.benchmark):
+        for row in observe.remote_gen(
+            args.apps, args.seconds, args.benchmark, args.compact
+        ):
             out.write(json.dumps(row) + "\n")
             out.flush()
 

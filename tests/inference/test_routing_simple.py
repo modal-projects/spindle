@@ -70,7 +70,7 @@ def test_two_choices_balance_only_within_fixed_adapter_pair():
     assert all(choices.count(h) == 20 for h in set(choices))
 
 
-@pytest.mark.parametrize("policy", ["adapter-spill", "balanced-spill"])
+@pytest.mark.parametrize("policy", ["adapter-spill", "balanced-spill", "model-spill"])
 def test_adapter_spill_preserves_home_until_it_is_overloaded(policy):
     router = pool(policy)
     home = choose(router, "first")
@@ -84,6 +84,39 @@ def test_balanced_home_equalizes_small_catalog_even_when_slots_are_plentiful():
     hosts = tuple(router.replicas)
     assignments = [router.primary_placement(f"m-{i}/v1", hosts)[0] for i in range(8)]
     assert {assignments.count(h) for h in hosts} == {2}
+
+
+def test_model_homes_survive_independent_version_arrivals_without_cache_credit():
+    router = pool("model-home")
+    hosts = tuple(router.replicas)
+    original = {
+        f"m-{i}": router.primary_placement(f"m-{i}/v1", hosts)[0] for i in range(8)
+    }
+    for i in range(8):
+        for replica in router.replicas.values():
+            replica.work["cpu_adapters"].append(f"m-{i}/v2")
+        assert all(
+            router.primary_placement(f"{m}/v1", hosts)[0] == home
+            for m, home in original.items()
+        )
+        assert router.primary_placement(f"m-{i}/v2", hosts)[0] == original[f"m-{i}"]
+    home = original["m-0"]
+    router.replicas[home].work["prefixes"] = frozenset(
+        h for h, _ in token_prefixes("m-0/v1", list(range(1024)))
+    )
+    details = {}
+    assert (
+        router.select_destination(
+            "m-0",
+            "m-0/v2",
+            "same-prompt",
+            prompt=list(range(1024)),
+            reservation_id="new",
+            details=details,
+        )
+        == home
+    )
+    assert details["cached_tokens"] == 0
 
 
 def test_least_load_counts_observed_local_request_only_once():
