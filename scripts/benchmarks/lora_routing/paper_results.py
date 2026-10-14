@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 from pathlib import Path
@@ -55,6 +56,12 @@ STYLES = {"kv": "--", "kv-cohort": "-.", "stable-cohort": "-", "work-cohort": ":
 def analyzed(data):
     result = summarize(data)
     rows = data["requests"]
+    versions = {}
+    for row in rows:
+        versions.setdefault(row["model_id"], set()).add(row["version"])
+    result["distinct_adapter_versions"] = sum(len(v) for v in versions.values())
+    result["distinct_model_ids"] = len(versions)
+    result["clients_with_multiple_versions"] = sum(len(v) > 1 for v in versions.values())
     auxiliary = sum(
         p["prompt_tokens"] - p["meta"]["cached_tokens"]
         for p in data.get("prefills", [])
@@ -185,6 +192,56 @@ def save(fig, path):
     plt.close(fig)
 
 
+def paired_comparisons(summaries):
+    pairs = {}
+    metrics = (
+        "tokens_per_second",
+        "latency_mean_s",
+        "latency_p95_s",
+        "rollout_mean_s",
+        "gpu_loads",
+        "gpu_evictions",
+        "load_host_seconds",
+        "kv_hit_ratio",
+        "lora_hit_ratio",
+        "total_uncached_prefill_tokens",
+    )
+    for folder, arms in summaries.items():
+        baseline, candidate = (
+            ("kv", "stable")
+            if folder.startswith("serving64-final")
+            else ("kv-cohort", "stable-cohort")
+        )
+        if baseline not in arms or candidate not in arms:
+            continue
+        before, after = arms[baseline], arms[candidate]
+        row = {
+            "baseline": baseline,
+            "candidate": candidate,
+            "percent_change": {
+                metric: 100 * (after[metric] / before[metric] - 1)
+                for metric in metrics
+                if before[metric] not in (None, 0)
+            },
+            "kv_hit_percentage_point_change": 100
+            * (after["kv_hit_ratio"] - before["kv_hit_ratio"]),
+        }
+        clients = before["per_client_rollout_mean_s"]
+        if clients:
+            speedups = {
+                str(i): value / after["per_client_rollout_mean_s"][i]
+                for i, value in clients.items()
+            }
+            row.update(
+                per_client_rollout_speedup=speedups,
+                clients_improved=sum(v > 1 for v in speedups.values()),
+                min_client_speedup=min(speedups.values()),
+                max_client_speedup=max(speedups.values()),
+            )
+        pairs[folder] = row
+    return pairs
+
+
 def latex_tables(summaries, output):
     """Keep every completed trial visible rather than pooling request samples."""
     names = {
@@ -241,6 +298,33 @@ def latex_tables(summaries, output):
     ]
     (output / "state-table.tex").write_text("\n".join(header + rows + footer) + "\n")
 
+    rows = []
+    for folder, length in (("long-decode-r0", "512"), ("long-decode1024-r0", "1,024")):
+        for arm, s in summaries.get(folder, {}).items():
+            rows.append(
+                f"{length} & {LABELS[arm]} & {s['requests']} & "
+                f"{s['steady_completed_requests']} & "
+                f"{s['steady_output_tokens_per_second']:.0f} & "
+                f"{s['steady_latency_mean_s']:.1f} & "
+                f"{1000 * s['gpu_loads'] / s['requests']:.1f} " + r"\\"
+            )
+    text = (
+        [
+            r"\begin{table*}[t]\centering\small\setlength{\tabcolsep}{4pt}",
+            r"\begin{tabular}{llrrrrr}\toprule",
+            r"Output tokens & Policy & Requests & Window completions & Window tok/s & Window mean (s) & Loads / 1k\\\midrule",
+        ]
+        + rows
+        + [
+            r"\bottomrule\end{tabular}",
+            r"\caption{Longer-output controls. Window metrics use completions from 60 seconds to the arrival-window end: 300 seconds for 512-token outputs and 180 seconds for 1,024-token outputs. Admitted work drains afterward. Total work depends on policy, so loads are normalized by logical requests. Each output length has one trial.}\label{tab:long}",
+            r"\end{table*}",
+        ]
+        if rows
+        else []
+    )
+    (output / "long-table.tex").write_text("\n".join(text) + "\n")
+
 
 def rolling(data, width=20):
     rows = data["requests"]
@@ -280,6 +364,27 @@ def rolling(data, width=20):
             else np.nan
         )
     return x, metrics
+
+
+def export_plot_values(runs, output):
+    """Share plotted values without prompts, generated text, or checkpoint paths."""
+    values = {}
+    for workload, arms in runs.items():
+        for arm, data in arms.items():
+            times, curves = rolling(data)
+            values.setdefault(workload, {})[arm] = {
+                "time_seconds": times.tolist(),
+                "window_seconds": 20,
+                "rolling": {
+                    metric: [float(v) if np.isfinite(v) else None for v in curve]
+                    for metric, curve in curves.items()
+                },
+                "sorted_request_latency_seconds": sorted(
+                    r["seconds"] for r in data["requests"]
+                ),
+            }
+    payload = json.dumps(values, separators=(",", ":"), allow_nan=False).encode()
+    (output / "plot-values.json.gz").write_bytes(gzip.compress(payload, mtime=0))
 
 
 def figures(runs, output):
@@ -692,6 +797,9 @@ def main():
         }
         assert len(hashes) <= 1, (stem, "Repeated workload definitions differ", hashes)
     (args.output / "metrics.json").write_text(json.dumps(summaries, indent=2) + "\n")
+    (args.output / "paired-comparisons.json").write_text(
+        json.dumps(paired_comparisons(summaries), indent=2) + "\n"
+    )
     flat = [
         dict(
             workload=w,
@@ -703,10 +811,11 @@ def main():
     ]
     columns = list(dict.fromkeys(k for row in flat for k in row))
     with (args.output / "metrics.csv").open("w") as out:
-        writer = csv.DictWriter(out, fieldnames=columns)
+        writer = csv.DictWriter(out, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         writer.writerows(flat)
     figures(runs, args.output)
+    export_plot_values(runs, args.output)
     latex_tables(summaries, args.output)
     for workload, arms in summaries.items():
         print(workload)

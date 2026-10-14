@@ -1,0 +1,87 @@
+\paragraph{Local estimates are not distributed admission control.}
+An independent frontend cannot see another frontend's reservations before the
+next observation. Several frontends can therefore choose the same apparently
+idle replica, and a domain can grow later than the actual arrival burst.
+Deterministic primary maps reduce unnecessary replication but can also correlate
+those decisions. This design offers no global queue bound, no per-adapter
+starvation guarantee, and no theorem of throughput optimality. Obtaining such
+properties would require an admission protocol, migration, or explicit engine
+scheduling support beyond this prototype.
+
+The preferred map also counts registered versions that currently have no demand.
+Long-running training can accumulate a large inactive catalog even when only a
+few latest versions are sampled. The evaluated catalog contains at most four
+versions per job and 64 versions overall. Demand-filtered catalog retention or
+version garbage collection would require an additional policy; the present
+results do not establish behavior under indefinite publication history.
+
+The cache exception has another explicit limit: if every replica advertises
+some reusable prefix for an adapter, every replica passes the locality filter.
+The work score still compares the remaining prefill, but domain restriction no
+longer limits that adapter's replication. A common system prefix across many
+otherwise different prompts could produce this condition. Our controlled
+problem prefixes are distinct, so the experiments do not resolve this case.
+
+For example, consider eight frontends with identical empty observations, each
+submitting 36 requests for the same uncached adapter before a refresh. Each
+frontend sees one batch of demand and selects the same primary. Executing this
+case against the actual router on CPU assigns all 288 requests to one replica.
+This is a deterministic counterexample, not a GPU performance measurement. The
+local score bound does not prevent this correlated-arrival case. A batched,
+replica-local admission protocol could address it without a cluster-wide request
+coordinator, but it is not implemented or evaluated here.
+
+\paragraph{Autoscaling remains a separate control problem.}
+Flash scales on request concurrency, whereas the router compares estimated work
+and locality. A request-count target and an estimated-work budget can disagree,
+especially with heterogeneous output lengths. The fixed-size measurements can
+identify idle replicas during pressure, but cannot establish that scale-out
+occurs only after all existing replicas are saturated. Membership retention
+reduces remapping after a missed poll; it does not validate scaling stability.
+An elasticity experiment with changing replica count is necessary before using
+these results to tune Flash's autoscaling thresholds.
+
+\paragraph{Workload and model scope.}
+The experiments cover one hybrid 27B model, one adapter rank, one GPU type, and
+eight replicas. Long inputs and exact decode lengths make comparisons
+interpretable, but omit natural language structure, early EOS, variable rank,
+and long-tailed output distributions. Saved checkpoint arrivals are real adapter
+registrations, while their optimizer delays are replayed. We do not infer
+training convergence, reward quality, or optimizer throughput from serving
+measurements. Larger-model tensor parallelism and heterogeneous devices remain
+untested.
+The eight-slot GPU adapter budget is also fixed. Increasing it could remove
+some of the measured adapter interference at the cost of memory available for
+other state. We do not evaluate that cache-capacity tradeoff or claim the same
+gain when every replica can retain the full adapter catalog.
+
+\paragraph{What a cache hit does and does not show.}
+A high requested-token cache ratio after auxiliary preparation is expected.
+The seed still performed the cold computation. Similarly, more first-prefill
+hot-adapter hits need not translate to fewer later GPU loads, and summed
+host-side loading time is not a wall-clock latency decomposition. This is why
+the evaluation reports auxiliary uncached tokens, actual load counters,
+completion latency, and useful output throughput together. An optimization is
+not successful merely because one locality metric improves.
+
+\paragraph{Transport, observation, and engine interactions.}
+An HTTP timeout can occur after engine admission. Retrying then creates work
+that is absent from the logical request count. Our stress pilots retain that
+cost. Increasing the timeout did not eliminate a separate HTTP/1 read-failure
+mode; the subsequent controlled comparisons use HTTP/2 for every policy.
+Sidecar presence alone cannot distinguish a request waiting for an
+engine connection from one queued inside the engine. Longest-prefix-match
+scheduling, the sidecar's connection pool, cache eviction, and Flash transport
+all affect end-to-end behavior. The available instrumentation does not provide a
+complete causal decomposition of every tail event.
+
+\paragraph{Evidence strength and deployment status.}
+Pilot-driven design choices are evaluated separately from the later fixed
+workloads. Repeated trials are reported individually; two executions cannot
+establish a population confidence interval or robustness to all production
+traffic. Literature comparisons describe mechanisms rather than head-to-head
+reimplementations. Domains is available through the explicit
+\texttt{inference\_lora\_routing} recipe option, while cohort preparation remains
+a benchmark helper. The production default is unchanged. These results support
+the measured conclusions, not a general claim of state-of-the-art serving
+performance.

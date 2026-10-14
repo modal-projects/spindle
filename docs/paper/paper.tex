@@ -1,0 +1,277 @@
+\documentclass[10pt,twocolumn,letterpaper]{article}
+\usepackage[margin=0.8in,columnsep=0.28in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{microtype,amsmath,booktabs,graphicx,url,xcolor,placeins}
+\usepackage[colorlinks=true,allcolors=blue!45!black]{hyperref}
+\usepackage[font=small,labelfont=bf]{caption}
+\setlength{\parskip}{0pt}
+\setlength{\parindent}{1em}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\dbltopfraction}{0.9}
+\renewcommand{\textfraction}{0.05}
+\title{State Locality and Load Balance in Multi-LoRA Inference Pools}
+\author{Spindle routing study}
+\date{October 14, 2026}
+\begin{document}
+\raggedbottom
+\maketitle
+\begin{abstract}
+\input{abstract.tex}
+\end{abstract}
+
+\section{Introduction}
+A shared inference pool multiplexes independent fine-tuning jobs onto replicas of
+one base model. Each job produces an evolving sequence of LoRA adapters and
+submits batches of sampled responses. A router must place these requests while
+accounting for three different kinds of state: adapter weights in host memory,
+adapter weights in GPU memory, and reusable attention or recurrent state for a
+particular prompt and adapter version. Spreading requests uniformly can replicate
+all three. Keeping every request with its cached state can leave other replicas
+idle while a hot job accumulates a queue.
+
+The relevant unit of work is often larger than an individual HTTP request. A
+single-turn reinforcement-learning rollout samples several answers for each
+problem. A multi-turn rollout generates responses that become part of later
+prompts. Independent jobs finish rollouts and publish new policies at different
+times. Consequently, the router sees repeated, overlapping bursts rather than
+synchronized cluster-wide steps. A policy that performs well on independent,
+short prompts can behave differently on these workloads.
+
+This study examines admission routing in Spindle's Modal Flash inference pool.
+The engine already supports continuous batching, multiple adapters, and prefix
+caching. The router neither replaces those mechanisms nor migrates running
+sequences. Its task is to decide where each new sequence should execute. We
+measure native KV affinity, a router that minimizes estimated outstanding work,
+and an adapter-domain extension that controls preferred replication according to
+outstanding adapter demand. All custom decisions are made by independent
+sampling frontends using periodically refreshed observations.
+
+Our evaluation distinguishes serving throughput from training throughput.
+Inference uses real GPUs and saved, independently trained checkpoints. Recorded
+optimizer/publication intervals drive the replay clients, but the evaluation
+does not execute new optimization steps. The multi-turn experiments execute
+causally dependent generation; synthetic tool replies control the additional
+context length. These distinctions constrain the conclusions drawn from the
+results.
+
+\section{Background and Related Work}
+\paragraph{Multi-adapter execution.}
+Punica introduces kernels that batch computation across LoRA adapters, while
+S-LoRA combines heterogeneous adapter execution with memory management for
+adapter weights and KV state~\cite{punica,slora}. Those mechanisms concern the
+work performed inside a serving engine. We retain the deployed engine and study
+how requests are distributed among replicas. A routing gain here should not be
+compared numerically with a kernel-level speedup against an engine that lacks
+batched LoRA execution.
+
+\paragraph{Adapter placement and migration.}
+dLoRA jointly considers adapter execution and placement~\cite{dlora}. Its local
+mechanisms choose merged or unmerged execution and protect adapters from
+starvation. Its cluster mechanisms estimate queue and adapter-loading delays,
+place adapters, and migrate requests with their associated state. Our work-score
+baseline shares the idea of comparing dimensioned service costs. The important
+system difference is that Spindle performs distributed admission decisions
+through Flash, without changing execution modes or moving an active request's KV
+state. We compare these design choices, not the performance of a partial dLoRA
+implementation.
+
+LoRAServe adapts placement and routing to demand and rank heterogeneity, with a
+cluster orchestrator and remote adapter access over RDMA~\cite{loraserve}.
+Demand-dependent placement is therefore not, by itself, a new contribution.
+Our candidate instead asks how much of that benefit is obtainable from independent
+frontends, shared storage, and approximate observations. This evaluation uses one
+adapter rank and does not establish robustness to rank interference.
+
+\paragraph{Distributed prefix locality.}
+Preble coordinates prefix reuse and load through global and local scheduling,
+including cache-eviction feedback~\cite{preble}. DualMap assigns requests to a
+small candidate set and incorporates hotspot handling~\cite{dualmap}. These
+systems motivate two distinct requirements: actual cache observations are more
+informative than recent-use hints, and unrestricted candidate selection can
+replicate state unnecessarily. Their global coordination and migration mechanisms
+are not present in our router. Classical independent-balls load bounds also do
+not directly apply to correlated rollout bursts with stale observations.
+
+LMetric uses a multiplicative combination of new prefill work and batch
+size~\cite{lmetric}. Its analysis identifies long, shared-prefix bursts as a
+failure case: the cache advantage can continue to dominate even as a small set of
+replicas becomes congested. This case is directly relevant to RL sampling. We
+use that insight to motivate workload selection and explicit congestion handling.
+We do not present our work-score or adapter-domain policy as LMetric, nor claim
+to reproduce that paper's experimental system.
+
+\section{System Model and Measurement}
+\begin{figure*}[t]\centering
+\includegraphics[width=\textwidth]{figures/architecture.pdf}
+\caption{Custom request routing retains the Modal Flash transport. Each frontend
+plans from its own observations and reservations. The engine remains responsible
+for exact cache matching and adapter execution. Observation traffic is shared
+information, not distributed admission control.}\label{fig:architecture}
+\end{figure*}
+\subsection{Request path and ownership}
+A sampling frontend receives a group of generation requests, identifies the
+immutable adapter version, and selects a destination for each sequence. Requests
+still traverse the authenticated Modal Flash endpoint. Custom routes use the
+exact-upstream header; competing native-affinity headers are removed. The
+sidecar resolves the adapter snapshot, registers it with SGLang when necessary,
+and forwards generation to the engine. Exact version checks are independent of
+cache and load estimates.
+
+Each frontend owns one router per inference pool, shared by the pool's adapters.
+There is no coordinator that serializes all sampling requests. The router's
+selection method is synchronous and does not acquire an asynchronous lock.
+Frontends periodically discover membership and poll replicas concurrently. A
+fresh selection reads local state. Startup and expired observations can coalesce
+behind one bounded refresh; failed discovery falls back to native Flash.
+
+The engine owns cache truth. A CPU-only observer snapshots reusable cache
+boundaries, outstanding request identifiers, remaining token work, and CPU/GPU
+adapter sets approximately once per second. A bounded background writer handles
+file I/O. The sidecar combines that snapshot with requests that have arrived but
+are not yet visible to the scheduler. Frontends discard observations whose reported
+engine age exceeds three seconds. This includes the individual probe's round-trip
+time, but excludes time subsequently spent waiting for another probe in the same
+refresh; it is not a strict three-second end-to-end freshness bound.
+Membership is rediscovered approximately every five
+seconds. These are eventual observations, not a global admission protocol.
+
+\subsection{Cache identity and correctness}
+The cache key includes the exact adapter identity and token prefix. Updating an
+adapter invalidates routing credit for the old version even when the prompt is
+unchanged. Hashes are computed at 64-token boundaries; the final prompt token is
+never credited because its logits must be evaluated. A hash receives credit only
+if the engine advertises that boundary as reusable. An observation replaces the
+previous set, so evicted entries do not persist as positive hints indefinitely.
+Each snapshot advertises at most 8,192 prefix boundaries. Entries omitted by
+that limit receive no routing credit even if the engine could reuse them.
+
+The deployed model is hybrid: a reusable boundary requires both the attention
+state and the corresponding recurrent-state checkpoint. Merely observing a radix
+path is insufficient. Unsupported cache configurations receive no credit. Hash
+collisions or stale positive observations could affect placement quality; they
+cannot cause the engine to reuse an invalid cache entry, because the engine
+performs its own match using its original token and adapter identity.
+
+\subsection{Costs and their limits}
+We measure aggregate prefill rate $r_p$, aggregate decode rate $r_d$, effective
+running capacity $C$, GPU adapter-loading delay $t_g$, and registration delay
+$t_c$ on the deployed model and hardware. These quantities have physical units;
+there is no arbitrary coefficient adding a dimensionless hit ratio to a queue
+length. Nevertheless, the model is approximate. Prefill cost depends on context
+and batch shape, output limits overestimate early-EOS decoding, and host elapsed
+load time is not an isolated GPU-transfer measurement.
+
+In the pinned engine, registration runs synchronously on the scheduler path.
+The router therefore accounts for registration as additional work rather than
+assuming it overlaps all queued inference. Volume and operating-system caches
+make registration latency state dependent. We do not claim that unregistering an
+adapter forces a network-cold checkpoint read.
+
+\section{Routing Policies}
+\subsection{Native KV affinity}
+The main baseline sends a stable affinity key through Flash. It preserves the
+relationship between a conversation or sampling group and a replica as long as
+the infrastructure preserves that mapping. It does not consult our engine cache
+observations or adapter-working-set state. We measure its actual placement and
+balance; affinity is not treated as a proof that every request will reach the
+same host under failures or membership changes.
+
+Conversation affinity can also spread one adapter across many engines even
+without a hot conversation. Under an idealized independent, uniform mapping,
+$m$ conversation keys visit an expected
+$N[1-(1-1/N)^m]$ of $N$ replicas. With four keys and eight replicas, that is
+3.31 replicas per adapter. A catalog that fits once in aggregate GPU adapter
+memory can therefore exceed that capacity several times over when each key is
+placed independently. This occupancy calculation motivates controlling adapter
+replication separately from preserving an individual conversation's prefix.
+It is not an assertion about Flash's mapping implementation.
+
+\subsection{Estimated-work routing}
+For incoming prompt length $P$, output limit $D$, and replica $i$, let $H_i$ be
+the longest advertised reusable prefix. Its estimated per-sequence work is
+\begin{equation}
+  w_i = (P-H_i)/r_p + D/r_d.
+\end{equation}
+The replica backlog $B_i$ sums observed remaining prefill and decode work,
+plus local reservations not yet represented in the observed request-ID set.
+Adapter setup is charged once per distinct pending cold adapter: $t_g$ when
+absent from GPU memory and $t_c$ when absent from registered host state. Let
+$A_i$ be the corresponding setup cost of the incoming adapter if it is not
+already resident or pending. For a placement chunk of $g\le C$ siblings,
+\begin{equation}
+  S_i = B_i + A_i + g w_i.\label{eq:work}
+\end{equation}
+The work router chooses the smallest $S_i$. Numerical ties preserve the previous
+prefix destination, then use deterministic rendezvous ordering.
+
+A group larger than $C$ is split into chunks. Siblings in a chunk retain the
+chosen host while it remains eligible; retries can select again. Each sequence
+reserves its local estimated work before sending the HTTP request and releases
+that reservation on success, failure, or cancellation. Observed request IDs
+prevent double counting. The unsent remainder of a group is not a cluster-wide
+reservation, and different frontends can still select the same replica before
+observing one another's decisions.
+
+Equation~\ref{eq:work} estimates drain work, not the completion time of a
+continuous-batching simulation. It can overestimate queued prefill when the
+engine has not yet matched that request's cache. It also does not predict repeated
+adapter evictions caused by interleaving a working set larger than GPU capacity.
+These limitations motivate the replication experiment rather than an additional
+unmeasured eviction coefficient.
+The engine also constrains admission by the union of adapters already decoding
+and those entering prefill. With overlap loading disabled, a request introducing
+an adapter beyond the eight-adapter batch limit is skipped, even if sequence
+slots remain~\cite{sglang-admission}. A scalar transfer charge alone does not
+model that compatibility constraint.
+
+\subsection{Demand-sized adapter domains}
+\input{domains.tex}
+
+\section{Experimental Methodology}
+\input{methodology.tex}
+\section{Evaluation}
+\input{evaluation.tex}
+\FloatBarrier
+\section{Discussion and Limitations}
+\input{discussion.tex}
+\section{Conclusion}
+\input{conclusion.tex}
+\FloatBarrier
+
+\begin{thebibliography}{9}
+\bibitem{dlora} Bingyang Wu, Ruidong Zhu, Zili Zhang, Peng Sun, Xuanzhe Liu,
+and Xin Jin. \href{https://www.usenix.org/system/files/osdi24-wu-bingyang.pdf}{dLoRA:
+Dynamically Orchestrating Requests and Adapters for LoRA LLM Serving}.
+OSDI, pp. 911--927, 2024.
+\bibitem{lmetric} Dingyan Zhang et al.
+\href{https://www.usenix.org/system/files/osdi26-zhang-dingyan.pdf}{LMetric:
+Simple is Better---Multiplication May Be All You Need for LLM Request Scheduling}.
+OSDI, 2026.
+\bibitem{punica} Lequn Chen, Zihao Ye, Yongji Wu, Danyang Zhuo, Luis Ceze,
+and Arvind Krishnamurthy. \href{https://arxiv.org/abs/2310.18547}{Punica:
+Multi-Tenant LoRA Serving}. MLSys, 2024.
+\bibitem{slora} Ying Sheng et al.
+\href{https://arxiv.org/abs/2311.03285}{S-LoRA: Serving Thousands of Concurrent
+LoRA Adapters}. MLSys, 2024.
+\bibitem{preble} Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li,
+and Yiying Zhang. \href{https://arxiv.org/abs/2407.00023v2}{Preble: Efficient
+Distributed Prompt Scheduling for LLM Serving}. arXiv:2407.00023v2, 2024.
+\bibitem{dualmap} Ying Yuan, Pengfei Zuo, Bo Wang, Zhangyu Chen, Zhipeng Tan,
+and Zhou Yu. \href{https://arxiv.org/abs/2602.06502}{DualMap: Enabling Both Cache
+Affinity and Load Balancing for Distributed LLM Serving}. arXiv:2602.06502, 2026.
+\bibitem{loraserve} Shashwat Jaiswal et al.
+\href{https://arxiv.org/abs/2511.22880}{Serving Heterogeneous LoRA Adapters in
+Distributed LLM Inference Systems}. arXiv:2511.22880, 2025.
+\bibitem{sglang} SGLang contributors. Native parallel-sampling prefix preparation.
+\href{https://github.com/modal-projects/sglang/blob/d050d06437d96196fc68d5b4e5c246408790d537/python/sglang/srt/managers/tokenizer_manager.py\#L1701}{Tokenizer manager},
+Modal fork, commit \texttt{d050d064}, 2026.
+\bibitem{sglang-admission} SGLang contributors. LoRA admission and batch validation.
+\href{https://github.com/modal-projects/sglang/blob/d050d06437d96196fc68d5b4e5c246408790d537/python/sglang/srt/managers/scheduler.py\#L3277}{Scheduler}
+and \href{https://github.com/modal-projects/sglang/blob/d050d06437d96196fc68d5b4e5c246408790d537/python/sglang/srt/lora/lora_manager.py\#L361}{LoRA manager}.
+Modal fork, commit \texttt{d050d064}, 2026.
+\end{thebibliography}
+\appendix
+\section{Reproduction and Complete Results}\label{sec:reproduce}
+\input{appendix.tex}
+\end{document}

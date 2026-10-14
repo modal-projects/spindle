@@ -80,8 +80,9 @@ class DomainRouter(WorkRouter):
             )
         capacity = self.rates.decode_concurrency
         width = min(len(candidates), max(1, math.ceil(demand / capacity)))
-        # Model identity, rather than version, preserves placement across updates;
-        # all cache and residency credit still requires the exact adapter version.
+        # The balanced map places exact versions independently. The basic
+        # policy ranks by model identity to preserve placement across updates.
+        # All cache and residency credit requires the exact adapter version.
         # Eligibility can change because of one slow observation or one failed
         # request. Do not rebuild every adapter's placement on that transient
         # subset. Expire topology/catalog entries after the normal stale horizon;

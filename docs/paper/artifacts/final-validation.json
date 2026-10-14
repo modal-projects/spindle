@@ -1,0 +1,198 @@
+{
+  "completed_http2_arms": 21,
+  "logical_requests": 69568,
+  "physical_retries": 0,
+  "all_arms_observed_at_least_288_active": true,
+  "all_rl_arms_have_independent_round_overlap": true,
+  "all_exported_plot_arms_validated": 37,
+  "arms": {
+    "serving64-final-r0": {
+      "kv": {
+        "requests": 2048,
+        "physical_attempts": 2048,
+        "observed_peak_pool_active": 512,
+        "distinct_adapter_versions": 64,
+        "raw_sha256": "284da705bad4bd2e75f2e8b4a2330a09afdabf27122f2118890722797a6058eb",
+        "workload_sha256": "e901337827a88de8cf00b487ec496152dd3ea8876215ba63c9571f819a74bcaf"
+      },
+      "stable": {
+        "requests": 2048,
+        "physical_attempts": 2048,
+        "observed_peak_pool_active": 512,
+        "distinct_adapter_versions": 64,
+        "raw_sha256": "a1fdf7bf5078edf9d12335e68951d46d4eeaa51b51e3f544f17c5b1b0da426b5",
+        "workload_sha256": "e901337827a88de8cf00b487ec496152dd3ea8876215ba63c9571f819a74bcaf"
+      },
+      "default": {
+        "requests": 2048,
+        "physical_attempts": 2048,
+        "observed_peak_pool_active": 512,
+        "distinct_adapter_versions": 64,
+        "raw_sha256": "68235116581e7eb8abe813cf6350415430f60e3cf5d26e6b85b2d1be510ea8fa",
+        "workload_sha256": "e901337827a88de8cf00b487ec496152dd3ea8876215ba63c9571f819a74bcaf"
+      }
+    },
+    "serving64-final-r1": {
+      "kv": {
+        "requests": 2048,
+        "physical_attempts": 2048,
+        "observed_peak_pool_active": 512,
+        "distinct_adapter_versions": 64,
+        "raw_sha256": "001c23f78b888d0286f8e839060ff3bc32e5a28f3a92635d7f573bb0451d4a32",
+        "workload_sha256": "e901337827a88de8cf00b487ec496152dd3ea8876215ba63c9571f819a74bcaf"
+      },
+      "stable": {
+        "requests": 2048,
+        "physical_attempts": 2048,
+        "observed_peak_pool_active": 512,
+        "distinct_adapter_versions": 64,
+        "raw_sha256": "e145d7ff036db40739ad3a0e9565bd02f3664a5285c1f4e5e007dd1032081720",
+        "workload_sha256": "e901337827a88de8cf00b487ec496152dd3ea8876215ba63c9571f819a74bcaf"
+      }
+    },
+    "warm-h2-r0": {
+      "kv-cohort": {
+        "requests": 3072,
+        "physical_attempts": 3072,
+        "observed_peak_pool_active": 461,
+        "distinct_adapter_versions": 16,
+        "raw_sha256": "25d25d952fe18cfcc113fa273463b267abd77df56964f4cb16aea120f47495fb",
+        "workload_sha256": "3e29fc7cba7b277b2c2eac79b56ba2dfb924e92456fa639bc8b96e4b2eb13997"
+      },
+      "stable-cohort": {
+        "requests": 3072,
+        "physical_attempts": 3072,
+        "observed_peak_pool_active": 480,
+        "distinct_adapter_versions": 16,
+        "raw_sha256": "84ecc6e15b93d2ee0dfa70ae9b50b1814a44d584b458c686d442a7f9c7111dc7",
+        "workload_sha256": "3e29fc7cba7b277b2c2eac79b56ba2dfb924e92456fa639bc8b96e4b2eb13997"
+      }
+    },
+    "warm-h2-r1": {
+      "kv-cohort": {
+        "requests": 3072,
+        "physical_attempts": 3072,
+        "observed_peak_pool_active": 474,
+        "distinct_adapter_versions": 16,
+        "raw_sha256": "1a9a72e5a50af57d236a60c15c23bb7ae5b11add2f274cfee273a053df2f493c",
+        "workload_sha256": "3e29fc7cba7b277b2c2eac79b56ba2dfb924e92456fa639bc8b96e4b2eb13997"
+      },
+      "stable-cohort": {
+        "requests": 3072,
+        "physical_attempts": 3072,
+        "observed_peak_pool_active": 477,
+        "distinct_adapter_versions": 16,
+        "raw_sha256": "5b48adcf51d6d5bdd909846869e7399e61cb3893d946583fc1339cfa7a6fdcd4",
+        "workload_sha256": "3e29fc7cba7b277b2c2eac79b56ba2dfb924e92456fa639bc8b96e4b2eb13997"
+      }
+    },
+    "turnover-h2-r0": {
+      "kv-cohort": {
+        "requests": 4352,
+        "physical_attempts": 4352,
+        "observed_peak_pool_active": 542,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "664fb114f0cddcffabc532829f37a4bd4d819348b77c806cacad4a29a28ed838",
+        "workload_sha256": "89696cb1c2d40d7b93cf9c83277a0a5c7c33863a8ad28a37ba7aa48b40ab9372"
+      },
+      "stable-cohort": {
+        "requests": 4352,
+        "physical_attempts": 4352,
+        "observed_peak_pool_active": 600,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "92af3a703669dff34a77537546beccd92c6c5211c047279860d692478b21b5ee",
+        "workload_sha256": "89696cb1c2d40d7b93cf9c83277a0a5c7c33863a8ad28a37ba7aa48b40ab9372"
+      }
+    },
+    "turnover-h2-r1": {
+      "kv-cohort": {
+        "requests": 4352,
+        "physical_attempts": 4352,
+        "observed_peak_pool_active": 542,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "a3ed8eb68c0a379219dc1b305329b6e6295898648749565a7d53d153897522c1",
+        "workload_sha256": "89696cb1c2d40d7b93cf9c83277a0a5c7c33863a8ad28a37ba7aa48b40ab9372"
+      },
+      "stable-cohort": {
+        "requests": 4352,
+        "physical_attempts": 4352,
+        "observed_peak_pool_active": 604,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "c739fa1619228acf1f8584acc0a10aa42a07c6990ecf3473bb90eb78f4383399",
+        "workload_sha256": "89696cb1c2d40d7b93cf9c83277a0a5c7c33863a8ad28a37ba7aa48b40ab9372"
+      }
+    },
+    "dialogue-h2-r0": {
+      "kv-cohort": {
+        "requests": 4608,
+        "physical_attempts": 4608,
+        "observed_peak_pool_active": 375,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "8134c75c35c780e0ee4054782056361ff885b7a6ff3dbfdbebe737823cb237df",
+        "workload_sha256": "b1d98d3fd22ad6e6db27361a52475a0c29ec8b0ed182416be9b9c1134e6998ef"
+      },
+      "stable-cohort": {
+        "requests": 4608,
+        "physical_attempts": 4608,
+        "observed_peak_pool_active": 400,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "e35fd8a3f07cfbdcad6c048c29ac1d485897aecb1bee810a38d54d34c1e3e7cf",
+        "workload_sha256": "b1d98d3fd22ad6e6db27361a52475a0c29ec8b0ed182416be9b9c1134e6998ef"
+      }
+    },
+    "dialogue-h2-r1": {
+      "kv-cohort": {
+        "requests": 4608,
+        "physical_attempts": 4608,
+        "observed_peak_pool_active": 438,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "8cb63cbaac7695bf9d5c31d49c511ebfcba7cef3db282c6dab66e3d2dc78cd5b",
+        "workload_sha256": "b1d98d3fd22ad6e6db27361a52475a0c29ec8b0ed182416be9b9c1134e6998ef"
+      },
+      "stable-cohort": {
+        "requests": 4608,
+        "physical_attempts": 4608,
+        "observed_peak_pool_active": 428,
+        "distinct_adapter_versions": 32,
+        "raw_sha256": "0e5f8e9f9925ed8ec1a5bdf92528490f9e9ed94f4b451e444d0e7cf8ef9effa6",
+        "workload_sha256": "b1d98d3fd22ad6e6db27361a52475a0c29ec8b0ed182416be9b9c1134e6998ef"
+      }
+    },
+    "long-decode-r0": {
+      "kv-cohort": {
+        "requests": 3648,
+        "physical_attempts": 3648,
+        "observed_peak_pool_active": 552,
+        "distinct_adapter_versions": 30,
+        "raw_sha256": "7e572209ac1ff848618c448f419fbc219be4d44183c65fa12642c0ae3b03f014",
+        "workload_sha256": "a4466f11d181ce7a473e7d27b1517b6cec42468e3d1fe4ee43f1237797462e3c"
+      },
+      "stable-cohort": {
+        "requests": 4160,
+        "physical_attempts": 4160,
+        "observed_peak_pool_active": 537,
+        "distinct_adapter_versions": 31,
+        "raw_sha256": "15bb26abbf83e13eeae466f67eebcdcf3332312b37f5660d713ce6ec430bb2e5",
+        "workload_sha256": "a4466f11d181ce7a473e7d27b1517b6cec42468e3d1fe4ee43f1237797462e3c"
+      }
+    },
+    "long-decode1024-r0": {
+      "kv-cohort": {
+        "requests": 1856,
+        "physical_attempts": 1856,
+        "observed_peak_pool_active": 542,
+        "distinct_adapter_versions": 17,
+        "raw_sha256": "7b314caf397f3bdc6d4f2b3af49d218d095c1a716734e9842c761d123fedf47b",
+        "workload_sha256": "b7b1f7d5c055ca71a9520e65bc903728f886a5f9996c46b099ac49dcae568188"
+      },
+      "stable-cohort": {
+        "requests": 1536,
+        "physical_attempts": 1536,
+        "observed_peak_pool_active": 532,
+        "distinct_adapter_versions": 17,
+        "raw_sha256": "85e6766be81ae8c9c93f8657731e34544eb819b9dcbe343dba09ec29a95d22d2",
+        "workload_sha256": "b7b1f7d5c055ca71a9520e65bc903728f886a5f9996c46b099ac49dcae568188"
+      }
+    }
+  }
+}

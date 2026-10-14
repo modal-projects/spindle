@@ -1,0 +1,19 @@
+{
+  "revision": "d050d06437d96196fc68d5b4e5c246408790d537",
+  "source_files": {
+    "sglang-scheduler.py": "337835ffffab7973c17569dd8615354e41ae1ae8a1952620cf769e54adafed27",
+    "sglang-lora-manager.py": "8872e68ab74d24133cf42d7ab323205186a61f376262523ad8e8a560bb9af9be",
+    "sglang-schedule-policy.py": "03251ef87787357838058939e11f724ac40b304d933c0d79e29ed0b23c6332cd"
+  },
+  "scheduler_lines": [
+    3259,
+    3277,
+    3433,
+    3457
+  ],
+  "lora_manager_lines": [
+    361,
+    365
+  ],
+  "finding": "With overlapping loading disabled, the new-adapter union is checked against max_loras_per_batch; incompatible requests are skipped in the prefill scan. This establishes a mechanism, not a measured count of admission denials."
+}

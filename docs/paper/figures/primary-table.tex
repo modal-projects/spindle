@@ -1,0 +1,27 @@
+\begin{table*}[t]\centering\small
+\begin{tabular}{llrrrrrrr}\toprule
+Workload / trial & Policy & Replay (s) & Output tok/s & Mean (s) & p95 (s) & Rollout (s) & KV hit & Retries\\\midrule
+Warmed reuse 1 & KV+P & 289.1 & 2721 & 30.1 & 56.4 & 46.7 & 0.940 & 0 \\
+Warmed reuse 1 & Domains+P & 275.9 & 2851 & 29.9 & 58.0 & 43.5 & 0.953 & 0 \\
+Warmed reuse 2 & KV+P & 289.8 & 2714 & 33.3 & 61.0 & 48.2 & 0.930 & 0 \\
+Warmed reuse 2 & Domains+P & 284.7 & 2762 & 31.0 & 61.7 & 43.2 & 0.963 & 0 \\
+Version turnover 1 & KV+P & 355.9 & 3130 & 39.2 & 81.6 & 51.8 & 0.955 & 0 \\
+Version turnover 1 & Domains+P & 350.8 & 3176 & 28.8 & 61.3 & 37.7 & 0.970 & 0 \\
+Version turnover 2 & KV+P & 354.8 & 3140 & 39.3 & 81.0 & 49.6 & 0.956 & 0 \\
+Version turnover 2 & Domains+P & 365.0 & 3052 & 31.0 & 58.9 & 39.0 & 0.965 & 0 \\
+Dialogue 1 & KV+P & 376.8 & 3130 & 18.5 & 49.8 & 90.5 & 0.951 & 0 \\
+Dialogue 1 & Domains+P & 316.9 & 3722 & 21.4 & 43.8 & 78.8 & 0.905 & 0 \\
+Dialogue 2 & KV+P & 362.1 & 3257 & 18.7 & 50.4 & 87.5 & 0.950 & 0 \\
+Dialogue 2 & Domains+P & 295.7 & 3989 & 20.5 & 38.3 & 79.6 & 0.916 & 0 \\
+64 versions 1 & KV & 440.5 & 2381 & 60.1 & 237.6 & -- & 0.654 & 0 \\
+64 versions 1 & Domains & 270.6 & 3875 & 53.9 & 113.4 & -- & 0.542 & 0 \\
+64 versions 1 & Default & 544.2 & 1927 & 111.3 & 200.7 & -- & 0.053 & 0 \\
+64 versions 2 & KV & 427.1 & 2455 & 61.1 & 245.2 & -- & 0.649 & 0 \\
+64 versions 2 & Domains & 268.5 & 3906 & 53.8 & 116.0 & -- & 0.548 & 0 \\
+Long 512 & KV+P & 415.9 & 4491 & 71.3 & 155.5 & 99.0 & 0.970 & 0 \\
+Long 512 & Domains+P & 393.4 & 5414 & 62.2 & 137.5 & 81.3 & 0.956 & 0 \\
+Long 1,024 & KV+P & 335.0 & 5674 & 106.0 & 200.9 & 138.2 & 0.971 & 0 \\
+Long 1,024 & Domains+P & 261.6 & 6011 & 113.8 & 217.9 & 150.8 & 0.952 & 0 \\
+\bottomrule\end{tabular}
+\caption{Completed HTTP/2 comparisons, reported separately by trial. All times include any cohort preparation. Replay throughput includes recorded update waits for RL workloads; rollout latency excludes those waits. Trial 2 reverses policy order. No confidence interval is inferred from individual requests.}\label{tab:primary}
+\end{table*}

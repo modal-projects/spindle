@@ -13,6 +13,7 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--clients", type=Path, required=True)
     parser.add_argument("--after-pid", type=int, required=True)
+    parser.add_argument("--duration-seconds", type=int, default=300)
     args = parser.parse_args()
     process = Path(f"/proc/{args.after_pid}/cmdline")
     while process.exists():
@@ -28,7 +29,9 @@ def main():
             "Main suite did not finish; inspect before starting another job"
         )
     deadline = json.loads((args.root / "monitor.json").read_text())["deadline"]
-    if deadline - time.time() < 1200:
+    # Allow five minutes per arm for reset, warmup, and draining work beyond
+    # the arrival window. The independent monitor remains the hard deadline.
+    if deadline - time.time() < 2 * args.duration_seconds + 600:
         raise RuntimeError(
             "Insufficient bounded allocation for the longer-output control"
         )
@@ -69,7 +72,7 @@ def main():
         "--rounds",
         "100",
         "--duration-seconds",
-        "300",
+        str(args.duration_seconds),
         "--warm-prefixes",
         "--cold-versions",
         "--large-group-clients",

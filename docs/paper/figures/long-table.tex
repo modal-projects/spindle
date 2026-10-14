@@ -1,0 +1,10 @@
+\begin{table*}[t]\centering\small\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrrrrr}\toprule
+Output tokens & Policy & Requests & Window completions & Window tok/s & Window mean (s) & Loads / 1k\\\midrule
+512 & KV+P & 3648 & 2389 & 5097 & 71.2 & 16.4 \\
+512 & Domains+P & 4160 & 2887 & 6159 & 66.5 & 23.8 \\
+1,024 & KV+P & 1856 & 1068 & 9114 & 97.2 & 2.7 \\
+1,024 & Domains+P & 1536 & 889 & 7586 & 106.0 & 21.5 \\
+\bottomrule\end{tabular}
+\caption{Longer-output controls. Window metrics use completions from 60 seconds to the arrival-window end: 300 seconds for 512-token outputs and 180 seconds for 1,024-token outputs. Admitted work drains afterward. Total work depends on policy, so loads are normalized by logical requests. Each output length has one trial.}\label{tab:long}
+\end{table*}
