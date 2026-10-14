@@ -104,6 +104,20 @@ def analyzed(data):
         i: float(np.mean([r["seconds"] for r in data["rollouts"] if r["client"] == i]))
         for i in sorted({r["client"] for r in data.get("rollouts", [])})
     }
+    if data["config"].get("dialogue_turns", 1) > 1:
+        rollouts = {(r["client"], r["round"]): r for r in data["rollouts"]}
+        final_turn = max(r["dialogue_turn"] for r in rows)
+        finished = [r for r in rows if r["dialogue_turn"] == final_turn]
+        result["mean_trajectory_completion_s"] = float(
+            np.mean(
+                [r["end"] - rollouts[r["client"], r["turn"]]["start"] for r in finished]
+            )
+        )
+        result["mean_finished_trajectory_wait_for_rollout_s"] = float(
+            np.mean(
+                [rollouts[r["client"], r["turn"]]["end"] - r["end"] for r in finished]
+            )
+        )
     snapshots = [
         s for o in data["observations"] if "replicas" in o for s in o["replicas"]
     ]
@@ -117,6 +131,51 @@ def analyzed(data):
         for s in snapshots
     ]
     result["routing_state_json_mean_bytes"] = float(np.mean(sizes)) if sizes else None
+    native = [
+        [
+            sum(
+                load["num_running_reqs"] + load["num_waiting_reqs"]
+                for load in state["engine"]["loads"]
+            )
+            for state in observation["replicas"]
+        ]
+        for observation in data["observations"]
+        if "replicas" in observation
+    ]
+    busy_native = [
+        np.array(v) for v in native if sum(v) >= result["busy_snapshot_threshold"]
+    ]
+    result["native_busy_snapshot_count"] = len(busy_native)
+    result["native_busy_load_cv"] = (
+        float(np.mean([v.std() / v.mean() for v in busy_native]))
+        if busy_native
+        else None
+    )
+    result["native_busy_idle_fraction"] = (
+        float(np.mean([np.any(v == 0) for v in busy_native])) if busy_native else None
+    )
+    queued = [
+        load
+        for state in snapshots
+        for load in state["engine"]["loads"]
+        if load["num_waiting_reqs"] > 0
+    ]
+    result["native_queued_replica_observations"] = len(queued)
+    result["native_mean_running_requests_when_queued"] = (
+        float(np.mean([v["num_running_reqs"] for v in queued])) if queued else None
+    )
+    result["native_mean_waiting_requests_when_queued"] = (
+        float(np.mean([v["num_waiting_reqs"] for v in queued])) if queued else None
+    )
+    result["native_fraction_queued_below_half_running_capacity"] = (
+        float(
+            np.mean(
+                [v["num_running_reqs"] < v["max_running_requests"] / 2 for v in queued]
+            )
+        )
+        if queued
+        else None
+    )
     return result
 
 
@@ -138,7 +197,7 @@ def latex_tables(summaries, output):
         for w, label in names.items()
         for r in (0, 1)
     ] + [(f"serving64-final-r{r}", f"64 versions {r + 1}") for r in (0, 1)]
-    primary += [("long-decode-r0", "Long decode")]
+    primary += [("long-decode-r0", "Long 512"), ("long-decode1024-r0", "Long 1,024")]
     header = [
         r"\begin{table*}[t]\centering\small",
         r"\begin{tabular}{llrrrrrrr}\toprule",
@@ -297,17 +356,12 @@ def figures(runs, output):
                 color="#2459a6",
             )
         )
+    ax.plot([8.25, 8.25, 1.3], [0.78, 0.4, 0.4], color="#24845b", ls="--", lw=1)
     ax.annotate(
         "",
-        xy=(1.3, 0.75),
-        xytext=(8.25, 0.75),
-        arrowprops=dict(
-            arrowstyle="->",
-            connectionstyle="bar,fraction=0.08",
-            color="#24845b",
-            ls="--",
-            lw=1,
-        ),
+        xy=(1.3, 0.78),
+        xytext=(1.3, 0.4),
+        arrowprops=dict(arrowstyle="->", color="#24845b", ls="--", lw=1),
     )
     ax.text(
         4.8,
@@ -594,6 +648,7 @@ def main():
         "cohort-pilot",
         "serving64-r0",
         "serving64-balanced-pilot",
+        "serving64-single-h2-client-pilot",
         "turnover-r0",
         "warm-r0",
         "dialogue-r0",
@@ -609,6 +664,7 @@ def main():
         "dialogue-h2-r0",
         "dialogue-h2-r1",
         "long-decode-r0",
+        "long-decode1024-r0",
     )
     for folder in folders:
         for arm in ARMS:
@@ -628,6 +684,13 @@ def main():
             runs.setdefault(folder, {})[arm] = data
         hashes = {d.get("workload_sha256") for d in runs.get(folder, {}).values()}
         assert len(hashes) <= 1, (folder, "Workload definitions differ", hashes)
+    for stem in ("warm-h2", "turnover-h2", "dialogue-h2", "serving64-final"):
+        hashes = {
+            data["workload_sha256"]
+            for trial in (0, 1)
+            for data in runs.get(f"{stem}-r{trial}", {}).values()
+        }
+        assert len(hashes) <= 1, (stem, "Repeated workload definitions differ", hashes)
     (args.output / "metrics.json").write_text(json.dumps(summaries, indent=2) + "\n")
     flat = [
         dict(

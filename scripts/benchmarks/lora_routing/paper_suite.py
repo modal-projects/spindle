@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--clients", type=Path, required=True)
     parser.add_argument("--phase", choices=("initial", "http2"), default="initial")
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     common = [
         sys.executable,
@@ -139,13 +140,21 @@ def main():
             "--output",
             str(args.root / "cohort-http2-correctness.json"),
         ]
-        with (args.root / "http2-correctness.log").open("w") as log:
-            subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
-    manifest = []
+        if not args.resume:
+            with (args.root / "http2-correctness.log").open("w") as log:
+                subprocess.run(
+                    command, stdout=log, stderr=subprocess.STDOUT, check=True
+                )
     target = args.root / (
         "suite-http2-manifest.json" if args.phase == "http2" else "suite-manifest.json"
     )
+    manifest = json.loads(target.read_text()) if args.resume else []
+    if any(r["status"] != "complete" for r in manifest):
+        raise RuntimeError("Preserve and resolve interrupted records before resuming")
+    completed = {r["name"] for r in manifest}
     for name, shape, arms in jobs:
+        if name in completed:
+            continue
         deadline = json.loads((args.root / "monitor.json").read_text())["deadline"]
         if deadline - time.time() < (
             1200 if shape == "long" or len(arms) == 3 else 900

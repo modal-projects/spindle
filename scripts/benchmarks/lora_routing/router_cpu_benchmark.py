@@ -1,6 +1,7 @@
 """CPU cost of routing against synthetic snapshots; no GPU scaling claim."""
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import statistics
@@ -17,10 +18,71 @@ async def empty():
     return []
 
 
+def correlated_burst():
+    """Exercise correlated decisions without exchanging the local reservations."""
+    loads = Counter({f"h{i}": 0 for i in range(8)})
+    adapter = "hot/weight_v000004"
+    prompt = list(range(8192))
+    prefixes = token_prefixes(adapter, prompt)
+    for frontend in range(8):
+        router = DomainRouter(
+            empty,
+            rates=WorkRates(8706, 1065, 0.067, 1.87, 36),
+            balanced=True,
+            stable=True,
+        )
+        router.updated = time.monotonic()
+        router.replicas = {
+            host: Replica(
+                host,
+                work=dict(
+                    age_seconds=0,
+                    prefixes=frozenset(),
+                    prefill_tokens=0,
+                    decode_tokens=0,
+                    pending_adapters=[],
+                    request_ids=frozenset(),
+                    cpu_adapters=[],
+                    gpu_adapters=[],
+                ),
+            )
+            for host in loads
+        }
+        for index in range(36):
+            host = router.select_destination(
+                "hot",
+                adapter,
+                f"affinity-{frontend}",
+                prompt=prompt,
+                prefixes=prefixes,
+                output_tokens=256,
+                reservation_id=f"{frontend}-{index}",
+                group_id=f"group-{frontend}",
+                group_size=36,
+                sample_index=index,
+            )
+            loads[host] += 1
+    return dict(
+        kind="CPU-only deterministic stale-view counterexample; no service-time or GPU measurement",
+        frontends=8,
+        replicas=8,
+        group_size=36,
+        capacity_per_replica=36,
+        loads=dict(loads),
+        total=sum(loads.values()),
+    )
+
+
 def run():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--correlated-burst", action="store_true")
     args = parser.parse_args()
+    if args.correlated_burst:
+        result = correlated_burst()
+        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        print(json.dumps(result, indent=2))
+        return
     results = []
     prompt = list(range(8192))
     adapters = [f"model-{i}/weight_v000004" for i in range(64)]

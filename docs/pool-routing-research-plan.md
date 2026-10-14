@@ -92,3 +92,44 @@ The independent monitor was handed off without a gap to an absolute deadline
 225 minutes (30 GPU-hours), still below the user's 48-GPU peak limit. No
 additional inference pool or training GPUs are allocated. The handoff and
 eventual zero-GPU audit are preserved with the results.
+
+## Allocation and decode-length amendment, October 14 at 02:46 UTC
+
+The first HTTP/2 warmed and dialogue comparisons completed without retries.
+Their results are mixed and are not sufficient to infer a universal speedup.
+The 64-version default control is substantially slower, leaving insufficient
+time for all reversed-order controls under the earlier deadline. A verified
+monitor handoff extends the absolute deadline by a further 60 minutes, to
+05:11:11 UTC: 285 monitor minutes, at most eight GPUs, or a 38 GPU-hour bound.
+No extra replicas are allocated. `monitor-handoff-final.json` records the handoff.
+
+After the nine-job HTTP/2 suite successfully exits, `paper_long_decode.py`
+may run one additional control with 1,024-token outputs. It preserves the
+version-turnover client shape, independent loops, 8,192-token prompts, 1,088
+potential concurrent sequences, and a 300-second window for starting rollouts.
+It drains submitted work and reports both the full replay and completions in
+the 60–300-second window. Each policy may complete a different number of
+rollouts because the workload is closed-loop. No new control starts with less
+than 1,200 seconds before the monitor deadline; failures require investigation.
+This control is specified before its results exist and does not replace any
+earlier negative measurement.
+
+## General-serving transport correction, October 14 at 03:00 UTC
+
+The first general-serving HTTP/2 default arm completed, but it did not saturate
+the pool: observed active requests peaked at 82 and observation gaps reached
+180 seconds despite 512 logical streams. The generation and observer requests
+shared one HTTP/2 client. A live remote diagnostic confirmed HTTPcore 1.0.9's
+effective 100-stream cap, even though the server advertises 1,024 streams.
+That arm is preserved in `serving64-single-h2-client-pilot`; the partial KV arm
+was canceled and all engine queues were verified drained.
+
+The corrected general-serving comparison uses eight independent HTTP/2 clients,
+one per router shard, and a separate observer client for every policy. It must
+observe at least the pool's 288-request running capacity in active admissions.
+The RL experiments already use eight distinct frontend clients and are retained;
+their request paths do not change. The resumed suite skips the two completed RL
+comparisons and reruns every general-serving arm. The earlier manifest,
+interruption record, remote stream-limit diagnostic, and failure logs remain
+available. No throughput comparison across the two client topologies is called
+a routing gain.

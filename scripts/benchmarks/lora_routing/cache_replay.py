@@ -6,7 +6,7 @@ replay the same seeded prompts and fixed output lengths under each policy.
 
 import argparse
 import asyncio
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
 import hashlib
 import json
 import math
@@ -393,13 +393,37 @@ async def run_arm(pool, arm, clients, config):
         for _ in range(8)
     ]
     deadline = time.monotonic() + 1100
-    async with httpx.AsyncClient(
-        headers=proxy_auth_headers(),
-        http2=config.get("http2", False),
-        timeout=900,
-        trust_env=False,
-        limits=httpx.Limits(max_connections=1024, max_keepalive_connections=512),
-    ) as client:
+    async with (
+        httpx.AsyncClient(
+            headers=proxy_auth_headers(),
+            http2=config.get("http2", False),
+            timeout=900,
+            trust_env=False,
+            limits=httpx.Limits(max_connections=1024, max_keepalive_connections=512),
+        ) as client,
+        AsyncExitStack() as client_stack,
+    ):
+        # HTTPcore caps one HTTP/2 connection at 100 streams even when the
+        # server advertises more. Keep generation shards and observations on
+        # separate connections so a 512-stream replay reaches the engines.
+        generation_clients = (
+            [
+                await client_stack.enter_async_context(
+                    httpx.AsyncClient(
+                        headers=proxy_auth_headers(),
+                        http2=True,
+                        timeout=900,
+                        trust_env=False,
+                        limits=httpx.Limits(
+                            max_connections=128, max_keepalive_connections=128
+                        ),
+                    )
+                )
+                for _ in range(config["http2_client_shards"])
+            ]
+            if config.get("http2_client_shards")
+            else [client]
+        )
         while time.monotonic() < deadline:
             await routers[0]._refresh()
             if len(routers[0].replicas) == 8:
@@ -663,7 +687,7 @@ async def run_arm(pool, arm, clients, config):
                 result = await sample_task(
                     task,
                     gateway,
-                    client=client,
+                    client=generation_clients[index % len(generation_clients)],
                     lora_router=routers[index % 8]
                     if policy
                     in {
@@ -780,9 +804,41 @@ async def run_arm(pool, arm, clients, config):
                     await observer
         elapsed = time.monotonic() - started
         final = await inspect()
+        if error is None:
+            # Native load counters may lag the last completed decode batch.
+            # Settle the final observation after freezing the measured timer.
+            drain_deadline = time.monotonic() + 10
+            while any(
+                s["active"]
+                or any(
+                    v["num_running_reqs"] or v["num_waiting_reqs"]
+                    for v in s["engine"]["loads"]
+                )
+                for s in final
+            ):
+                if time.monotonic() >= drain_deadline:
+                    raise RuntimeError(
+                        "Completed replay did not drain native engine queues"
+                    )
+                await asyncio.sleep(0.1)
+                final = await inspect()
         await asyncio.gather(*(router.aclose() for router in routers))
         if error is None:
             assert all(s["active"] == 0 for s in final)
+            if config.get("http2_client_shards"):
+                capacity = sum(
+                    load["max_running_requests"]
+                    for state in baseline
+                    for load in state["engine"]["loads"]
+                )
+                assert (
+                    max(
+                        sum(s["active"] for s in o["replicas"])
+                        for o in observations
+                        if "replicas" in o
+                    )
+                    >= capacity
+                ), "General-serving replay did not reach pool admission pressure"
             if config.get("http2"):
                 assert all(
                     any(
@@ -956,6 +1012,8 @@ def main():
     config["request_timeout"] = args.request_timeout
     if args.http2:
         config["http2"] = True
+        if args.workload != "dapo":
+            config["http2_client_shards"] = 8
     root = Path(__file__).resolve().parents[3]
     config["source_sha256"] = {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
