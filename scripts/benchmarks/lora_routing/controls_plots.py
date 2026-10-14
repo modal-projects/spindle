@@ -79,7 +79,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update(
         {
-            "font.size": 9,
+            "font.size": 11,
             "axes.spines.top": False,
             "axes.spines.right": False,
             "pdf.fonttype": 42,
@@ -132,11 +132,17 @@ def main():
             else:
                 values = [arms[a][key] for a in ordered]
             ax.barh(labels, values, color=colors)
+            ax.tick_params(axis="y", labelleft=ax in axes[:, 0])
             ax.invert_yaxis()
             ax.set_xlabel(title)
             ax.grid(axis="x", alpha=0.2)
             ax.set_axisbelow(True)
-        fig.suptitle(job + ": one screening trial per policy")
+        title = (
+            "64-version serving" if job.startswith("screen-serving64")
+            else "Three-turn rollouts" if job.startswith("screen-dialogue")
+            else "Independent long rollouts"
+        )
+        fig.suptitle(title + ": one exploratory trial per policy")
         save(fig, args.output / (job + "-controls"))
 
         fig, axes = plt.subplots(

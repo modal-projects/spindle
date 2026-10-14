@@ -20,9 +20,29 @@ def summarize_live(root, observations=None):
     assert result["nonzero_gradient_updates"] == result["updates"]
     if cfg["updates"] >= 3:
         assert result["clients_sampling_updated_policies"] == result["clients"]
-    groups, rollouts, traces, files = [], [], [], []
+    groups, rollouts, traces, files, update_events, restored_states = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
+    source_hashes = set()
     for folder in sorted(root.glob("client-*/")):
         trace = events(folder / "events.jsonl")
+        manifest = json.loads((folder / "manifest.json").read_text())
+        source_hashes.add(tuple(sorted(manifest["source_sha256"].items())))
+        if cfg.get("initial_state_paths"):
+            restored = [r for r in trace if r["event"] == "initial_state_loaded"]
+            expected = cfg["initial_state_paths"][manifest["client_index"]]
+            assert len(restored) == 1 and restored[0]["path"] == expected
+            restored_states.append(dict(client=folder.name, **restored[0]))
+        update_events.extend(
+            dict(client=folder.name, update=r["update"], time=r["time"])
+            for r in trace
+            if r["event"] == "update_done"
+        )
         traces.append(trace)
         rollouts.extend(r for r in trace if r["event"] == "rollout_done")
         for path in sorted(folder.glob("group-*.json.gz")):
@@ -52,6 +72,7 @@ def summarize_live(root, observations=None):
                 }
             )
     lengths = [n for g in groups for n in g["output_lengths"]]
+    assert len(source_hashes) == 1
     assert sum(lengths) == result["output_tokens"]
     assert all(0 < n <= cfg["max_tokens"] for n in lengths)
     trained = sum(r["used_output_tokens"] for r in rollouts)
@@ -65,6 +86,9 @@ def summarize_live(root, observations=None):
         if r["event"] == "publish" and r["update"] > 0
     ]
     result.update(
+        source_sha256=dict(next(iter(source_hashes))),
+        restored_initial_states=restored_states,
+        update_events=update_events,
         sequences=len(lengths),
         trained_output_tokens=trained,
         trained_output_tokens_per_second=trained / result["elapsed_seconds"],
@@ -186,9 +210,37 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--observations", type=Path)
+    parser.add_argument("--deployment", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     result = summarize_live(args.root, args.observations)
+    if args.deployment:
+        deployment = json.loads(args.deployment.read_text())
+        recipe = deployment["recipe"]
+        result["routing_policy"] = recipe["inference_lora_routing"]
+        result["deployment_hardware"] = {
+            name: recipe[name]
+            for name in (
+                "model",
+                "max_context_length",
+                "trainer_gpu",
+                "trainer_gpus_per_node",
+                "trainer_nodes",
+                "trainer_cpu",
+                "trainer_memory_mib",
+                "trainer_max_clients_per_instance",
+                "inference_gpu",
+                "inference_gpus_per_node",
+                "inference_cpu",
+                "inference_memory_mib",
+                "inference_min_replicas",
+                "inference_max_replicas",
+                "inference_target_concurrency",
+                "inference_http2",
+                "miles_cfg",
+                "sglang_cfg",
+            )
+        }
     write(args.output, result)
     print(
         json.dumps(

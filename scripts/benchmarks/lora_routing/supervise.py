@@ -62,6 +62,19 @@ async def resources(environment, owned, known, since=0.0):
     return known
 
 
+def interrupted_trainer(known, started, updates, expected_updates):
+    if sum(updates) >= expected_updates:
+        return None
+    return next(
+        (
+            row["task_id"]
+            for row in known.values()
+            if row["gpu_count"] > 1 and row["finished_at"] > started
+        ),
+        None,
+    )
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, required=True)
@@ -70,6 +83,12 @@ def main():
     p.add_argument("--clients", type=int, default=16)
     p.add_argument("--stagger-seconds", type=float, default=5.0)
     p.add_argument("--hours", type=float, default=0.5)
+    p.add_argument("--initialization-timeout", type=float, default=1200)
+    p.add_argument(
+        "--require-stable-trainer",
+        action="store_true",
+        help="Fail an evaluation if its multinode/multi-GPU trainer exits before all updates",
+    )
     p.add_argument("--environment", default="lilo-deploy")
     p.add_argument("--owned-apps", nargs="+", required=True)
     p.add_argument(
@@ -147,6 +166,8 @@ def main():
             now = time.time()
             if stop or (args.root / "STOP_NOW").exists():
                 raise RuntimeError("Stop requested")
+            if anchor is None and now - state["started"] > args.initialization_timeout:
+                raise TimeoutError("First training client did not become ready")
             if now - state["started"] > args.hours * 3600:
                 raise TimeoutError("Experiment deadline")
             traces = [
@@ -202,6 +223,17 @@ def main():
                     write(args.root / "gpu-lifetimes.json", list(known.values()))
                 except Exception as exc:
                     state["resource_error"] = str(exc)
+            if args.require_stable_trainer:
+                interrupted = interrupted_trainer(
+                    known,
+                    state["started"],
+                    state["updates"],
+                    args.clients * config["updates"],
+                )
+                if interrupted:
+                    raise RuntimeError(
+                        f"Trainer {interrupted} exited before all updates"
+                    )
             if len(processes) == args.clients and all(c.poll() == 0 for c in processes):
                 break
             time.sleep(5)

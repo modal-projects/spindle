@@ -38,7 +38,7 @@ def source_hashes():
     return {p: hashlib.sha256((root / p).read_bytes()).hexdigest() for p in SOURCES}
 
 
-def make_jobs(candidate, controls, trials=5):
+def make_jobs(candidate, controls, trials=5, seed_start=14101):
     policies = ("kv", *controls, candidate)
     if len(set(policies)) != len(policies) or any(
         p.endswith("-cohort") for p in policies
@@ -128,7 +128,7 @@ def make_jobs(candidate, controls, trials=5):
                     clients=clients,
                     minimum_remaining_seconds=minimum_remaining * len(policies) / 3,
                     arguments=arguments
-                    + ["--seed", str(14101 + trial), "--vary-placement"],
+                    + ["--seed", str(seed_start + trial), "--vary-placement"],
                     arms=list(order),
                     trial=trial,
                     family=name,
@@ -142,13 +142,14 @@ def main():
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--controls", nargs="+", required=True)
     parser.add_argument("--trials", type=int, choices=(3, 5), default=5)
+    parser.add_argument("--seed-start", type=int, default=14101)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--partition", type=int, default=1)
     parser.add_argument("--http2", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     if args.output.exists() or args.partition < 1:
         raise ValueError("Use a new output directory and a positive partition count")
-    jobs = make_jobs(args.candidate, args.controls, args.trials)
+    jobs = make_jobs(args.candidate, args.controls, args.trials, args.seed_start)
     for job in jobs:
         job["http2"] = args.http2
     args.output.mkdir(parents=True)

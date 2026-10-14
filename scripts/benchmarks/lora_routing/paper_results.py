@@ -61,7 +61,9 @@ def analyzed(data):
         versions.setdefault(row["model_id"], set()).add(row["version"])
     result["distinct_adapter_versions"] = sum(len(v) for v in versions.values())
     result["distinct_model_ids"] = len(versions)
-    result["clients_with_multiple_versions"] = sum(len(v) > 1 for v in versions.values())
+    result["clients_with_multiple_versions"] = sum(
+        len(v) > 1 for v in versions.values()
+    )
     auxiliary = sum(
         p["prompt_tokens"] - p["meta"]["cached_tokens"]
         for p in data.get("prefills", [])
@@ -326,7 +328,7 @@ def latex_tables(summaries, output):
     (output / "long-table.tex").write_text("\n".join(text) + "\n")
 
 
-def rolling(data, width=20):
+def rolling(data, width=20, max_observation_gap=None):
     rows = data["requests"]
     x = np.arange(5, data["seconds"] + 1, 5)
     metrics = {k: [] for k in ("cache", "latency", "throughput", "lora")}
@@ -342,6 +344,11 @@ def rolling(data, width=20):
     times = np.array([t for t, _ in polls])
     hits = np.array([s["request_lora_hits"] for _, s in polls])
     admits = hits + np.array([s["request_lora_misses"] for _, s in polls])
+    gaps = [
+        (a, b)
+        for a, b in zip(times, times[1:])
+        if max_observation_gap is not None and b - a > max_observation_gap
+    ]
     for end in x:
         begin = max(0, end - width)
         selected = [r for r in rows if begin <= r["end"] < end]
@@ -360,21 +367,22 @@ def rolling(data, width=20):
         count = np.interp(end, times, admits) - np.interp(begin, times, admits)
         metrics["lora"].append(
             (np.interp(end, times, hits) - np.interp(begin, times, hits)) / count
-            if count > 0
+            if count > 0 and not any(a < end and b > begin for a, b in gaps)
             else np.nan
         )
     return x, metrics
 
 
-def export_plot_values(runs, output):
+def export_plot_values(runs, output, max_observation_gap=None):
     """Share plotted values without prompts, generated text, or checkpoint paths."""
     values = {}
     for workload, arms in runs.items():
         for arm, data in arms.items():
-            times, curves = rolling(data)
+            times, curves = rolling(data, max_observation_gap=max_observation_gap)
             values.setdefault(workload, {})[arm] = {
                 "time_seconds": times.tolist(),
                 "window_seconds": 20,
+                "max_observation_gap_seconds": max_observation_gap,
                 "rolling": {
                     metric: [float(v) if np.isfinite(v) else None for v in curve]
                     for metric, curve in curves.items()

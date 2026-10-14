@@ -72,6 +72,7 @@ def main():
     )
     parser.add_argument("--work-rates", type=Path, required=True)
     parser.add_argument("--trainer-gpu", choices=["H100", "H200"], default="H200")
+    parser.add_argument("--trainer-gpus", type=int, choices=[4, 8], default=8)
     parser.add_argument("--trainer-tp", type=int, choices=[2, 4], default=2)
     parser.add_argument(
         "--region", choices=["us-west", "us-east", "any"], default="us-west"
@@ -94,6 +95,7 @@ def main():
         name=f"routing27-live-{args.run}",
         inference_lora_routing=args.policy,
         trainer_gpu=args.trainer_gpu,
+        trainer_gpus_per_node=args.trainer_gpus,
         inference_routing_work_rates=json.loads(args.work_rates.read_text()),
         overrides={
             "platform.frontend": f"spindle-routing27-live-{args.run}",

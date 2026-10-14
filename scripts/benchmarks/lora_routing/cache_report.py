@@ -255,6 +255,12 @@ def summarize(data):
         if "selection_seconds" in a["attrs"].get("routing", {})
     ]
     snapshot_times = [s["work"]["snapshot_seconds"] for s in snapshots if s.get("work")]
+    dispatch_delays = [
+        a["attrs"]["http_trace"][0]["t"] - a["t0"]
+        for row in rows
+        for a in row["attempts"]
+        if a["attrs"].get("http_trace")
+    ]
     return {
         "requests": expected,
         "stale_final_native_loads": stale_final_loads,
@@ -291,6 +297,12 @@ def summarize(data):
         else None,
         "routing_selection_p95_us": float(np.quantile(selections, 0.95) * 1e6)
         if selections
+        else None,
+        "attempt_to_first_http_event_mean_s": float(np.mean(dispatch_delays))
+        if dispatch_delays
+        else None,
+        "attempt_to_first_http_event_p95_s": float(np.quantile(dispatch_delays, 0.95))
+        if dispatch_delays
         else None,
         "snapshot_p95_ms": float(np.quantile(snapshot_times, 0.95) * 1e3)
         if snapshot_times

@@ -139,23 +139,35 @@ def long_prompt(source, round_index, group_index):
     return shared + suffix
 
 
+async def claim_execution(executions, key):
+    """A benchmark input cannot safely replay after a worker disappears."""
+    claimed = await executions.put.aio(
+        key, os.environ["MODAL_TASK_ID"], skip_if_exists=True
+    )
+    if not claimed:
+        raise RuntimeError(
+            f"Benchmark worker was rescheduled for {key}; preserve the interrupted arm"
+        )
+
+
 @app.function(
     image=image,
     cpu=2,
     memory=8192,
-    region="us-west",
+    region="us-east",
     secrets=[modal.Secret.from_name("lilo-proxy")],
     max_containers=8,
     timeout=2400,
     nonpreemptible=True,
 )
-async def run_training_frontend(pool, arm, clients, config, startup, shard):
+async def run_training_frontend(pool, arm, clients, config, startup, shard, executions):
     """Two independent DAPO clients per real CPU container; one router per pool.
 
     Replay real prompts and saved policies. Recorded train/publication intervals
     are delays, not new optimizer work. One rollout is prefetched while that
     client's update proceeds, matching client.py without cross-client barriers.
     """
+    await claim_execution(executions, f"{pool}/{arm}/frontend-{shard}")
     policy = arm.removesuffix("-cohort")
     h2_diagnostics.enable()
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
@@ -404,12 +416,13 @@ async def run_training_frontend(pool, arm, clients, config, startup, shard):
     image=image,
     cpu=8,
     memory=16384,
-    region="us-west",
+    region="us-east",
     secrets=[modal.Secret.from_name("lilo-proxy")],
     timeout=3600,
     nonpreemptible=True,
 )
-async def run_arm(pool, arm, clients, config):
+async def run_arm(pool, arm, clients, config, executions):
+    await claim_execution(executions, f"{pool}/{arm}/controller")
     policy = arm.removesuffix("-cohort")
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     routers = [make_router(pool, gateway, arm, config) for _ in range(8)]
@@ -424,6 +437,17 @@ async def run_arm(pool, arm, clients, config):
         ) as client,
         AsyncExitStack() as client_stack,
     ):
+        # Short setup responses can be reset by the Flash HTTP/2 path. Keep
+        # catalog reset and prefix warming on HTTP/1.1, outside the timed arm;
+        # generation and observations retain the selected measured transport.
+        setup_client = await client_stack.enter_async_context(
+            httpx.AsyncClient(
+                headers=proxy_auth_headers(),
+                http2=False,
+                timeout=900,
+                trust_env=False,
+            )
+        )
         # HTTPcore caps one HTTP/2 connection at 100 streams even when the
         # server advertises more. Keep generation shards and observations on
         # separate connections so a 512-stream replay reaches the engines.
@@ -479,7 +503,7 @@ async def run_arm(pool, arm, clients, config):
         async def warm(replica):
             registered = previous[replica.replica_id]["work"]["cpu_adapters"]
             if registered:
-                response = await client.post(
+                response = await setup_client.post(
                     gateway + "/benchmark-unregister",
                     headers={"Modal-Flash-Upstream": replica.upstream},
                     json={"adapters": registered},
@@ -491,7 +515,7 @@ async def run_arm(pool, arm, clients, config):
                     if config.get("cold_versions")
                     else source["versions"]
                 ):
-                    response = await client.post(
+                    response = await setup_client.post(
                         gateway + "/generate",
                         headers={"Modal-Flash-Upstream": replica.upstream},
                         json={
@@ -518,7 +542,7 @@ async def run_arm(pool, arm, clients, config):
                     )
             # Engine health probes also use the base-model slot. Materialize it
             # explicitly so every trial starts with exactly the same GPU set.
-            response = await client.post(
+            response = await setup_client.post(
                 gateway + "/generate",
                 headers={"Modal-Flash-Upstream": replica.upstream},
                 json={
@@ -531,7 +555,7 @@ async def run_arm(pool, arm, clients, config):
                 },
             )
             response.raise_for_status()
-            response = await client.post(
+            response = await setup_client.post(
                 gateway + "/benchmark-flush-cache",
                 headers={"Modal-Flash-Upstream": replica.upstream},
             )
@@ -570,7 +594,7 @@ async def run_arm(pool, arm, clients, config):
                                 ),
                             ),
                         )
-                        result = await sample_task(task, gateway, client=client)
+                        result = await sample_task(task, gateway, client=setup_client)
                         warmup.append(
                             dict(
                                 client=source["client_index"],
@@ -782,7 +806,7 @@ async def run_arm(pool, arm, clients, config):
 
         async def frontend(shard, startup):
             result = await run_training_frontend.remote.aio(
-                pool, arm, clients[shard::8], config, startup, shard
+                pool, arm, clients[shard::8], config, startup, shard, executions
             )
             requests.extend(result["requests"])
             return result
@@ -1099,10 +1123,10 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
 
-    async def run():
+    async def run(executions):
         async def one(pool):
             result = await run_arm.remote.aio(
-                pool["pool"], pool["arm"], clients, config
+                pool["pool"], pool["arm"], clients, config, executions
             )
             (args.output / f"{pool['arm']}.json").write_text(json.dumps(result) + "\n")
             return result
@@ -1118,8 +1142,8 @@ def main():
         return await asyncio.gather(*(one(p) for p in pools))
 
     try:
-        with modal.enable_output(), app.run():
-            results = asyncio.run(run())
+        with modal.enable_output(), app.run(), modal.Dict.ephemeral() as executions:
+            results = asyncio.run(run(executions))
             if any(result.get("error") for result in results):
                 raise RuntimeError("Incomplete benchmark; inspect saved arm results")
     finally:

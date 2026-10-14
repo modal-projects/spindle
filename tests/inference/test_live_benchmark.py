@@ -1,7 +1,10 @@
 from pathlib import Path
 import json
+import asyncio
 import runpy
 import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -113,3 +116,33 @@ def test_state_preparation_preserves_saved_states_and_keeps_trainer_nonempty(
     measured = json.loads((output / "measured-config.json").read_text())
     assert measured["initial_state_paths"] == [f"saved-{i}" for i in range(4)]
     assert measured["save_initial_state"] is False
+
+
+def test_benchmark_reschedule_fails_before_reset_or_generation(monkeypatch):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    monkeypatch.setenv("MODAL_TASK_ID", "replacement-worker")
+    scope = runpy.run_path(str(BENCHMARK / "cache_replay.py"))
+    executions = SimpleNamespace(put=SimpleNamespace(aio=AsyncMock(return_value=False)))
+    for function, arguments in (
+        (scope["run_arm"], ("pool", "kv", [], {}, executions)),
+        (scope["run_training_frontend"], ("pool", "kv", [], {}, None, 0, executions)),
+    ):
+        # Empty workload/config and no startup queue would fail if execution
+        # reached setup. A rescheduled input must fail at its persistent claim.
+        with pytest.raises(RuntimeError, match="Benchmark worker was rescheduled"):
+            asyncio.run(function.local(*arguments))
+
+
+def test_live_trainer_exit_invalidates_only_unfinished_arm(monkeypatch):
+    monkeypatch.syspath_prepend(str(BENCHMARK))
+    scope = runpy.run_path(str(BENCHMARK / "supervise.py"))
+    check = scope["interrupted_trainer"]
+    known = {
+        "old": dict(task_id="old", gpu_count=8, finished_at=90),
+        "inference": dict(task_id="inference", gpu_count=1, finished_at=110),
+        "trainer": dict(task_id="trainer", gpu_count=8, finished_at=0),
+    }
+    assert check(known, 100, [1, 0], 4) is None
+    known["trainer"]["finished_at"] = 120
+    assert check(known, 100, [1, 1], 4) == "trainer"
+    assert check(known, 100, [2, 2], 4) is None
