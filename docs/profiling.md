@@ -115,9 +115,9 @@ Trainer marks, in order (`component` in parentheses):
 
 | Mark | Phase that ends here |
 | --- | --- |
-| `trainer_function_entered` (trainer) | Container boot and Modal runtime start. The line also carries `queue_s`, the wait between the control plane requesting the trainer and the container starting, once the engine record is read. |
+| `trainer_function_entered` (trainer) | Container boot and Modal runtime start. |
 | `assets_reloaded` / `ray_cluster_joined` (trainer) | Volume reload, or Ray cluster formation for multi-node trainers. |
-| `backend_spawned` (trainer) | Backend process launched. |
+| `backend_spawned`, `engine_record_starting` (trainer) | Backend process launched. `engine_record_starting` carries `queue_s`, the wait between the control plane requesting the trainer and the container's process starting. |
 | `backend_imports_done` (trainer-backend) | Importing Torch, Megatron and Miles. |
 | `miles_args_parsed`, `ray_started`, `ray_workers_launched` (trainer-backend) | Ray startup and per-GPU worker actors. |
 | `actor_model_loaded` (trainer-rank0) | Rank 0 built the Megatron model and loaded the base weights from the assets volume. |
