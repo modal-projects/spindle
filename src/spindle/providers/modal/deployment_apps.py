@@ -7,6 +7,7 @@ created on demand with the existing LoRA/FFT pool lifecycle.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -155,6 +156,8 @@ def run_trainer(deployment, instance_id, platform=None):
     else:
         assets.reload()
         ray_address = None
+    if recipe.parameterization == "lora":
+        _warm_lora_pool(platform["frontend"], deployment.definition_id)
     env = {
         **KERNEL_CACHE_ENV,
         **deployment_env(recipe.trainer_env),
@@ -193,6 +196,16 @@ def run_trainer(deployment, instance_id, platform=None):
         sampler_persistence_concurrency=recipe.sampler_persistence_concurrency,
         on_startup_error=failed,
     )
+
+
+def _warm_lora_pool(frontend: str, definition_id: str) -> None:
+    """Deploy the sampler pool now that a trainer has GPUs, not while it queues."""
+    try:
+        modal.Function.from_name(frontend, "ensure_lora_pool").spawn(
+            LoraPoolSpec(definition_id).as_dict()
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("warm LoRA pool %s", definition_id)
 
 
 def build_rollout_app(deployment, pool, platform=None, *, image=None):

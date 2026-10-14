@@ -13,6 +13,7 @@ from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.errors import RecordNotFound
 from spindle.providers.local import InMemoryKeyValueStore
 from spindle.providers.modal import fft_pool
+from spindle.providers.modal.engines import EngineInstanceRecord
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
 
@@ -180,6 +181,60 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
         ).as_dict(),
         FFTPoolSpec(FULL_DEFINITION, "session:train:0", True, 0).as_dict(),
     ]
+
+
+@pytest.mark.parametrize(
+    ("trainer_state", "spawns_pool"),
+    [(None, False), ("stopped", False), ("starting", True), ("running", True)],
+)
+def test_prepare_model_leaves_lora_pool_to_trainer_boot(
+    monkeypatch, trainer_state, spawns_pool
+) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = []
+
+    async def prepare(definition_id: str) -> None:
+        return None
+
+    async def spawn(spec: dict) -> None:
+        spawned.append(spec)
+
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "ensure_lora_pool",
+        SimpleNamespace(spawn=SimpleNamespace(aio=spawn)),
+    )
+
+    async def run() -> None:
+        if trainer_state is not None:
+            record = EngineInstanceRecord(
+                instance_id="engine-a",
+                definition_id=LORA_DEFINITION,
+                revision="",
+                state=trainer_state,
+            )
+            await registry.put(
+                "engine_instance:engine-a", record.model_dump(mode="json")
+            )
+        await modal_app._plane().prepare_model(
+            SimpleNamespace(
+                engine_definition_id=LORA_DEFINITION,
+                model_id="session:train:0",
+                spec={},
+            )
+        )
+
+    asyncio.run(run())
+    pool = LoraPoolSpec(LORA_DEFINITION).as_dict()
+    assert spawned == ([pool] if spawns_pool else [])
 
 
 def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:

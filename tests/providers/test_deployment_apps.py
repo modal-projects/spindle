@@ -456,7 +456,22 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     monkeypatch.setattr(
         deployment_apps, "run_engine_with_backend", lambda *a, **kw: calls.append(kw)
     )
+    warmed = []
+    monkeypatch.setattr(
+        modal.Function,
+        "from_name",
+        lambda app_name, name: SimpleNamespace(
+            spawn=lambda spec: warmed.append((app_name, name, spec))
+        ),
+    )
     deployment_apps.run_trainer(row, "instance")
+    assert warmed == [
+        (
+            row.recipe.platform["frontend"],
+            "ensure_lora_pool",
+            LoraPoolSpec(row.definition_id).as_dict(),
+        )
+    ]
     assert calls[0]["backend_env"]["SPINDLE_RAY_ADDRESS"] == "10.0.0.1:6379"
     assert (
         json.loads(calls[0]["backend_env"]["SPINDLE_BACKEND_CONFIG"])["miles"][
@@ -467,6 +482,7 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     monkeypatch.setattr(deployment_apps, "start_trainer_cluster", lambda *a, **k: None)
     deployment_apps.run_trainer(row, "worker")
     assert len(calls) == 1
+    assert len(warmed) == 1
 
 
 def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
