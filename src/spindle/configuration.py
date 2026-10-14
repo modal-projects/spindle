@@ -43,6 +43,7 @@ class BaseConfig:
     trainer_nodes = 1
     trainer_cpu = 8
     trainer_memory_mib = 32768
+    trainer_disk_mib = 0
     trainer_max_instances = 1
     trainer_max_clients_per_instance = 1
     trainer_timeout_s = 86400
@@ -53,6 +54,7 @@ class BaseConfig:
     inference_gpus_per_node = 1
     inference_cpu = 8
     inference_memory_mib = 32768
+    inference_disk_mib = 0
     inference_min_replicas = 0
     inference_max_replicas = 8
     inference_target_concurrency = 16
