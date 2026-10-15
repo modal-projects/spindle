@@ -77,9 +77,18 @@ def test_gpt_oss_120b_uses_its_own_weights_and_mxfp4_layout(context, gpus, cp):
 @pytest.mark.parametrize(
     "preset,parent",
     [
-        ("nemotron35-super-vl-120b-a12b-lora-64k", "nemotron3-super-120b-a12b-lora-64k"),
-        ("nemotron35-super-vl-120b-a12b-base-lora-64k", "nemotron3-super-120b-a12b-lora-64k"),
-        ("nemotron35-super-vl-120b-a12b-lora-64k-b300", "nemotron3-super-120b-a12b-lora-64k-b300"),
+        (
+            "nemotron35-super-vl-120b-a12b-lora-64k",
+            "nemotron3-super-120b-a12b-lora-64k",
+        ),
+        (
+            "nemotron35-super-vl-120b-a12b-base-lora-64k",
+            "nemotron3-super-120b-a12b-lora-64k",
+        ),
+        (
+            "nemotron35-super-vl-120b-a12b-lora-64k-b300",
+            "nemotron3-super-120b-a12b-lora-64k-b300",
+        ),
     ],
 )
 def test_nemotron35_super_vl_trains_the_super_language_model(preset, parent):
