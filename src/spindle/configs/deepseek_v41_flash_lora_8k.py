@@ -81,8 +81,8 @@ class Config(BaseConfig):
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
         "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
-        # Adapters on wq_a and wkv need the two projections unfused.
-        "SGLANG_OPT_FUSE_WQA_WKV": "0",
+        # A BF16 checkpoint must not be routed to the FP4 expert kernels.
+        "SGLANG_DSV4_FP4_EXPERTS": "0",
     }
     sglang_cfg = {
         "tp_size": 8,
@@ -93,6 +93,7 @@ class Config(BaseConfig):
         "mem_fraction_static": 0.7,
         "model_loader_extra_config": {"enable_multithread_load": False},
         "weight_loader_drop_cache_after_load": True,
+        "weight_loader_disable_mmap": False,
         "disable_shared_experts_fusion": True,
         "max_running_requests": 32,
         "max_queued_requests": 8,

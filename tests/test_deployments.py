@@ -168,7 +168,8 @@ def test_deepseek_v41_lora_recipe():
         "ffn.shared_experts.w3",
     ]
     assert serving["disable_shared_experts_fusion"] is True
-    assert row.recipe.inference_env["SGLANG_OPT_FUSE_WQA_WKV"] == "0"
+    assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert serving["weight_loader_disable_mmap"] is False
     assert (row.recipe.trainer_image, row.recipe.inference_image) == (
         "miles-dsv41-lora",
         "sglang-dsv41-lora",
