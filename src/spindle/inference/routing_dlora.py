@@ -25,6 +25,27 @@ class DloraRouter(WorkRouter):
                 continue
             merged = mode.get("merged_adapter")
             profile = mode.get("profile")
+            if profile and merged is None and profile.get("max_batch_adapters"):
+                admitted = mode.get("admission_adapters", ())
+                work = self.replicas[host].work
+                maxima = work.get("adapter_decode_maxima", {})
+                if (
+                    adapter not in admitted
+                    and len(admitted) >= profile["max_batch_adapters"]
+                    and all(a in maxima for a in admitted)
+                ):
+                    # An additional adapter cannot join the native batch until
+                    # one admitted cohort releases its slot. This is a service
+                    # dependency, not the much smaller GPU weight-copy cost.
+                    wait = (
+                        min(maxima[a] for a in admitted)
+                        * profile["unmerged_token_seconds"]
+                    )
+                    candidate["adapter_slot_wait_seconds"] = wait
+                    candidate["score"] += max(0, wait - candidate["backlog_seconds"])
+                    candidate["backlog_seconds"] = max(
+                        wait, candidate["backlog_seconds"]
+                    )
             if merged is not None and merged != adapter and profile:
                 # A specialized engine is reclaimable even while busy. A hard
                 # exclusion strands all other adapters on the last mixed

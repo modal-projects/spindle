@@ -45,10 +45,13 @@ def main():
     parser.add_argument("--tensor-parallel", type=int, choices=[1, 2], default=1)
     parser.add_argument("--memory-mib", type=int, default=131072)
     parser.add_argument("--cpu", type=int, default=8)
+    parser.add_argument("--dtype", choices=["bfloat16", "float16"], default="bfloat16")
     args = parser.parse_args()
     assert 1 <= args.replicas <= 8
     args.root.mkdir(parents=True, exist_ok=True)
-    profile = vars(MergeProfile(0.03, 0.025, 8000, 2, 1, 36, enabled=False))
+    profile = vars(
+        MergeProfile(0.03, 0.025, 8000, 2, 1, 36, enabled=False, max_batch_adapters=8)
+    )
     config = Config(
         name=f"cache27-dlora-{args.run}",
         inference_min_replicas=args.replicas,
@@ -60,6 +63,7 @@ def main():
         overrides={
             "platform.modal.region": args.region,
             "sglang_cfg.tp_size": args.tensor_parallel,
+            "sglang_cfg.dtype": args.dtype,
         },
         inference_env={
             "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",

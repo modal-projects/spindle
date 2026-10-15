@@ -24,6 +24,7 @@ class MergeProfile:
     max_wait_seconds: float = 5.0
     enabled: bool = True
     initial_merge_seconds: float | None = None
+    max_batch_adapters: int | None = None
 
     def __post_init__(self):
         if self.capacity < 1 or self.queue_buffer < 1:
@@ -45,6 +46,8 @@ class MergeProfile:
             or self.initial_merge_seconds <= 0
         ):
             raise ValueError("Initial merge measurement must be positive")
+        if self.max_batch_adapters is not None and self.max_batch_adapters < 1:
+            raise ValueError("Adapter batch capacity must be positive")
 
 
 class ReplicaBusy(Exception):
@@ -96,7 +99,17 @@ class ReplicaScheduler:
             profile=vars(self.profile),
             transition_totals=dict(self.transitions),
             rejections=self.rejections,
+            admission_adapters=sorted(self.admission_adapters()),
         )
+
+    def admission_adapters(self):
+        """Reserve native adapter slots for running and oldest pending work."""
+        adapters = {entry.adapter for entry in self.running.values()}
+        limit = self.profile.max_batch_adapters
+        for entry in self.pending:
+            if limit is None or len(adapters) < limit:
+                adapters.add(entry.adapter)
+        return adapters
 
     async def submit(self, adapter, prompt_tokens, output_tokens, prepare, execute):
         if self.failure:
@@ -104,6 +117,19 @@ class ReplicaScheduler:
         if self.active >= self.profile.capacity + self.profile.queue_buffer:
             self.rejections += 1
             raise ReplicaBusy
+        limit = self.profile.max_batch_adapters
+        if limit is not None:
+            admitted = self.admission_adapters()
+            blocked = sum(e.adapter not in admitted for e in self.pending)
+            if (
+                adapter not in admitted
+                and len(admitted) >= limit
+                and blocked >= self.profile.queue_buffer
+            ):
+                # Keep execution slots available for compatible siblings. A
+                # queue of cold adapters cannot consume the whole request budget.
+                self.rejections += 1
+                raise ReplicaBusy
         item = Pending(
             adapter,
             prompt_tokens,
@@ -260,6 +286,18 @@ class ReplicaScheduler:
                     if candidate:
                         await self._transition(candidate)
                 room = self.profile.capacity - len(self.running)
+                adapters = {entry.adapter for entry in self.running.values()}
+                limit = self.profile.max_batch_adapters
+                drain_for_slot = (
+                    limit is not None
+                    and len(adapters) >= limit
+                    and any(
+                        e.adapter not in adapters
+                        and time.monotonic() - e.arrived
+                        >= self.profile.max_wait_seconds
+                        for e in self.pending
+                    )
+                )
                 # Oldest first is the fairness credit: incompatible demand stops
                 # merged refill above. No adapter can be skipped indefinitely.
                 for entry in list(self.pending):
@@ -267,7 +305,13 @@ class ReplicaScheduler:
                         break
                     if self.mode is not None and entry.adapter != self.mode:
                         continue
+                    if limit is not None:
+                        if entry.adapter not in adapters and len(adapters) >= limit:
+                            continue
+                        if drain_for_slot and entry.adapter in adapters:
+                            continue
                     self.pending.remove(entry)
+                    adapters.add(entry.adapter)
                     task = asyncio.create_task(self._execute(entry))
                     self.running[task] = entry
                     room -= 1

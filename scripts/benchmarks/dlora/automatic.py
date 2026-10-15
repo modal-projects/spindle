@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
+import time
 
 import httpx
 import modal
@@ -16,17 +17,28 @@ from spindle.providers.modal.lora_routing import create_router
 @app.function(
     image=image.add_local_python_source("calibrate"),
     cpu=2,
-    timeout=900,
+    timeout=1800,
     region="us-west",
     secrets=[modal.Secret.from_name("lilo-proxy")],
 )
-async def validate(pool, sources, profile):
+async def validate(pool, sources, profile, output_tokens=1024):
     gateway = await modal.Server.from_name(pool, "Server").get_url.aio()
     router = create_router(pool, gateway, target=36, slots=8)
-    await router._refresh()
+    deadline = time.monotonic() + 1200
+    while time.monotonic() < deadline:
+        await router._refresh()
+        if router.replicas:
+            break
+        await asyncio.sleep(5)
+    assert router.replicas, "No healthy replica for automatic merge validation"
     replica = next(iter(router.replicas.values()))
     headers = proxy_auth_headers() | {"Modal-Flash-Upstream": replica.upstream}
-    async with httpx.AsyncClient(headers=headers, timeout=600, http2=True) as client:
+    async with httpx.AsyncClient(
+        headers=headers,
+        timeout=600,
+        http2=True,
+        limits=httpx.Limits(max_connections=128, max_keepalive_connections=128),
+    ) as client:
         response = await client.post(
             gateway + "/benchmark-mode", json=profile | {"enabled": True}
         )
@@ -53,7 +65,15 @@ async def validate(pool, sources, profile):
             return data["meta_info"]
 
         before = (await client.get(gateway + "/benchmark-state")).json()
-        results = await asyncio.gather(*[request(sources[0], 1024) for _ in range(36)])
+        # Establish transport before the controlled concurrent cohort. Cold
+        # connection arrivals can trickle beyond the 20ms coalescing window;
+        # in that case declining a cold merge is the correct decision.
+        await asyncio.gather(
+            *[client.get(gateway + "/benchmark-state") for _ in range(36)]
+        )
+        results = await asyncio.gather(
+            *[request(sources[0], output_tokens) for _ in range(36)]
+        )
         specialized = (await client.get(gateway + "/benchmark-state")).json()
         assert (
             specialized["mode"]["merged_adapter"]
@@ -74,6 +94,8 @@ async def validate(pool, sources, profile):
         "specialized": specialized,
         "after": after,
         "merged_requests": sum(r["lora_merged"] for r in results),
+        "output_tokens_per_request": output_tokens,
+        "transport": "HTTP/2, connection established before cohort",
     }
 
 
@@ -81,10 +103,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--clients", required=True, type=Path)
+    parser.add_argument("--decode-tokens", type=int, default=1024)
     args = parser.parse_args()
     pool = json.loads((args.root / "pools.json").read_text())[0]["pool"]
     sources = json.loads(args.clients.read_text())
     profile = json.loads((args.root / "merge-profile.json").read_text())
     with modal.enable_output(), app.run(environment_name="lilo-deploy"):
-        result = validate.remote(pool, sources, profile)
+        result = validate.remote(pool, sources, profile, args.decode_tokens)
     (args.root / "automatic.json").write_text(json.dumps(result, indent=2))

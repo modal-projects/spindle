@@ -19,7 +19,7 @@ source = source.replace(
         response.raise_for_status()
         config = response.json()
         return {"replica": os.environ.get("MODAL_TASK_ID"), "engine": {
-            k: config[k] for k in ("max_running_requests", "max_queued_requests", "enable_lora_merge", "lora_unmerge_mode")
+            k: config[k] for k in ("max_running_requests", "max_queued_requests", "max_loras_per_batch", "enable_lora_merge", "lora_unmerge_mode")
         }}
 
     @app.post("/benchmark-mode")

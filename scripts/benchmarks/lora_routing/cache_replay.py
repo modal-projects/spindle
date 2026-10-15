@@ -535,17 +535,33 @@ async def run_arm(pool, arm, clients, config, executions):
                 response.raise_for_status()
                 actual = response.json()
                 assert actual["replica"] == replica.replica_id
-                assert actual["engine"] == dict(
+                expected = dict(
                     max_running_requests=config["merge_profile"]["capacity"],
                     max_queued_requests=config["merge_profile"]["capacity"]
                     + config["merge_profile"]["queue_buffer"],
                     enable_lora_merge=True,
                     lora_unmerge_mode="restore",
-                ), actual
+                )
+                if config["merge_profile"].get("max_batch_adapters"):
+                    expected["max_loras_per_batch"] = config["merge_profile"][
+                        "max_batch_adapters"
+                    ]
+                assert all(actual["engine"].get(k) == v for k, v in expected.items()), (
+                    actual
+                )
                 response = await client.post(
                     gateway + "/benchmark-mode",
                     headers={"Modal-Flash-Upstream": replica.upstream},
-                    json=config["merge_profile"] | {"enabled": arm == "dlora"},
+                    json=config["merge_profile"]
+                    | {
+                        "enabled": arm == "dlora",
+                        **(
+                            {"max_batch_adapters": None}
+                            if arm not in {"dlora", "dlora-no-merge"}
+                            and "max_batch_adapters" in config["merge_profile"]
+                            else {}
+                        ),
+                    },
                 )
                 response.raise_for_status()
 

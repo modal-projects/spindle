@@ -134,7 +134,7 @@ def run():
     prompt = list(range(8192))
     adapters = [f"model-{i}/weight_v000004" for i in range(64)]
     prefixes = {a: token_prefixes(a, prompt) for a in adapters}
-    for replica_count in (8, 32, 128):
+    for replica_count in (4, 8, 32, 128):
         for policy in args.policies:
             for group in (1, 8):
                 router = make_router(policy)

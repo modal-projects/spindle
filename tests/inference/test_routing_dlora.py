@@ -114,6 +114,22 @@ def test_partial_merged_batch_pays_drain_latency_before_switching():
     assert choose(pool, adapter="a/v2") == "mixed"
 
 
+def test_new_adapter_pays_wait_for_native_adapter_slot():
+    pool = router(
+        full=dict(
+            decode_tokens=100,
+            adapter_decode_maxima={"b/v1": 100, "c/v1": 100},
+            mode=dict(
+                merged_adapter=None,
+                admission_adapters=["b/v1", "c/v1"],
+                profile=dict(max_batch_adapters=2, unmerged_token_seconds=0.1),
+            ),
+        ),
+        compatible=dict(decode_tokens=500),
+    )
+    assert choose(pool) == "compatible"
+
+
 def test_local_reservations_expand_hot_adapter_without_permanent_home():
     pool = router(a={}, b={}, c={})
     routes = [choose(pool, str(i)) for i in range(24)]

@@ -38,12 +38,17 @@ async def configure(pool, profile, replicas, sources=None):
             response.raise_for_status()
             actual = response.json()
             assert actual["replica"] == replica.replica_id
-            assert actual["engine"] == dict(
+            expected = dict(
                 max_running_requests=profile["capacity"],
                 max_queued_requests=profile["capacity"] + profile["queue_buffer"],
                 enable_lora_merge=True,
                 lora_unmerge_mode="restore",
-            ), actual
+            )
+            if profile.get("max_batch_adapters"):
+                expected["max_loras_per_batch"] = profile["max_batch_adapters"]
+            assert all(actual["engine"].get(k) == v for k, v in expected.items()), (
+                actual
+            )
             response = await client.post(
                 gateway + "/benchmark-mode",
                 headers=headers,

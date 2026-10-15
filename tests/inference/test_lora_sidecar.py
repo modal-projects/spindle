@@ -3,12 +3,53 @@ import json
 import time
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from stitch.types import VersionRef
 
 from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
 from spindle.inference.lora_routing import prefix_key
+
+
+@pytest.mark.parametrize("limit", [2, 9])
+def test_mode_controller_checks_native_adapter_capacity(tmp_path, monkeypatch, limit):
+    monkeypatch.setenv(
+        "SGLANG_SPINDLE_MERGE_PROFILE",
+        json.dumps(
+            dict(
+                unmerged_token_seconds=0.1,
+                merged_token_seconds=0.05,
+                prefill_tokens_per_second=1000,
+                merge_seconds=1,
+                unmerge_seconds=1,
+                capacity=4,
+                max_batch_adapters=limit,
+            )
+        ),
+    )
+
+    async def engine(request):
+        assert request.url.path == "/server_info"
+        return httpx.Response(200, json={"max_loras_per_batch": 8})
+
+    app = create_app(
+        SnapshotBulletin(tmp_path),
+        "http://engine",
+        transport=httpx.MockTransport(engine),
+    )
+    if limit > 8:
+        with pytest.raises(ValueError, match="exceeds the native batch limit"):
+            with TestClient(app):
+                pass
+    else:
+        with TestClient(app) as client:
+            assert (
+                client.get("/routing-state").json()["mode"]["profile"][
+                    "max_batch_adapters"
+                ]
+                == limit
+            )
 
 
 def test_mode_controller_pins_latest_before_merging(tmp_path, monkeypatch):

@@ -52,6 +52,14 @@ def create_app(
         app.state.cache_valid_after = 0.0
         app.state.mode_scheduler = None
         if raw_profile := os.environ.get("SGLANG_SPINDLE_MERGE_PROFILE"):
+            profile = MergeProfile(**json.loads(raw_profile))
+            if profile.max_batch_adapters is not None:
+                response = await app.state.client.get("/server_info")
+                response.raise_for_status()
+                if profile.max_batch_adapters > response.json()["max_loras_per_batch"]:
+                    raise ValueError(
+                        "Sidecar adapter capacity exceeds the native batch limit"
+                    )
 
             def invalidate():
                 app.state.prefixes.clear()
@@ -61,7 +69,7 @@ def create_app(
 
             app.state.mode_scheduler = ReplicaScheduler(
                 app.state.client,
-                MergeProfile(**json.loads(raw_profile)),
+                profile,
                 invalidate=invalidate,
             )
         try:

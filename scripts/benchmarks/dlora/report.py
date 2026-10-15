@@ -77,11 +77,8 @@ def metrics(data):
     return result
 
 
-def render(root):
-    paths = [
-        root / (arm + ".json")
-        for arm in ["kv", "model-spill", "dlora-no-merge", "dlora"]
-    ]
+def render(root, arms):
+    paths = [root / (arm + ".json") for arm in arms]
     data = {p.stem: json.loads(p.read_text()) for p in paths}
     assert len({d["workload_sha256"] for d in data.values()}) == 1
     summary = {arm: metrics(d) for arm, d in data.items()}
@@ -168,5 +165,9 @@ def render(root):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("roots", nargs="+", type=Path)
-    for root in parser.parse_args().roots:
-        render(root)
+    parser.add_argument(
+        "--arms", nargs="+", default=["kv", "model-spill", "dlora-no-merge", "dlora"]
+    )
+    args = parser.parse_args()
+    for root in args.roots:
+        render(root, args.arms)

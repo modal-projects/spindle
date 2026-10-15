@@ -117,6 +117,96 @@ def test_warm_long_prefix_rebuild_can_make_merge_unprofitable():
     asyncio.run(run())
 
 
+def test_adapter_slots_leave_capacity_for_compatible_siblings():
+    async def run():
+        gates = {a: asyncio.Event() for a in "abc"}
+        entered = {a: 0 for a in "abc"}
+
+        async def prepare():
+            pass
+
+        async with httpx.AsyncClient(base_url="http://engine") as client:
+            scheduler = ReplicaScheduler(
+                client,
+                profile(enabled=False, capacity=6, max_batch_adapters=2),
+                invalidate=lambda: None,
+            )
+
+            def submit(adapter):
+                async def execute():
+                    entered[adapter] += 1
+                    assert len({e.adapter for e in scheduler.running.values()}) <= 2
+                    await gates[adapter].wait()
+                    return adapter
+
+                return asyncio.create_task(
+                    scheduler.submit(adapter, 8, 1, prepare, execute)
+                )
+
+            tasks = [submit("a"), submit("b")]
+            await asyncio.sleep(0.02)
+            tasks.append(submit("c"))
+            await asyncio.sleep(0.01)
+            with pytest.raises(ReplicaBusy):
+                await scheduler.submit("d", 8, 1, prepare, prepare)
+            tasks += [submit("a"), submit("a"), submit("b")]
+            await asyncio.sleep(0.02)
+            assert entered == {"a": 3, "b": 2, "c": 0}
+            assert scheduler.snapshot()["admission_adapters"] == ["a", "b"]
+            gates["a"].set()
+            await asyncio.sleep(0.02)
+            assert entered["c"] == 1
+            gates["b"].set()
+            gates["c"].set()
+            await asyncio.gather(*tasks)
+            await scheduler.aclose()
+
+    asyncio.run(run())
+
+
+def test_waiting_new_adapter_stops_refill_until_an_adapter_slot_drains():
+    async def run():
+        gates = {a: asyncio.Event() for a in "abc"}
+        entered = {a: 0 for a in "abc"}
+
+        async def prepare():
+            pass
+
+        async with httpx.AsyncClient(base_url="http://engine") as client:
+            scheduler = ReplicaScheduler(
+                client,
+                profile(enabled=False, capacity=6, max_batch_adapters=2),
+                invalidate=lambda: None,
+            )
+
+            def submit(adapter):
+                async def execute():
+                    entered[adapter] += 1
+                    await gates[adapter].wait()
+
+                return asyncio.create_task(
+                    scheduler.submit(adapter, 8, 1, prepare, execute)
+                )
+
+            tasks = [submit("a"), submit("b")]
+            await asyncio.sleep(0.02)
+            tasks.append(submit("c"))
+            await asyncio.sleep(0.01)
+            scheduler.pending[0].arrived -= 10
+            tasks.append(submit("a"))
+            await asyncio.sleep(0.02)
+            assert entered == {"a": 1, "b": 1, "c": 0}
+            gates["a"].set()
+            await asyncio.sleep(0.02)
+            assert entered == {"a": 1, "b": 1, "c": 1}
+            gates["c"].set()
+            gates["b"].set()
+            await asyncio.gather(*tasks)
+            await scheduler.aclose()
+
+    asyncio.run(run())
+
+
 def test_first_merge_pays_cold_cost_then_uses_warm_cost():
     async def run():
         actions = []
