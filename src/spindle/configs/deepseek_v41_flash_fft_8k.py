@@ -46,12 +46,16 @@ class Config(BaseConfig):
             "stream_optimizer_state_moment_dtype": "bf16",
             "offload_train_disk_dir": "/tmp/spindle-optimizer-state",
             "distributed_timeout_minutes": 120,
+            "deterministic_mode": True,
         },
     }
     trainer_env = {
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
+        "NCCL_ALGO": "Ring",
+        "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
     sampler_persistence_concurrency = 1
     inference_gpu = "B300"
