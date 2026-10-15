@@ -286,13 +286,16 @@ def test_publishing_leaves_rank_zero_its_own_files(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(actor.volumes, "sync_checkpoint_volume", lambda action: None)
 
     path = tmp_path / "sampler" / "snapshot"
-    actor.checkpoint_io.write_checkpoint_dir(
-        path,
-        lambda directory: (directory / "adapter_model.safetensors").write_text("w"),
-        None,
-    )
+
+    def write(directory):
+        (directory / "adapter_model.safetensors").write_text("w")
+        (directory / "rank00000" / "opt0_0").mkdir(parents=True)
+        (directory / "rank00000" / "opt0_0" / "manifest.json").write_text("{}")
+
+    actor.checkpoint_io.write_checkpoint_dir(path, write, None)
 
     assert (path / "adapter_model.safetensors").read_text() == "w"
+    assert (path / "rank00000" / "opt0_0" / "manifest.json").read_text() == "{}"
 
 
 def test_a_checkpoint_missing_a_peer_shard_is_not_published(
