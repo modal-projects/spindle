@@ -88,6 +88,7 @@ def test_no_model_catalog_required():
         ),
         ({"sglang_cfg": {"model_path": "other"}}, "managed"),
         ({"sglang_cfg": {"tp_size": 2}}, "replica GPU"),
+        ({"sglang_cfg": {"weight_update_staging": "disk"}}, "full parameterization"),
         ({"trainer_max_clients_per_instance": 7}, "max_lora_slots"),
         (
             {"parameterization": "full", "miles_cfg__parameterization": "full"},
@@ -118,6 +119,21 @@ def test_full_parameterization_on_miles_drops_lora_options():
     assert "--multi-lora-n-adapters" not in arguments
     assert row.inference_settings["weight_update_staging"] == "cpu"
     assert "enable_lora" not in row.inference_settings
+
+
+def test_full_sampler_can_stage_weights_on_disk():
+    base = vars(load(config_path("qwen35-4b-miles-fft-64k")))
+    base["sglang_cfg"] = {**base["sglang_cfg"], "weight_update_staging": "disk"}
+    with pytest.raises(ValueError, match="local_checkpoint_dir"):
+        resolved(BaseConfig(**base))
+    base["sglang_cfg"]["weight_update_local_checkpoint_dir"] = "/scratch/canonical"
+    base["sglang_cfg"].pop("weight_update_max_compile_group_gb")
+    settings = resolved(BaseConfig(**base)).inference_settings
+    assert settings["weight_update_staging"] == "disk"
+    assert settings["weight_update_local_checkpoint_dir"] == "/scratch/canonical"
+    base["sglang_cfg"]["weight_update_staging"] = "nvme"
+    with pytest.raises(ValueError, match="cpu or disk"):
+        resolved(BaseConfig(**base))
 
 
 def test_asset_paths_follow_the_model():

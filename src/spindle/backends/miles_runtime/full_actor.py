@@ -9,7 +9,7 @@ state, and sampler publications are the sparse deltas FFT samplers apply.
 
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,7 @@ from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from spindle.backends.megatron_runtime.fft.delta import FFTDeltaWriter
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
+from .bounded_copy import copy_file_bounded
 from .volumes import (
     install_cross_node_checkpoint_publish,
     sync_bulletin_volume,
@@ -54,6 +55,21 @@ install_cross_node_checkpoint_publish(checkpoint_io, snapshot_publisher, hf_expo
 
 _MODEL_KEY = "model"
 _OPTIMIZER_KEY = "optimizer"
+
+
+@contextmanager
+def _bounded_store_copies():
+    """Miles copies each streamed optimizer store with ``shutil.copyfile``;
+    through a volume mount that outruns writeback and exhausts the
+    container's memory with dirty pages."""
+    from miles_plugins.optimizers import nvme_stream
+
+    original = nvme_stream.shutil.copyfile
+    nvme_stream.shutil.copyfile = copy_file_bounded
+    try:
+        yield
+    finally:
+        nvme_stream.shutil.copyfile = original
 
 
 def _sharded_state_dict_metadata() -> dict[str, Any]:
@@ -188,6 +204,10 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
                 self._sharded_state_dict(include_optimizer, is_loading=False),
                 str(checkpoint_dir),
             )
+            if include_optimizer:
+                with _bounded_store_copies():
+                    for store in self._streamed_optimizer_stores():
+                        store.save_to(str(checkpoint_dir))
 
         checkpoint_io.write_checkpoint_dir(path, write, metadata=metadata)
         sync_checkpoint_volume("commit")
@@ -201,11 +221,39 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         self._bare_model.load_state_dict(loaded[_MODEL_KEY], strict=True)
         if restore_optimizer:
             self.optimizer.load_state_dict(loaded[_OPTIMIZER_KEY])
+            with _bounded_store_copies():
+                for store in self._streamed_optimizer_stores():
+                    if not store.load_from(path):
+                        raise RuntimeError(
+                            f"checkpoint {path} carries no streamed optimizer state"
+                        )
         else:
             self.optimizer.reload_model_params()
-            reset_optimizer_states(self.optimizer)
+            self._reset_optimizer_state()
         self._zero_grads()
         self._delta_writer = None
+
+    def _streamed_optimizer_stores(self) -> list:
+        """Miles keeps the master weights and Adam moments of a disk-streamed
+        optimizer in per-rank stores that the optimizer's state dict omits."""
+        optimizers = getattr(self.optimizer, "chained_optimizers", None) or [
+            self.optimizer
+        ]
+        stores = (getattr(opt, "_nvme_state_store", None) for opt in optimizers)
+        return [store for store in stores if store is not None]
+
+    def _reset_optimizer_state(self) -> None:
+        reset_optimizer_states(self.optimizer)
+        for store in self._streamed_optimizer_stores():
+            adams = [bucket.adam for bucket in store.buckets]
+            if store._fp32_adam is not None:
+                adams.append(store._fp32_adam)
+            for adam in adams:
+                adam.state.clear()
+                for group in adam.param_groups:
+                    group.pop("step", None)
+            for bucket in store.buckets:
+                bucket.moments_ready = False
 
     def _sharded_state_dict(
         self, with_optimizer: bool, *, is_loading: bool
@@ -225,7 +273,7 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         _load_checkpoint_hf(
             self.model, self.optimizer, self.args, self.args.hf_checkpoint
         )
-        reset_optimizer_states(self.optimizer)
+        self._reset_optimizer_state()
         self._zero_grads()
         self._delta_writer = None
 

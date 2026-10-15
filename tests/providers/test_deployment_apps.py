@@ -74,6 +74,7 @@ def test_trainer_declaration_and_executor_configuration(
     app, trainer = deployment_apps.build_trainer_app(row, platform, image=image)
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
+    assert declaration["ephemeral_disk"] is None
     assert declaration["region"] is None
     assert declaration["max_containers"] is None
     assert declaration["single_use_containers"] is True
