@@ -53,7 +53,7 @@ These are source references, not proof that a deployed image contains them.
   invokes quantization postprocessing. Some postprocessing requires GPU work;
   CPU staging does not mean all preparation is CPU-only.
 
-### What to reuse from Miles and SkyRL
+### What to reuse from Miles
 
 Miles already has a [streaming HF weight iterator](https://github.com/modal-projects/miles/blob/9d047db23a5760414de12185b3a133363ca2fde8/miles/backends/training_utils/weight_update/hf_weight_iterator/__init__.py)
 with bounded buckets and atomic update groups. Its
@@ -64,14 +64,6 @@ already emits E4M3 weights and block scales, with architecture-specific selectio
 and multiple kernel/scale paths. Reuse these operations before writing a new
 packer. Explicitly select and validate scale format: current Miles decisions can
 also depend on environment variables and serving backend choices.
-
-[SkyRL #1898](https://github.com/NovaSky-AI/SkyRL/pull/1898) separates FP8 compute,
-persistent FP8 parameters, and serialized blockwise serving weights. Its mixed-dtype
-transport and matching loader configuration are useful precedents. Its serialized
-path targets vLLM full-weight sync and rejects adapter-only LoRA; it is not a
-drop-in Spindle implementation. Persistent FP8 adds optimizer-master initialization
-requirements beyond export. We should reuse the boundaries, not transplant its
-vLLM-specific transport or promise a speedup from packing alone.
 
 ## Recipe interface
 
