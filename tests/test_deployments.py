@@ -46,6 +46,13 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
+def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
+    assert "capture_dir" not in backend_config(recipe())
+    multi_node = backend_config(recipe("deepseek-v41-flash-lora-8k"))
+    assert multi_node["capture_dir"] == "/checkpoints/.spindle-captures"
+    assert "capture_dir" not in backend_config(recipe("deepseek-v41-flash-fft-8k"))
+
+
 def test_presets_context_topology_and_backend_options():
     spec = recipe()
     config = backend_config(spec)["miles"]
