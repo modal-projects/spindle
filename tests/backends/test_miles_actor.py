@@ -208,8 +208,9 @@ def _load_actor(monkeypatch):
 class _FakeVolume:
     """A volume whose committed state holds shards rank 0 cannot see locally."""
 
-    def __init__(self, events: list) -> None:
+    def __init__(self, events: list, extra: tuple[str, ...] = ()) -> None:
         self.events = events
+        self.extra = extra
 
     def commit(self) -> None:
         self.events.append("commit")
@@ -219,8 +220,8 @@ class _FakeVolume:
 
     def listdir(self, path):
         return [
-            types.SimpleNamespace(path=f"{path}/__0_0.distcp"),
-            types.SimpleNamespace(path=f"{path}/__8_0.distcp"),
+            types.SimpleNamespace(path=f"{path}/{name}")
+            for name in ("__0_0.distcp", "__8_0.distcp", *self.extra)
         ]
 
     def copy_files(self, src_paths, dst_path, recursive=False) -> None:
@@ -276,8 +277,9 @@ def test_publishing_leaves_rank_zero_its_own_files(monkeypatch, tmp_path) -> Non
     actor = _load_actor(monkeypatch)
     monkeypatch.setenv("SPINDLE_CHECKPOINT_VOLUME", "spindle-checkpoints")
     monkeypatch.setenv("SPINDLE_CHECKPOINT_ROOT", str(tmp_path))
+    events: list = []
     actor.volumes.modal.Volume = types.SimpleNamespace(
-        from_name=lambda name: _FakeVolume([])
+        from_name=lambda name: _FakeVolume(events, extra=("rank00000",))
     )
     actor.dist.is_available = lambda: False
     actor.dist.is_initialized = lambda: False
@@ -295,7 +297,20 @@ def test_publishing_leaves_rank_zero_its_own_files(monkeypatch, tmp_path) -> Non
     actor.checkpoint_io.write_checkpoint_dir(path, write, None)
 
     assert (path / "adapter_model.safetensors").read_text() == "w"
-    assert (path / "rank00000" / "opt0_0" / "manifest.json").read_text() == "{}"
+    # Directories are copied server-side rather than through the mount.
+    copies = [event for event in events if event[0] == "copy"]
+    assert copies == [
+        (
+            "copy",
+            (
+                "sampler/_tmp_snapshot/__0_0.distcp",
+                "sampler/_tmp_snapshot/__8_0.distcp",
+                "sampler/_tmp_snapshot/rank00000",
+            ),
+            "sampler/snapshot",
+            True,
+        )
+    ]
 
 
 def test_a_checkpoint_missing_a_peer_shard_is_not_published(

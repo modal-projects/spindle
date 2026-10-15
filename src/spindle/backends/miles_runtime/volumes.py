@@ -53,10 +53,13 @@ def _write_checkpoint_dir_on_volume(
         path.mkdir(parents=True, exist_ok=True)
         volume.commit()
         local = {shard.name: shard for shard in tmp.iterdir()}
+        # Local files are copied through the mount so this node reads them
+        # back at once; directories and peers' entries are copied server-side.
         remote = [
             entry.path
             for entry in volume.listdir(tmp_relative)
             if entry.path.rsplit("/", 1)[-1] not in local
+            or local[entry.path.rsplit("/", 1)[-1]].is_dir()
         ]
         missing = written - set(local) - {p.rsplit("/", 1)[-1] for p in remote}
         if missing:
@@ -67,9 +70,7 @@ def _write_checkpoint_dir_on_volume(
         if remote:
             volume.copy_files(remote, relative, recursive=True)
         for name, shard in local.items():
-            if shard.is_dir():
-                shutil.copytree(shard, path / name, dirs_exist_ok=True)
-            else:
+            if shard.is_file():
                 shutil.copy2(shard, path / name)
         print(
             f"spindle_checkpoint_publish path={relative} "
