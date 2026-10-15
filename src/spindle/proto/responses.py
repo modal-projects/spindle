@@ -2,11 +2,108 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import pairwise
+from math import isfinite, prod
 from typing import Any
 
 import numpy as np
 from tinker.proto import tinker_public_pb2 as pb
+
+PROTOBUF_MEDIA_TYPE = "application/x-protobuf"
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedResult:
+    """A completed result already in the SDK's protobuf wire format."""
+
+    body: bytes
+
+    def to_json(self) -> dict[str, Any]:
+        return decode_forward_backward(self.body)
+
+
+_DTYPES = {"float32": ("<f4", pb.DTYPE_FLOAT32), "int64": ("<i8", pb.DTYPE_INT64)}
+_NUMPY_DTYPES = {pb.DTYPE_FLOAT32: ("<f4", "float32"), pb.DTYPE_INT64: ("<i8", "int64")}
+
+
+def encode_forward_backward_exact(result: object) -> EncodedResult | None:
+    """Encode a forward/backward result if protobuf preserves its JSON form exactly."""
+    if not isinstance(result, dict) or set(result) != {
+        "loss_fn_output_type",
+        "loss_fn_outputs",
+        "metrics",
+    }:
+        return None
+    metrics = result["metrics"]
+    if not all(type(value) is float for value in metrics.values()):
+        return None
+    if not all(isfinite(value) for value in metrics.values()):
+        raise ValueError("forward/backward metrics contain non-finite values")
+    message = pb.ForwardBackwardOutput(
+        loss_fn_output_type=result["loss_fn_output_type"], metrics=metrics
+    )
+    for datum in result["loss_fn_outputs"]:
+        record = message.loss_fn_outputs.add(num_datums=1)
+        for name, tensor in datum.items():
+            if (
+                set(tensor) != {"data", "dtype", "shape"}
+                or tensor["dtype"] not in _DTYPES
+            ):
+                return None
+            dtype, proto_dtype = _DTYPES[tensor["dtype"]]
+            exact = np.asarray(tensor["data"])
+            kinds = "f" if tensor["dtype"] == "float32" else "iu"
+            if exact.ndim != 1 or (exact.size and exact.dtype.kind not in kinds):
+                return None
+            if exact.dtype.kind == "f" and not np.isfinite(exact).all():
+                raise ValueError("forward/backward outputs contain non-finite values")
+            values = exact.astype(dtype)
+            if not np.array_equal(values, exact):
+                return None
+            shape = tensor["shape"]
+            if (
+                not shape
+                or prod(shape) != values.size
+                or (len(shape) > 1 and 0 in shape)
+            ):
+                return None
+            data = values.tobytes()
+            record.fields[name].CopyFrom(
+                pb.BatchedTensor(
+                    data=data,
+                    offsets=np.asarray([0, len(data)], dtype="<i8").tobytes(),
+                    dtype=proto_dtype,
+                    trailing_shape=shape[1:],
+                )
+            )
+    return EncodedResult(message.SerializeToString())
+
+
+def decode_forward_backward(body: bytes) -> dict[str, Any]:
+    """JSON form of a result from ``encode_forward_backward_exact``."""
+    message = pb.ForwardBackwardOutput.FromString(body)
+    outputs = []
+    for record in message.loss_fn_outputs:
+        datum = {}
+        for name, tensor in record.fields.items():
+            dtype, label = _NUMPY_DTYPES[tensor.dtype]
+            values = np.frombuffer(tensor.data, dtype=dtype)
+            trailing = list(tensor.trailing_shape)
+            datum[name] = {
+                "data": values.tolist(),
+                "dtype": label,
+                "shape": [
+                    values.size // prod(trailing) if trailing else values.size,
+                    *trailing,
+                ],
+            }
+        outputs.append(datum)
+    return {
+        "loss_fn_output_type": message.loss_fn_output_type,
+        "loss_fn_outputs": outputs,
+        "metrics": dict(message.metrics),
+    }
 
 
 def encode_result(result: dict[str, Any]) -> bytes | None:

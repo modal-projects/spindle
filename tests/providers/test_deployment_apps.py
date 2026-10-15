@@ -108,32 +108,14 @@ def test_trainer_declaration_and_executor_configuration(
     assert reloaded == [True]
 
 
-@pytest.mark.parametrize(
-    "policy,observed",
-    [
-        ("affinity", False),
-        ("naive", False),
-        ("work", True),
-        ("domains", True),
-        ("adapter-home", True),
-        ("adapter-two", True),
-        ("adapter-spill", True),
-        ("balanced-home", True),
-        ("balanced-spill", True),
-        ("bounded-kv", True),
-        ("least-load", True),
-    ],
-)
-def test_measured_policies_enable_engine_observations(builders, policy, observed):
-    row = deployment()
-    row.recipe.inference_lora_routing = policy
+def test_model_placement_enables_native_catalog_only_for_lora_pool(builders):
+    row = deployment("qwen35-9b-lora-16k")
+    row.recipe.inference_lora_routing = "model-spill"
     app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test-image"
     )
     settings, _ = app.servers["Server"]
-    assert (
-        settings["env"].get("SGLANG_SPINDLE_ROUTING_OBSERVATIONS") == "1"
-    ) is observed
+    assert settings["env"]["SGLANG_SPINDLE_MODEL_ROUTING"] == "1"
 
 
 @pytest.mark.parametrize("kind", ["lora", "base", "latest", "pinned"])
@@ -159,6 +141,7 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     assert settings["target_concurrency"] == 16
     assert "compute_region" not in settings
     assert "routing_region" not in settings
+    assert "SGLANG_SPINDLE_MODEL_ROUTING" not in settings["env"]
 
     calls, commands, stops = [], [], []
     process = object()
@@ -198,7 +181,8 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
             "lm_head",
         ]
     else:
-        assert native["enable_cpu_weight_cache"] is True
+        assert native["weight_update_staging"] == "cpu"
+        assert native["weight_version"] == "0"
         assert calls[0][1]["pinned_version"] == (
             None if kind == "latest" else 0 if kind == "base" else 7
         )
@@ -483,7 +467,22 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     monkeypatch.setattr(
         deployment_apps, "run_engine_with_backend", lambda *a, **kw: calls.append(kw)
     )
+    warmed = []
+    monkeypatch.setattr(
+        modal.Function,
+        "from_name",
+        lambda app_name, name: SimpleNamespace(
+            spawn=lambda spec: warmed.append((app_name, name, spec))
+        ),
+    )
     deployment_apps.run_trainer(row, "instance")
+    assert warmed == [
+        (
+            row.recipe.platform["frontend"],
+            "ensure_lora_pool",
+            LoraPoolSpec(row.definition_id).as_dict(),
+        )
+    ]
     assert calls[0]["backend_env"]["SPINDLE_RAY_ADDRESS"] == "10.0.0.1:6379"
     assert (
         json.loads(calls[0]["backend_env"]["SPINDLE_BACKEND_CONFIG"])["miles"][
@@ -494,6 +493,7 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     monkeypatch.setattr(deployment_apps, "start_trainer_cluster", lambda *a, **k: None)
     deployment_apps.run_trainer(row, "worker")
     assert len(calls) == 1
+    assert len(warmed) == 1
 
 
 def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):

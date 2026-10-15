@@ -14,8 +14,7 @@ from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
 from spindle.deployments import validate_frontend
-from spindle.inference.sampling import keepalive_transport, sample_task
-from spindle.inference.routing_simple import SIMPLE_POLICIES
+from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
     SamplingTask,
@@ -28,13 +27,12 @@ from .checkpoint_storage import (
 )
 from .deployment import trainer_deployment_env
 from .deployment_configs import (
-    image_env_json,
     CONFIGS_ENV,
     PLATFORM_ENV,
     configs_from_env,
     platform_from_env,
 )
-from .engines import ModalEnginePlatform
+from .engines import EngineInstanceRecord, ModalEnginePlatform
 from .fft_pool import (
     FFTPoolSpec,
     deploy_pool,
@@ -67,7 +65,7 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
-from .lora_routing import create_router
+from .model_routing import create_model_router
 from .trainer_reconciler import (
     complete_reconcile,
     pending_reconciliations,
@@ -92,15 +90,15 @@ CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
 _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
-_lora_routers = {}
+_model_routers = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
 )
 TRAINER_DEPLOYMENT_ENV = {
     **trainer_deployment_env(),
-    CONFIGS_ENV: image_env_json(os.environ[CONFIGS_ENV]),
-    PLATFORM_ENV: image_env_json(os.environ.get(PLATFORM_ENV, "")),
+    CONFIGS_ENV: os.environ[CONFIGS_ENV],
+    PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
 }
 app = modal.App(APP_NAME)
@@ -235,6 +233,15 @@ async def ensure_lora_pool(spec: dict) -> str:
     return gateway
 
 
+async def _trainer_booted(registry, definition_id: str) -> bool:
+    return any(
+        record.definition_id == definition_id
+        and record.state in {"starting", "running"}
+        for _, value in await registry.list_items("engine_instance:")
+        for record in (EngineInstanceRecord.model_validate(value),)
+    )
+
+
 async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
     """Refresh warm pools locally; serialize only missing-pool deployment."""
     key = spec.app_name
@@ -290,44 +297,23 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if rollout_world_size % rollout_tensor_parallel_size:
         raise ValueError("rollout GPU count must be divisible by tensor parallel size")
     rollout_data_parallel_size = rollout_world_size // rollout_tensor_parallel_size
+    stop_token_ids_only = bool(definition.inference_settings.get("skip_tokenizer_init"))
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
-        routing = definition.recipe.inference_lora_routing
-        measured = routing in {"work", "domains", "capacity", "dlora", *SIMPLE_POLICIES}
-        if routing not in {
-            "affinity",
-            "naive",
-            "work",
-            "domains",
-            "capacity",
-            "dlora",
-            *SIMPLE_POLICIES,
-        }:
-            raise ValueError(f"unknown LoRA routing policy: {routing}")
+        policy = definition.recipe.inference_lora_routing
+        if policy not in {"affinity", "model-spill"}:
+            raise ValueError(f"unknown LoRA routing policy: {policy}")
         router = None
-        if routing != "naive" and task.get("model_id") is not None:
-            if measured and definition.recipe.inference_routing_work_rates is None:
-                raise ValueError(
-                    f"{routing} routing requires measured inference_routing_work_rates"
-                )
-            if spec.app_name not in _lora_routers:
-                _lora_routers[spec.app_name] = create_router(
+        if policy == "model-spill" and task.get("model_id") is not None:
+            if spec.app_name not in _model_routers:
+                _model_routers[spec.app_name] = create_model_router(
                     spec.app_name,
                     gateway,
-                    target=definition.recipe.inference_target_concurrency,
-                    slots=definition.inference_settings.get("max_loras_per_batch", 8),
-                    work_rates=definition.recipe.inference_routing_work_rates
-                    if measured
-                    else None,
-                    domains=routing == "domains",
-                    balanced_domains=routing == "domains",
-                    stable_domains=routing == "domains",
-                    simple_policy=routing if routing in SIMPLE_POLICIES else None,
-                    capacity_aware=routing == "capacity",
-                    dlora=routing == "dlora",
+                    capacity=definition.inference_settings.get("max_running_requests")
+                    or definition.recipe.inference_target_concurrency,
                 )
-            router = _lora_routers[spec.app_name]
+            router = _model_routers[spec.app_name]
 
         async def keep_pool_ready() -> None:
             # Retries can outlive the cached readiness check. The pool's URL
@@ -340,12 +326,10 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             data_parallel_size=rollout_data_parallel_size,
             headers=proxy_auth_headers(),
             context_length=definition.max_context_length,
+            stop_token_ids_only=stop_token_ids_only,
+            model_router=router,
             on_wait=keep_pool_ready,
             stats=stats,
-            lora_router=router,
-            transport=keepalive_transport(http2=True)
-            if definition.recipe.inference_http2
-            else None,
         )
     spec = (
         FFTPoolSpec.base(definition_id)
@@ -365,10 +349,8 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         headers=proxy_auth_headers(),
         on_wait=lambda: _touch_fft_pool(spec),
         context_length=definition.max_context_length,
+        stop_token_ids_only=stop_token_ids_only,
         stats=stats,
-        transport=keepalive_transport(http2=True)
-        if definition.recipe.inference_http2
-        else None,
     )
 
 
@@ -513,7 +495,8 @@ def _plane():
         await prepare_model_assets.remote.aio(model.engine_definition_id)
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
-        else:
+        elif await _trainer_booted(kv, model.engine_definition_id):
+            # Otherwise the trainer deploys the pool once it boots.
             await ensure_lora_pool.spawn.aio(
                 LoraPoolSpec(model.engine_definition_id).as_dict()
             )
@@ -591,7 +574,7 @@ def _plane():
     volumes={CHECKPOINT_ROOT: checkpoint_volume},
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],
 )
-@modal.concurrent(max_inputs=128)
+@modal.concurrent(max_inputs=128, target_inputs=16)
 @modal.asgi_app(requires_proxy_auth=False)
 def server():
     return create_control_plane_app(

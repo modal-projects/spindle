@@ -54,12 +54,10 @@ class BaseConfig:
     inference_min_replicas = 0
     inference_max_replicas = 8
     inference_target_concurrency = 16
+    inference_lora_routing = "affinity"
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}
-    inference_lora_routing = "affinity"
-    inference_routing_work_rates = None
-    inference_http2 = False
 
     miles_cfg = {}
     megatron_cfg = {}

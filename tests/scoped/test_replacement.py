@@ -113,7 +113,7 @@ def test_stitch_run_switch_drains_old_requests_and_gates_new_identity():
         reconciler = AssignedReconciler(store=None, engine=engine, run_id="a")
         reconciler.applied = VersionRef("a", 7)
         token = _expected_run.set("a")
-        async with reconciler.admit(VersionConstraint(min_version=7)):
+        async with reconciler.gate.admit(VersionConstraint(min_version=7)):
             switch = asyncio.create_task(reconciler._switch_run("b"))
             await asyncio.sleep(0)
             assert not switch.done() and events == []
@@ -121,15 +121,15 @@ def test_stitch_run_switch_drains_old_requests_and_gates_new_identity():
         assert events == ["pause", "reset", "resume"]
         assert reconciler.applied == VersionRef("b", 0)
         with pytest.raises(ConstraintUnmet):
-            async with reconciler.admit(VersionConstraint()):
+            async with reconciler.gate.admit(VersionConstraint()):
                 pass
         _expected_run.reset(token)
         token = _expected_run.set("b")
         with pytest.raises(ConstraintUnmet):
-            async with reconciler.admit(VersionConstraint(min_version=1)):
+            async with reconciler.gate.admit(VersionConstraint(min_version=1)):
                 pass
         reconciler.applied = VersionRef("b", 1)
-        async with reconciler.admit(VersionConstraint(min_version=1)) as served:
+        async with reconciler.gate.admit(VersionConstraint(min_version=1)) as served:
             assert served == VersionRef("b", 1)
         _expected_run.reset(token)
 
@@ -212,7 +212,7 @@ def test_cpu_run_switch_retires_after_drain_without_resetting_cache(monkeypatch)
         engine = SimpleNamespace(delta_update_mode="cpu", reset=reset)
         reconciler = AssignedReconciler(store=None, engine=engine, run_id="a")
         reconciler.applied = VersionRef("a", 1)
-        async with reconciler.admit(VersionConstraint(min_version=1)):
+        async with reconciler.gate.admit(VersionConstraint(min_version=1)):
             switch = asyncio.create_task(reconciler._switch_run("b"))
             await asyncio.sleep(0)
             assert not switch.done() and events == []

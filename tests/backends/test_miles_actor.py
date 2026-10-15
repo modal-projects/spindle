@@ -182,6 +182,7 @@ def _load_actor(monkeypatch):
     _module(
         monkeypatch, "spindle.backends.miles_runtime.expert_lora_compat"
     ).enabled = lambda: False
+    _module(monkeypatch, "spindle.backends.miles_runtime.host_syncs").install = dict
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(

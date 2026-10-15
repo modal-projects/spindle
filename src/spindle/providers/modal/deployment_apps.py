@@ -7,6 +7,7 @@ created on demand with the existing LoRA/FFT pool lifecycle.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -17,7 +18,6 @@ import modal.experimental
 from modal.config import config
 
 from spindle.deployments import DeploymentConfig
-from spindle.inference.routing_simple import SIMPLE_POLICIES
 from spindle.inference.serving import (
     start_fft_sidecar,
     start_lora_sidecar,
@@ -43,7 +43,6 @@ from .megatron_image import image as megatron_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
-from .merge_image import image as merge_rollout_image
 from .serve import run_engine_with_backend
 
 
@@ -157,6 +156,8 @@ def run_trainer(deployment, instance_id, platform=None):
     else:
         assets.reload()
         ray_address = None
+    if recipe.parameterization == "lora":
+        _warm_lora_pool(platform["frontend"], deployment.definition_id)
     env = {
         **KERNEL_CACHE_ENV,
         **deployment_env(recipe.trainer_env),
@@ -197,6 +198,16 @@ def run_trainer(deployment, instance_id, platform=None):
     )
 
 
+def _warm_lora_pool(frontend: str, definition_id: str) -> None:
+    """Deploy the sampler pool now that a trainer has GPUs, not while it queues."""
+    try:
+        modal.Function.from_name(frontend, "ensure_lora_pool").spawn(
+            LoraPoolSpec(definition_id).as_dict()
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("warm LoRA pool %s", definition_id)
+
+
 def build_rollout_app(deployment, pool, platform=None, *, image=None):
     """Create one frozen-base LoRA pool or one FFT latest/pinned/base pool."""
     if platform is None:
@@ -218,24 +229,19 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     @app.server(
         name="Server",
         serialized=True,
-        image=image
-        if image is not None
-        else (
-            merge_rollout_image
-            if deployment.inference_settings.get("enable_lora_merge")
-            else image_for("sglang")
-        ),
+        image=image if image is not None else image_for("sglang"),
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
-        env=deployment_env(recipe.inference_env)
-        | (
-            {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
-            if recipe.inference_lora_routing
-            in {"work", "domains", "capacity", "dlora", *SIMPLE_POLICIES}
-            else {}
+        env=deployment_env(
+            recipe.inference_env
+            | (
+                {"SGLANG_SPINDLE_MODEL_ROUTING": "1"}
+                if lora and recipe.inference_lora_routing == "model-spill"
+                else {}
+            )
         ),
         min_containers=minimum,
         max_containers=maximum,
@@ -279,7 +285,6 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     if lora
                     else start_fft_sidecar(
                         **kwargs,
-                        model_path=deployment.asset_path,
                         run_id=pool.model_id,
                         pinned_version=None if pool.latest else pool.version,
                     )

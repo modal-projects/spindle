@@ -12,7 +12,7 @@ import httpx
 from stitch.publish import constrain_request
 from stitch.types import VersionRef
 
-from .lora_routing import LoraRouter
+from .model_routing import ModelRouter
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -34,13 +34,11 @@ TCP_KEEPALIVE_OPTIONS = (
 GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 
 
-def keepalive_transport(*, http2: bool = False) -> httpx.AsyncHTTPTransport:
+def keepalive_transport() -> httpx.AsyncHTTPTransport:
     return httpx.AsyncHTTPTransport(
-        http2=http2,
         socket_options=list(TCP_KEEPALIVE_OPTIONS),
-        # The replica admission gate bounds execution. A hidden 100-connection
-        # client queue can hold a large sampling group's tail until its first
-        # generations finish, invalidating reservations made before dispatch.
+        # Do not queue large sample groups behind HTTPX's 100-connection limit
+        # after their routing reservations have already been made.
         limits=httpx.Limits(max_connections=None),
     )
 
@@ -54,6 +52,7 @@ async def sample_task(
     data_parallel_size: int = 1,
     context_length: int | None = None,
     context_reserve_tokens: int = 1,
+    stop_token_ids_only: bool = False,
     transport: httpx.AsyncBaseTransport | None = None,
     client: httpx.AsyncClient | None = None,
     api_key: str | None = None,
@@ -62,7 +61,7 @@ async def sample_task(
     stats: dict[str, Any] | None = None,
     session_id: str | None = None,
     on_event: Callable[[dict], None] | None = None,
-    lora_router: LoraRouter | None = None,
+    model_router: ModelRouter | None = None,
 ) -> dict[str, Any]:
     request = task["payload"]
     prompt = _prompt_tokens(request["prompt"])
@@ -73,6 +72,7 @@ async def sample_task(
             if context_length is not None
             else None
         ),
+        stop_token_ids_only=stop_token_ids_only,
     )
     replay_flags = {}
     for key in ("return_routed_experts", "return_sampling_mask"):
@@ -94,7 +94,12 @@ async def sample_task(
         raise ValueError("data_parallel_size must be positive")
     request_id = str(task["request_id"])
     cache_affinity_id = _cache_affinity_id(task)
-    routing_session_id = cache_affinity_id or session_id or request_id
+    routing_session_id = (
+        cache_affinity_id
+        or session_id
+        or _conversation_affinity_id(task, prompt)
+        or request_id
+    )
     routed_dp_rank = (
         int.from_bytes(
             hashlib.sha256(routing_session_id.encode()).digest()[:8],
@@ -126,18 +131,6 @@ async def sample_task(
         )
     )
     async with client_context as active_client:
-        routing_prefixes = None
-        if lora_router is not None:
-            await lora_router.refresh()
-            if model_id is None or version is not None:
-                adapter = (
-                    VersionRef(model_id, int(version)).identity
-                    if model_id is not None
-                    else "base"
-                )
-                routing_prefixes = await lora_router.prepare_prefix(
-                    adapter, routing_session_id, prompt=prompt
-                )
         outputs = await asyncio.gather(
             *(
                 _sample_one(
@@ -163,8 +156,9 @@ async def sample_task(
                     trace_attrs=trace_attrs,
                     base_headers=headers,
                     request_timeout=timeout,
-                    lora_router=lora_router,
-                    routing_prefixes=routing_prefixes,
+                    model_router=model_router
+                    if model_id is not None and not latest
+                    else None,
                     group_size=num_samples,
                 )
                 for index in range(num_samples)
@@ -233,9 +227,8 @@ async def _sample_one(
     trace_attrs: dict | None = None,
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
-    lora_router: LoraRouter | None = None,
-    routing_prefixes=None,
-    group_size=1,
+    model_router: ModelRouter | None = None,
+    group_size: int = 1,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -262,19 +255,13 @@ async def _sample_one(
     loop = asyncio.get_running_loop()
     started_at = loop.time()
     deadline = started_at + retry_timeout
-    capacity_delay = 0.01
     delay = RETRY_INITIAL_DELAY_SECONDS
     reroute_attempt = 0
     transport_retries = 0
     rejected: set[str] = set()
     waiting_logged = False
     physical_attempt = 0
-    admission_rejected: set[str] = set()
-    adapter = (
-        VersionRef(model_id, int(version)).identity if model_id is not None else "base"
-    )
     while True:
-        admission_busy = False
         cause: httpx.TransportError | None = None
         resolved = (
             (gateway.rstrip("/"),) if isinstance(gateway, str) else await gateway()
@@ -314,7 +301,6 @@ async def _sample_one(
                 latest=int(version) if latest else None,
                 exact=None if latest else int(version),
             )
-        upstream = None
         physical_attempt += 1
         observation = SampleAttempt(
             on_event,
@@ -323,64 +309,34 @@ async def _sample_one(
                 "sequence_index": index,
                 "attempt_number": physical_attempt,
                 "routed_dp_rank": routed_dp_rank,
+                "upstream": gateway_url,
                 "prompt_tokens": len(prompt),
             },
         )
-        capacity_rejected = False
-        routing_details = {}
-        if lora_router is not None:
-            await lora_router.refresh()
-            selection = dict(
-                prompt=prompt,
-                output_tokens=params.get("max_new_tokens", 1),
-                prefixes=routing_prefixes,
+        upstream = None
+        if model_router is not None:
+            await model_router.refresh()
+            details = {}
+            upstream = model_router.select_destination(
+                VersionRef(str(model_id), int(version)).identity,
+                cache_affinity_id or routing_session_id,
                 reservation_id=observation.id,
-                details=routing_details,
                 group_id=request_id if physical_attempt == 1 else observation.id,
                 group_size=group_size if physical_attempt == 1 else 1,
                 sample_index=index if physical_attempt == 1 else 0,
+                details=details,
             )
-            upstream = lora_router.select_destination(
-                model_id or "base",
-                adapter,
-                cache_affinity_id or routing_session_id,
-                exclude_hosts=admission_rejected,
-                **selection,
-            )
-            if upstream is None and admission_rejected:
-                # Every currently eligible destination has rejected admission.
-                # Stop probing and queue using ordinary placement. Never turn
-                # saturation into an endless retry loop or a frontend queue.
-                upstream = lora_router.select_destination(
-                    model_id or "base",
-                    adapter,
-                    cache_affinity_id or routing_session_id,
-                    **selection,
-                )
-                routing_details.pop("admission_limit", None)
-                routing_details["admission_fallback"] = True
+            observation.attrs.update(selected_replica=upstream, routing=details)
             if upstream is not None:
-                # Flash affinity headers take precedence over exact upstreams.
-                # Keep logical conversation affinity in the payload/DP rank,
-                # but send only the exact replica selector to the proxy.
                 headers = {
                     k: v
                     for k, v in headers.items()
                     if k.lower()
                     not in {"modal-session-id", "modal-routing-affinity-key"}
                 }
-                headers["Modal-Flash-Upstream"] = lora_router.replicas[
+                headers["Modal-Flash-Upstream"] = model_router.replicas[
                     upstream
                 ].upstream
-                if "admission_limit" in routing_details:
-                    headers["X-Spindle-Routing-Limit"] = str(
-                        routing_details["admission_limit"]
-                    )
-        observation.attrs.update(
-            upstream=upstream or gateway_url,
-            selected_replica=upstream,
-            routing=routing_details,
-        )
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
@@ -393,7 +349,7 @@ async def _sample_one(
                 extensions={"trace": HTTPTrace(attempt_result).record},
             )
             if upstream is not None:
-                # Also remove competing defaults on a caller-provided client.
+                # Caller-provided clients may also carry conflicting defaults.
                 request.headers.pop("Modal-Session-ID", None)
                 request.headers.pop("Modal-Routing-Affinity-Key", None)
             response = await client.send(request)
@@ -414,38 +370,16 @@ async def _sample_one(
             )
         else:
             attempt_result["http_status"] = response.status_code
-            capacity_rejected = (
-                response.status_code == 503
-                and response.headers.get("x-spindle-capacity-rejected") == "1"
-            )
             actual_replica = response.headers.get("x-spindle-replica")
             if upstream is not None and actual_replica and actual_replica != upstream:
-                # An older proxy may ignore exact routing. Preserve weight
-                # guarantees, and invalidate the misleading route observation.
                 attempt_result["route_mismatch"] = True
             if actual_replica:
                 attempt_result["upstream"] = actual_replica
-            admission_busy = (
-                response.status_code == 429
-                and response.headers.get("x-spindle-routing-rejected") == "1"
-                and upstream is not None
-                and actual_replica == upstream
-                and "admission_limit" in routing_details
-            )
-            if admission_busy:
-                admission_rejected.add(upstream)
-                feedback = response.json()
-                lora_router.note_busy(
-                    upstream, int(feedback["active"]), feedback["request_ids"]
-                )
-                attempt_result["admission_rejected"] = True
-                reroute_attempt += 1
-            attempt_result["admission_checked"] = (
-                response.headers.get("x-spindle-routing-admitted") == "1"
-            )
             retryable = (
                 response.status_code == 409
-                or (response.status_code in {404, 408, 429} and lora_router is not None)
+                or (
+                    response.status_code in {404, 408, 429} and model_router is not None
+                )
                 or response.status_code >= 500
                 or (response.status_code == 404 and not isinstance(gateway, str))
             )
@@ -458,9 +392,6 @@ async def _sample_one(
                 if not isinstance(result, dict):
                     raise ValueError("SGLang returned a non-object response")
                 attempt_result.update(
-                    lora_merged=(result.get("meta_info") or {}).get(
-                        "lora_merged", False
-                    ),
                     generated_tokens=len(_sequence(result)["tokens"]),
                     **timing_metadata(result.get("meta_info") or {}),
                 )
@@ -470,8 +401,8 @@ async def _sample_one(
                     else None
                 )
                 if version_error is not None:
-                    reason = version_error
                     attempt_result["version_error"] = version_error
+                    reason = version_error
                     if not isinstance(gateway, str):
                         rejected.add(gateway_url)
                     reroute_attempt += 1
@@ -487,15 +418,15 @@ async def _sample_one(
                     attempt_result["ok"] = True
                     if stats is not None:
                         stats["reroutes"] = stats.get("reroutes", 0) + reroute_attempt
-                        stats["upstream"] = attempt_result["upstream"]
+                        stats["upstream"] = gateway_url
                     return result
             else:
                 reason = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code >= 500:
-                    if not capacity_rejected and not isinstance(gateway, str):
+                    if not isinstance(gateway, str):
                         rejected.add(gateway_url)
                     reroute_attempt += 1
-                    if index == 0 and not capacity_rejected:
+                    if index == 0:
                         print(
                             "execute_sample reroute "
                             f"request={request_id} attempt={reroute_attempt} "
@@ -504,22 +435,15 @@ async def _sample_one(
                             flush=True,
                         )
         finally:
-            if lora_router is not None:
-                lora_router.release(
+            if model_router is not None:
+                model_router.release(
                     upstream,
-                    adapter,
                     reservation_id=observation.id,
                     failed=cause is not None
                     or attempt_result.get("route_mismatch", False)
                     or "version_error" in attempt_result
-                    or (
-                        attempt_result.get("http_status", 200) >= 500
-                        and not capacity_rejected
-                    )
-                    or (
-                        attempt_result.get("http_status", 200) in {404, 408, 429}
-                        and not admission_busy
-                    ),
+                    or attempt_result.get("http_status", 200) >= 500
+                    or attempt_result.get("http_status", 200) in {404, 408, 429},
                 )
             observation.finish()
         remaining = deadline - loop.time()
@@ -528,16 +452,6 @@ async def _sample_one(
             raise RuntimeError(
                 f"rollout {state} after {retry_timeout:g}s: {reason}"
             ) from cause
-        if capacity_rejected:
-            # A bounded local queue is flow control, not a failed engine.
-            # Retain logical KV affinity and reconsider all destinations.
-            await _backoff(
-                stats, min(remaining, capacity_delay * random.uniform(0.8, 1.2))
-            )
-            capacity_delay = min(0.5, capacity_delay * 2)
-            continue
-        if admission_busy:
-            continue
         if on_wait is not None:
             await on_wait()
         await _backoff(stats, min(remaining, delay * random.uniform(0.8, 1.2)))
@@ -569,6 +483,35 @@ def _cache_affinity_id(task: dict[str, Any]) -> str | None:
     return f"affinity-{digest[:32]}"
 
 
+CONVERSATION_MARKER_TOKENS = 3
+MIN_CONVERSATION_PREFIX_TOKENS = 16
+
+
+def _conversation_affinity_id(task: dict[str, Any], prompt: list[int]) -> str | None:
+    """Route every turn after the first of a multi-turn conversation to one replica."""
+    n = CONVERSATION_MARKER_TOKENS
+    if len(prompt) < 2 * n:
+        return None
+    marker = prompt[-n:]
+    ends: list[int] = []
+    start = 0
+    while len(ends) < 2:
+        try:
+            index = prompt.index(marker[0], start)
+        except ValueError:
+            break
+        if prompt[index : index + n] == marker:
+            ends.append(index + n)
+        start = index + 1
+    if len(ends) < 2 or ends[1] < MIN_CONVERSATION_PREFIX_TOKENS:
+        return None
+    digest = hashlib.sha256(
+        f"{task['sampling_session_id']}\0{task.get('model_id')}\0".encode()
+    )
+    digest.update(b"".join(token.to_bytes(4, "little") for token in prompt[: ends[1]]))
+    return f"conversation-{digest.hexdigest()[:32]}"
+
+
 def _prompt_tokens(prompt: dict[str, Any]) -> list[int]:
     tokens: list[int] = []
     for chunk in prompt.get("chunks") or ():
@@ -587,6 +530,7 @@ def _sampling_params(
     params: dict[str, Any],
     *,
     remaining_context: int | None = None,
+    stop_token_ids_only: bool = False,
 ) -> dict[str, Any]:
     output = {
         key: params[key]
@@ -605,6 +549,12 @@ def _sampling_params(
     ):
         output["stop_token_ids"] = stop
     elif stop is not None:
+        if stop_token_ids_only:
+            # SGLang matches stop strings by decoding, which needs its tokenizer.
+            raise ValueError(
+                "this model's sampler runs without a tokenizer; "
+                "pass stop sequences as token IDs"
+            )
         output["stop"] = stop
     if params.get("max_tokens") is not None:
         output["max_new_tokens"] = int(params["max_tokens"])

@@ -7,7 +7,6 @@ import json
 import os
 import time
 import uuid
-from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,8 +18,6 @@ from fastapi.responses import JSONResponse, Response
 from stitch.types import VersionConstraint, VersionRef
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
-from .lora_routing import prefix_key
-from .dlora_scheduler import MergeProfile, ReplicaBusy, ReplicaScheduler
 
 
 def create_app(
@@ -36,47 +33,19 @@ def create_app(
             timeout=3000,
             trust_env=False,
             transport=transport,
+            # SGLang owns admission. Long generations must not exhaust the
+            # HTTP pool before its configured concurrency or block control calls.
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=20),
         )
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
-        app.state.active_adapters = Counter()
-        app.state.recent_adapters = OrderedDict()
-        app.state.prefixes = OrderedDict()
-        app.state.active = 0
-        app.state.adapter_loads = 0
-        app.state.adapter_load_seconds = 0.0
         app.state.routing_requests = {}
-        app.state.routing_snapshot = {}
+        app.state.routing_catalog = {}
         app.state.routing_read_at = 0.0
-        app.state.cache_valid_after = 0.0
-        app.state.mode_scheduler = None
-        if raw_profile := os.environ.get("SGLANG_SPINDLE_MERGE_PROFILE"):
-            profile = MergeProfile(**json.loads(raw_profile))
-            if profile.max_batch_adapters is not None:
-                response = await app.state.client.get("/server_info")
-                response.raise_for_status()
-                if profile.max_batch_adapters > response.json()["max_loras_per_batch"]:
-                    raise ValueError(
-                        "Sidecar adapter capacity exceeds the native batch limit"
-                    )
-
-            def invalidate():
-                app.state.prefixes.clear()
-                app.state.cache_valid_after = time.time()
-                app.state.routing_snapshot = {}
-                app.state.routing_read_at = 0.0
-
-            app.state.mode_scheduler = ReplicaScheduler(
-                app.state.client,
-                profile,
-                invalidate=invalidate,
-            )
         try:
             yield
         finally:
-            if app.state.mode_scheduler is not None:
-                await app.state.mode_scheduler.aclose()
             pending = list(app.state.adapter_resolutions.values())
             for task in pending:
                 task.cancel()
@@ -88,199 +57,56 @@ def create_app(
     @app.get("/routing-state")
     async def routing_state():
         now = time.monotonic()
-        work = None
-        if os.environ.get("SGLANG_SPINDLE_ROUTING_OBSERVATIONS") == "1":
-            if now - app.state.routing_read_at > 0.5:
-                app.state.routing_read_at = now
-                path = Path("/tmp/spindle-routing-work.json")
-                try:
-                    app.state.routing_snapshot = json.loads(
-                        await asyncio.to_thread(path.read_text)
+        if now - app.state.routing_read_at > 0.5:
+            app.state.routing_read_at = now
+            try:
+                app.state.routing_catalog = json.loads(
+                    await asyncio.to_thread(
+                        Path("/tmp/spindle-adapter-catalog.json").read_text
                     )
-                except (OSError, ValueError):
-                    app.state.routing_snapshot = {}
-            snapshot = app.state.routing_snapshot
-            if snapshot and snapshot["timestamp"] >= app.state.cache_valid_after:
-                current = app.state.routing_requests
-                rows = {
-                    r["rid"]: r for r in snapshot["requests"] if r["rid"] in current
-                }
-                rows.update(
-                    (rid, row) for rid, row in current.items() if rid not in rows
                 )
-                adapter_decode_maxima = {}
-                for row in rows.values():
-                    adapter = row["adapter"]
-                    adapter_decode_maxima[adapter] = max(
-                        adapter_decode_maxima.get(adapter, 0), row["decode_tokens"]
-                    )
-                work = dict(
-                    age_seconds=time.time() - snapshot["timestamp"],
-                    incarnation=snapshot["incarnation"],
-                    sequence=snapshot["sequence"],
-                    prefixes=snapshot["prefixes"],
-                    cpu_adapters=snapshot["cpu_adapters"],
-                    gpu_adapters=snapshot["gpu_adapters"],
-                    request_ids=list(rows),
-                    pending_adapters=list({r["adapter"] for r in rows.values()}),
-                    prefill_tokens=sum(r["prefill_tokens"] for r in rows.values()),
-                    decode_tokens=sum(r["decode_tokens"] for r in rows.values()),
-                    adapter_decode_maxima=adapter_decode_maxima,
-                    snapshot_seconds=snapshot["snapshot_seconds"],
-                    cache_kind=snapshot["cache_kind"],
-                )
+            except (OSError, ValueError):
+                app.state.routing_catalog = {}
+        catalog = app.state.routing_catalog
         return {
             "replica": os.environ.get("MODAL_TASK_ID", "local"),
-            "admission_supported": True,
-            "active": app.state.active,
-            "adapters": dict(app.state.active_adapters),
-            # Recent use is a residency estimate, not a GPU-cache assertion.
-            "recent": list(app.state.recent_adapters),
-            "prefixes": [k for k, t in app.state.prefixes.items() if now - t < 120],
-            "adapter_loads": app.state.adapter_loads,
-            "adapter_load_seconds": app.state.adapter_load_seconds,
-            "work": work,
-            "mode": app.state.mode_scheduler.snapshot()
-            if app.state.mode_scheduler is not None
-            else None,
+            "active": len(app.state.routing_requests),
+            "request_ids": list(app.state.routing_requests),
+            "pending_adapters": sorted(set(app.state.routing_requests.values())),
+            "cpu_adapters": catalog.get("cpu_adapters", []),
+            "age_seconds": time.time() - catalog["timestamp"] if catalog else None,
         }
-
-    @app.post("/generate")
-    async def generate(request: Request) -> Response:
-        payload = await request.json()
-        raw_limit = request.headers.get("x-spindle-routing-limit")
-        admission_limit = None
-        if raw_limit is not None:
-            try:
-                admission_limit = int(raw_limit)
-                if admission_limit < 1:
-                    raise ValueError
-            except ValueError:
-                return JSONResponse(
-                    {"detail": "Invalid routing limit"}, status_code=400
-                )
-            # No await separates this check from incrementing active below.
-            # The event loop owns the local admission count. Rejected requests
-            # neither resolve/register weights nor enter the engine queue.
-            if app.state.active >= admission_limit:
-                return JSONResponse(
-                    {
-                        "detail": "Replica is busy",
-                        "active": app.state.active,
-                        "request_ids": list(app.state.routing_requests),
-                    },
-                    status_code=429,
-                    headers={
-                        "x-spindle-routing-rejected": "1",
-                        "x-spindle-replica": os.environ.get("MODAL_TASK_ID", "local"),
-                    },
-                )
-        scheduler = app.state.mode_scheduler
-        if (
-            scheduler is not None
-            and app.state.active
-            >= scheduler.profile.capacity + scheduler.profile.queue_buffer
-        ):
-            # Latest-version resolution awaits I/O before scheduler.submit().
-            # Include those requests in the replica's total admission bound.
-            scheduler.rejections += 1
-            return JSONResponse(
-                {"detail": "Replica admission capacity is full"},
-                status_code=503,
-                headers={
-                    "x-spindle-capacity-rejected": "1",
-                    "x-spindle-replica": os.environ.get("MODAL_TASK_ID", "local"),
-                },
-            )
-        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
-        constraint = VersionConstraint.from_payload(payload)
-        run_id = payload.get("weight_run_id")
-        adapter = (
-            VersionRef(str(run_id), constraint.exact_version).identity
-            if run_id is not None and constraint.exact_version is not None
-            else payload.get("lora_path", "base")
-        )
-        if isinstance(rid, str):
-            app.state.routing_requests[rid] = dict(
-                rid=rid,
-                adapter=adapter,
-                prefill_tokens=len(payload.get("input_ids", ())),
-                decode_tokens=payload.get("sampling_params", {}).get(
-                    "max_new_tokens", 1
-                ),
-            )
-        app.state.active += 1
-        try:
-            if scheduler is None:
-                response = await generate_response(request, payload)
-            else:
-                if run_id is not None and constraint.exact_version is None:
-                    # Resolve once: merge compatibility and generation must use
-                    # the same immutable version even if a publication arrives.
-                    try:
-                        ref, error = await _prepare_adapter(
-                            app, bulletin, str(run_id), constraint
-                        )
-                    except (SnapshotNotFound, ValueError) as exc:
-                        return JSONResponse(
-                            {"error": f"adapter version is not ready: {exc}"},
-                            status_code=409,
-                        )
-                    if error is not None:
-                        return Response(
-                            content=error.content, status_code=error.status_code
-                        )
-                    payload["weight_version"] = {"exact_version": ref.version}
-                    constraint = VersionConstraint.from_payload(payload)
-                    adapter = ref.identity
-                    if isinstance(rid, str):
-                        app.state.routing_requests[rid]["adapter"] = adapter
-
-                async def prepare():
-                    if run_id is not None:
-                        _, error = await _prepare_adapter(
-                            app, bulletin, str(run_id), constraint
-                        )
-                        if error is not None:
-                            error.raise_for_status()
-
-                try:
-                    response = await scheduler.submit(
-                        adapter,
-                        len(payload.get("input_ids", ())),
-                        payload.get("sampling_params", {}).get("max_new_tokens", 1),
-                        prepare,
-                        lambda: generate_response(request, payload),
-                    )
-                except ReplicaBusy:
-                    response = JSONResponse(
-                        {"detail": "Replica admission capacity is full"},
-                        status_code=503,
-                        headers={"x-spindle-capacity-rejected": "1"},
-                    )
-            response.headers["x-spindle-replica"] = os.environ.get(
-                "MODAL_TASK_ID", "local"
-            )
-            if admission_limit is not None:
-                response.headers["x-spindle-routing-admitted"] = "1"
-            return response
-        finally:
-            app.state.active -= 1
-            if isinstance(rid, str):
-                app.state.routing_requests.pop(rid, None)
 
     @app.get("/health")
     async def health() -> Response:
-        if app.state.mode_scheduler is not None and app.state.mode_scheduler.failure:
-            return JSONResponse(
-                {"detail": app.state.mode_scheduler.failure}, status_code=503
-            )
         response = await app.state.client.get("/health")
         return Response(
             content=response.content,
             status_code=response.status_code,
             media_type=response.headers.get("content-type"),
         )
+
+    @app.post("/generate")
+    async def generate(request: Request) -> Response:
+        payload = await request.json()
+        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        constraint = VersionConstraint.from_payload(payload)
+        run_id = payload.get("weight_run_id")
+        if isinstance(rid, str):
+            app.state.routing_requests[rid] = (
+                VersionRef(str(run_id), constraint.exact_version).identity
+                if run_id is not None and constraint.exact_version is not None
+                else payload.get("lora_path", "base")
+            )
+        try:
+            response = await generate_response(request, payload)
+            response.headers["x-spindle-replica"] = os.environ.get(
+                "MODAL_TASK_ID", "local"
+            )
+            return response
+        finally:
+            if isinstance(rid, str):
+                app.state.routing_requests.pop(rid, None)
 
     async def generate_response(request: Request, payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
@@ -306,30 +132,11 @@ def create_app(
                     status_code=409,
                 )
 
-        adapter = payload.get("lora_path", "base")
         if isinstance(payload["rid"], str):
-            app.state.routing_requests[payload["rid"]]["adapter"] = adapter
-        affinity = payload.get("session_id")
-        key = prefix_key(adapter, affinity) if isinstance(affinity, str) else None
-        if key is not None:
-            app.state.prefixes[key] = time.monotonic()
-            app.state.prefixes.move_to_end(key)
-            if len(app.state.prefixes) > 4096:
-                app.state.prefixes.popitem(last=False)
-        app.state.active_adapters[adapter] += 1
-        try:
-            response = await _post_generate(app.state.client, request, payload)
-        finally:
-            if key is not None and key in app.state.prefixes:
-                app.state.prefixes[key] = time.monotonic()
-                app.state.prefixes.move_to_end(key)
-            app.state.active_adapters[adapter] -= 1
-            if not app.state.active_adapters[adapter]:
-                del app.state.active_adapters[adapter]
-            app.state.recent_adapters[adapter] = time.monotonic()
-            app.state.recent_adapters.move_to_end(adapter)
-            while len(app.state.recent_adapters) > 32:
-                app.state.recent_adapters.popitem(last=False)
+            app.state.routing_requests[payload["rid"]] = payload.get(
+                "lora_path", "base"
+            )
+        response = await _post_generate(app.state.client, request, payload)
         if response is None:
             return Response(status_code=499)
         try:
@@ -344,17 +151,7 @@ def create_app(
             metadata = body.setdefault("meta_info", {})
             metadata["weight_version_start"] = served_version
             metadata["weight_version_end"] = served_version
-        headers = {}
-        if (
-            response.status_code == 503
-            and "request queue is full" in response.text.lower()
-        ):
-            headers["x-spindle-capacity-rejected"] = "1"
-        if isinstance(body, dict) and app.state.mode_scheduler is not None:
-            body.setdefault("meta_info", {})["lora_merged"] = (
-                app.state.mode_scheduler.mode == adapter
-            )
-        return JSONResponse(body, status_code=response.status_code, headers=headers)
+        return JSONResponse(body, status_code=response.status_code)
 
     return app
 
@@ -407,7 +204,6 @@ async def _prepare_adapter(
                     if resolved.identity in app.state.registered_adapters:
                         return resolved, None
                     path = await asyncio.to_thread(bulletin.resolve, resolved)
-                started = time.monotonic()
                 response = await app.state.client.post(
                     "/load_lora_adapter",
                     json={
@@ -418,8 +214,6 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
-                app.state.adapter_loads += 1
-                app.state.adapter_load_seconds += time.monotonic() - started
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 

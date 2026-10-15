@@ -4,6 +4,7 @@ import json
 import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -13,6 +14,7 @@ from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.errors import RecordNotFound
 from spindle.providers.local import InMemoryKeyValueStore
 from spindle.providers.modal import fft_pool
+from spindle.providers.modal.engines import EngineInstanceRecord
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
 
@@ -38,6 +40,38 @@ def test_definitions_come_only_from_the_configured_records() -> None:
         FULL_DEFINITION,
         LORA_DEFINITION,
     }
+
+
+@pytest.mark.parametrize("policy", ["affinity", "model-spill"])
+def test_lora_sampling_shares_router_across_models_only_when_enabled(
+    monkeypatch, policy
+):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    definition = modal_app.module_for(LORA_DEFINITION)
+    monkeypatch.setattr(definition.recipe, "inference_lora_routing", policy)
+    monkeypatch.setattr(modal_app, "_model_routers", {})
+    monkeypatch.setattr(
+        modal_app, "_ready_lora_pool", AsyncMock(return_value="https://gateway")
+    )
+    monkeypatch.setattr(modal_app, "proxy_auth_headers", dict)
+    sample = AsyncMock(return_value={})
+    factory = Mock(return_value=object())
+    monkeypatch.setattr(modal_app, "sample_task", sample)
+    monkeypatch.setattr(modal_app, "create_model_router", factory)
+
+    async def scenario():
+        for model in ("one", "two"):
+            await modal_app._execute_sample(
+                {"engine_definition_id": LORA_DEFINITION, "model_id": model}, {}
+            )
+
+    asyncio.run(scenario())
+    assert factory.call_count == (1 if policy == "model-spill" else 0)
+    assert all(
+        call.kwargs["model_router"]
+        is (factory.return_value if policy == "model-spill" else None)
+        for call in sample.await_args_list
+    )
 
 
 def test_trainer_autoscaling_supports_full_and_lora_definitions() -> None:
@@ -180,6 +214,60 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
         ).as_dict(),
         FFTPoolSpec(FULL_DEFINITION, "session:train:0", True, 0).as_dict(),
     ]
+
+
+@pytest.mark.parametrize(
+    ("trainer_state", "spawns_pool"),
+    [(None, False), ("stopped", False), ("starting", True), ("running", True)],
+)
+def test_prepare_model_leaves_lora_pool_to_trainer_boot(
+    monkeypatch, trainer_state, spawns_pool
+) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = []
+
+    async def prepare(definition_id: str) -> None:
+        return None
+
+    async def spawn(spec: dict) -> None:
+        spawned.append(spec)
+
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "ensure_lora_pool",
+        SimpleNamespace(spawn=SimpleNamespace(aio=spawn)),
+    )
+
+    async def run() -> None:
+        if trainer_state is not None:
+            record = EngineInstanceRecord(
+                instance_id="engine-a",
+                definition_id=LORA_DEFINITION,
+                revision="",
+                state=trainer_state,
+            )
+            await registry.put(
+                "engine_instance:engine-a", record.model_dump(mode="json")
+            )
+        await modal_app._plane().prepare_model(
+            SimpleNamespace(
+                engine_definition_id=LORA_DEFINITION,
+                model_id="session:train:0",
+                spec={},
+            )
+        )
+
+    asyncio.run(run())
+    pool = LoraPoolSpec(LORA_DEFINITION).as_dict()
+    assert spawned == ([pool] if spawns_pool else [])
 
 
 def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
@@ -349,81 +437,6 @@ def test_execute_sample_routes_lora_models_to_shared_pool(monkeypatch) -> None:
         "version_served_start": 3,
         "version_served_end": 3,
     }
-
-
-@pytest.mark.parametrize(
-    "routing",
-    [
-        "work",
-        "domains",
-        "capacity",
-        "adapter-home",
-        "adapter-two",
-        "adapter-spill",
-        "balanced-home",
-        "balanced-spill",
-        "model-home",
-        "model-spill",
-        "bounded-kv",
-        "least-load",
-    ],
-)
-def test_execute_sample_uses_one_calibrated_router_per_pool(monkeypatch, routing):
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    definition = modal_app.module_for(LORA_DEFINITION)
-    rates = {"prefill_tokens_per_second": 1000}
-    monkeypatch.setattr(definition.recipe, "inference_lora_routing", routing)
-    monkeypatch.setattr(definition.recipe, "inference_routing_work_rates", rates)
-    monkeypatch.setattr(definition.recipe, "inference_http2", True)
-    monkeypatch.setattr(modal_app, "_lora_routers", {})
-    created, used = [], []
-    router = object()
-    transport = object()
-    transport_options = []
-
-    def make_transport(**options):
-        transport_options.append(options)
-        return transport
-
-    async def ready(spec):
-        return "https://gateway"
-
-    def create(*args, **options):
-        created.append((args, options))
-        return router
-
-    async def sample(task, gateway, *, lora_router, **options):
-        assert options["transport"] is transport
-        used.append(lora_router)
-        return {}
-
-    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
-    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
-    monkeypatch.setattr(modal_app, "_ready_lora_pool", ready)
-    monkeypatch.setattr(modal_app, "create_router", create)
-    monkeypatch.setattr(modal_app, "sample_task", sample)
-    monkeypatch.setattr(modal_app, "keepalive_transport", make_transport)
-
-    async def run():
-        for model in ("model-a", "model-b"):
-            await modal_app._execute_sample(
-                {"engine_definition_id": LORA_DEFINITION, "model_id": model}, {}
-            )
-
-    asyncio.run(run())
-    assert used == [router, router]
-    assert transport_options == [{"http2": True}, {"http2": True}]
-    assert len(created) == 1
-    options = created[0][1]
-    assert options["work_rates"] is rates
-    assert options["domains"] is (routing == "domains")
-    assert options["balanced_domains"] is (routing == "domains")
-    assert options["stable_domains"] is (routing == "domains")
-    assert options["simple_policy"] == (
-        None if routing in {"work", "domains", "capacity"} else routing
-    )
-    assert options["capacity_aware"] is (routing == "capacity")
-    assert not options.get("prefill_once", False)
 
 
 def test_ensure_lora_pool_records_deployment(monkeypatch) -> None:

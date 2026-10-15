@@ -22,7 +22,9 @@ BASE_IMAGE = (
     f"radixark/miles:{MILES_RELEASE}"
     "@sha256:6355834f16bacd35d5d40c43f142e3758376f7b2e8d678bccfe870c092bd96bf"
 )
-MILES_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
+MILES_RELEASE_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
+MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
+MILES_BRANCH = "spindle-miles"
 MILES_PATH = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"
 
@@ -38,7 +40,9 @@ def _check_release(miles_commit: str) -> None:
     dockerfile = Path(MILES_PATH, "docker", "Dockerfile").read_text()
     bridge = re.search(r"Megatron-Bridge[.]git@([0-9a-f]{40})", dockerfile)[1]
     installed = json.loads(distribution("megatron-bridge").read_text("direct_url.json"))
-    assert _head(MILES_PATH) == miles_commit, "Miles is not at MILES_COMMIT"
+    assert _head(MILES_PATH) == miles_commit, (
+        "Miles base image differs from the release commit"
+    )
     assert _head(MEGATRON_PATH) == lock["megatron_commit"], (
         "Megatron-LM differs from release-lock.json"
     )
@@ -48,6 +52,58 @@ def _check_release(miles_commit: str) -> None:
     print("megatron-lm", lock["megatron_commit"], "megatron-bridge", bridge)
 
 
+BRIDGE_IMPORT_CACHE_PATCH = (
+    "--- a/megatron/bridge/models/conversion/model_bridge.py\n"
+    "+++ b/megatron/bridge/models/conversion/model_bridge.py\n"
+    "@@ -21,6 +21,7 @@\n"
+    " import math\n"
+    " import re\n"
+    " import warnings\n"
+    "+from collections import Counter\n"
+    " from dataclasses import dataclass, field, fields, is_dataclass\n"
+    " from pathlib import Path\n"
+    " from typing import (\n"
+    "@@ -1470,6 +1471,11 @@\n"
+    "         self.unquantized_state_dict = None\n"
+    " \n"
+    "         _hf_import_cache: Dict[str, torch.Tensor] = {}\n"
+    "+        remaining_grouped_uses = Counter(\n"
+    "+            str(task.mapping.hf_param)\n"
+    "+            for task in hf_to_megatron_tasks\n"
+    '+            if task.megatron_module is not None and getattr(task.mapping, "is_grouped_export", False)\n'
+    "+        )\n"
+    "         for task in self._with_progress_tracking(hf_to_megatron_tasks, description):\n"
+    "             # None means megatron module not on current rank, skip if this task is not going to happen\n"
+    "             if task.megatron_module is None:\n"
+    "@@ -1483,6 +1489,12 @@\n"
+    "                 hf_weights = self.maybe_modify_loaded_hf_weight(task.mapping.hf_param, hf_state_dict)\n"
+    "                 if is_grouped:\n"
+    "                     _hf_import_cache[hf_param_key] = hf_weights\n"
+    "+            if is_grouped:\n"
+    "+                remaining_grouped_uses[hf_param_key] -= 1\n"
+    "+                if remaining_grouped_uses[hf_param_key] == 0:\n"
+    "+                    # The local reference keeps this tensor alive through conversion.\n"
+    "+                    # Retaining earlier layers would cache a full expanded model per rank.\n"
+    "+                    del _hf_import_cache[hf_param_key]\n"
+    " \n"
+    "             # 2) Delegate conversion & distribution to the bridge\n"
+    "             converted_weights = self._convert_loaded_hf_weight(task, hf_weights)\n"
+)
+
+# The release has the DSA backend hooks but omits the TileLang implementation.
+# Upstream #5049 adds the kernels and their packed/context-parallel tests.
+# Fetching the commit by hash pins its exact contents, unlike a generated .diff.
+DSA_KERNEL_COMMIT = "4f657171b150510cafc48f429673fb1b2c4c098d"
+DSA_KERNEL_INSTALL = (
+    f"git -C {MEGATRON_PATH} fetch --depth=2 --no-tags"
+    f" https://github.com/NVIDIA/Megatron-LM.git {DSA_KERNEL_COMMIT}"
+    f" && git -C {MEGATRON_PATH} diff --binary {DSA_KERNEL_COMMIT}^ {DSA_KERNEL_COMMIT}"
+    " > /tmp/dsa-kernels.diff"
+    f" && git -C {MEGATRON_PATH} apply /tmp/dsa-kernels.diff"
+    " && rm /tmp/dsa-kernels.diff"
+)
+
+
 image = (
     modal.Image.from_registry(BASE_IMAGE)
     .entrypoint([])
@@ -55,7 +111,6 @@ image = (
         {
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE)
@@ -68,7 +123,19 @@ image = (
         "opentelemetry-exporter-otlp-proto-grpc==1.43.0",
         "opentelemetry-exporter-otlp-proto-http==1.43.0",
     )
-    .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
+    .run_function(_check_release, kwargs={"miles_commit": MILES_RELEASE_COMMIT})
+    .run_commands(
+        f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY}"
+        f" refs/heads/{MILES_BRANCH}"
+        f" && git -C {MILES_PATH} checkout -B {MILES_BRANCH} FETCH_HEAD",
+        "python - <<'PY'\n"
+        "from importlib.metadata import distribution\n"
+        "import subprocess\n"
+        "root = distribution('megatron-bridge').locate_file('')\n"
+        "subprocess.run(['patch', '-p1', '-d', str(root)], input="
+        + repr(BRIDGE_IMPORT_CACHE_PATCH)
+        + ", text=True, check=True)\nPY\n",
+    )
     .run_commands(
         "pip install --no-deps 'peft>=0.18.1'",
         MEGATRON_RUNTIME_CHECK,
@@ -77,5 +144,6 @@ image = (
         "('load_slot', 'unload_slot', 'forward_backward', "
         "'forward_only', 'optim_step', 'save_slot', 'export_slot'))\"",
     )
+    .run_commands(DSA_KERNEL_INSTALL)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )

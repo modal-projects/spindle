@@ -5,10 +5,11 @@ from typing import Any
 import httpx
 import zstandard
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from spindle.errors import EngineSaturated, RecordNotFound, SequenceConflict
+from spindle.proto.responses import PROTOBUF_MEDIA_TYPE, EncodedResult
 
 from .api import (
     JSON_OPERATIONS,
@@ -137,13 +138,16 @@ def create_engine_app(server: EngineApi, *, token: str | None = None) -> FastAPI
         return {"request_id": request_id}
 
     @app.post("/api/v1/retrieve_future")
-    async def retrieve_future(body: RetrieveFutureBody) -> JSONResponse:
+    async def retrieve_future(body: RetrieveFutureBody) -> Response:
         state = await server.retrieve_future(body.request_id, body.timeout)
         if state is None:
             raise HTTPException(
                 status_code=404,
                 detail={"error": "unknown_future"},
             )
+        if isinstance(state.result, EncodedResult):
+            # Only completed forward/backward results are encoded.
+            return Response(state.result.body, media_type=PROTOBUF_MEDIA_TYPE)
         # Results already contain JSON values. Returning a Response avoids
         # FastAPI walking and copying every per-token result before encoding.
         return JSONResponse(
@@ -280,6 +284,11 @@ class HttpEngineClient:
         if _detail(response).get("error") == "unknown_future":
             return None
         _raise_mapped(response)
+        if response.headers.get("content-type") == PROTOBUF_MEDIA_TYPE:
+            return FutureState(
+                status=FutureStatus.COMPLETE,
+                result=EncodedResult(response.content),
+            )
         body = response.json()
         return FutureState(
             status=FutureStatus(body["status"]),

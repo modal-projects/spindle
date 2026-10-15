@@ -56,15 +56,12 @@ results = await asyncio.gather(*(
 ))
 ```
 
-## Routing rollouts to warm adapters
-
-LoRA sampling uses replica load and adapter-version observations to choose a warm
-replica without a centralized routing service. Hot adapters can spill onto more
-replicas as load grows. Set `inference_lora_routing = "naive"` in the deployment
-recipe to compare against adapter-independent routing. See [LoRA routing](lora-routing.md)
-for the algorithm, Flash integration, failure behavior, and DAPO benchmark tools.
-
 ## Adapter publication via the Bulletin
+
+For pools with many competing adapters, set `inference_lora_routing = "model-spill"`
+in the deployment recipe to enable model placement with load-based overflow.
+The default is Flash affinity routing. See the [policy and measured serving results](experiments/model-placement.md)
+for the algorithm, workload configurations and limits of the evidence.
 
 Unlike the FFT case, sampler publication is done with full-weights adapters, such that using the same rollout pool for both monotonic min-weight versioning and exact versioning is cheap. The entire rollout pool supports arbitrary weight-version sampling, using SGLang's LRU-based eviction mechanism per container. The amount of concurrent LoRAs cached in-container CPU and on GPU can be tuned via `ROLLOUT_MAX_LOADED_LORAS` (which corresponds to sglang's `--max-loaded-loras`) and `ROLLOUT_MAX_LORAS_PER_BATCH` (which corresponds to sglang's `--max-loras-per-batch`) respectively. 
 
@@ -125,7 +122,8 @@ estimated token charge = (training tokens × training rate
                        + generated tokens × generation rate)
 ```
 
-We sticky-route same-prompt requests to the same container to maximize prefix reuse across GRPO groups, and also allow clients to specify approximate cache-aware routing via a shared request_id for multi-turn samples which ensure next-turn sample requests go to the same replica as prior turns, allowing maximal prefix reuse. 
+Spindle routes sampling requests so they can reuse SGLang's prefix cache. All `num_samples` of one request (for example, a GRPO group) go to the same replica. For multi-turn rollouts, set `cache_affinity_key` in the sample request body (a string of up to 256 characters, for example one per trajectory) so every turn of a trajectory goes to the replica that served the previous turn and only the new tokens are processed. Keys are namespaced by sampling session. The stock Tinker SDK doesn't send this field, so when it is absent Spindle derives a route from the prompt: once a conversation has its first reply, the prompt up to the end of the second generation header (for gpt-oss, `<|end|><|start|>assistant`) identifies the conversation, and later turns share its route. First turns and single-turn prompts are routed per request.
+
 
 ### Sweeping over client multi-tenancy
 
@@ -158,4 +156,3 @@ results tabluated:
 The deterministic path aims to give each client the same training results regardless of which other clients share its batches (think of it as batch-invariance for training). It uses deterministic attention kernels, fixed reduction layouts, and ordered per-client gradient accumulation, alongside batch-invariant inference.
 
 To enable it, build the patched FA3 artifacts, set SPINDLE_MILES_FA3_ARTIFACTS to their directory before deployment, and use the qwen3_5_9b_base_miles_lora_deterministic definition. The Tinker training code stays the same. We've validated on small math experiments (see  [LoRA validation](lora_validation.md) deterministic training section) but still need to do larger validation. Our changes to fa3 to make it deterministic also come at a throughput cost, and so this path remains experimental for now. 
-

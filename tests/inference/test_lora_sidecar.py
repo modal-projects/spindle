@@ -3,185 +3,65 @@ import json
 import time
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 from stitch.types import VersionRef
 
 from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
-from spindle.inference.lora_routing import prefix_key
+from spindle.inference import lora_sidecar
 
 
-@pytest.mark.parametrize("limit", [2, 9])
-def test_mode_controller_checks_native_adapter_capacity(tmp_path, monkeypatch, limit):
-    monkeypatch.setenv(
-        "SGLANG_SPINDLE_MERGE_PROFILE",
-        json.dumps(
-            dict(
-                unmerged_token_seconds=0.1,
-                merged_token_seconds=0.05,
-                prefill_tokens_per_second=1000,
-                merge_seconds=1,
-                unmerge_seconds=1,
-                capacity=4,
-                max_batch_adapters=limit,
+def test_generation_concurrency_does_not_block_health_requests(tmp_path):
+    async def scenario():
+        arrived = 0
+        all_arrived = asyncio.Event()
+        release = asyncio.Event()
+
+        async def upstream(reader, writer):
+            nonlocal arrived
+            headers = await reader.readuntil(b"\r\n\r\n")
+            for header in headers.split(b"\r\n")[1:]:
+                if header.lower().startswith(b"content-length:"):
+                    await reader.readexactly(int(header.split(b":", 1)[1]))
+            if headers.startswith(b"POST /generate "):
+                arrived += 1
+                if arrived == 128:
+                    all_arrived.set()
+                await release.wait()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: 2\r\nConnection: close\r\n\r\n{}"
             )
-        ),
-    )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
 
-    async def engine(request):
-        assert request.url.path == "/server_info"
-        return httpx.Response(200, json={"max_loras_per_batch": 8})
-
-    app = create_app(
-        SnapshotBulletin(tmp_path),
-        "http://engine",
-        transport=httpx.MockTransport(engine),
-    )
-    if limit > 8:
-        with pytest.raises(ValueError, match="exceeds the native batch limit"):
-            with TestClient(app):
-                pass
-    else:
-        with TestClient(app) as client:
-            assert (
-                client.get("/routing-state").json()["mode"]["profile"][
-                    "max_batch_adapters"
-                ]
-                == limit
-            )
-
-
-def test_mode_controller_pins_latest_before_merging(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "SGLANG_SPINDLE_MERGE_PROFILE",
-        json.dumps(
-            dict(
-                unmerged_token_seconds=0.1,
-                merged_token_seconds=0.01,
-                prefill_tokens_per_second=10000,
-                merge_seconds=0.1,
-                unmerge_seconds=0.1,
-                capacity=1,
-            )
-        ),
-    )
-    bulletin = _publish(tmp_path, 3)
-    mode = None
-    served = []
-
-    async def engine(request):
-        nonlocal mode
-        body = json.loads(request.content)
-        if request.url.path == "/merge_lora_weights":
-            mode = body["lora_name"]
-        elif request.url.path == "/unmerge_lora_weights":
-            mode = None
-        elif request.url.path == "/generate":
-            assert mode is None or mode == body["lora_path"]
-            served.append((body["lora_path"], mode))
-        return httpx.Response(200, json={"success": True, "meta_info": {}})
-
-    app = create_app(bulletin, "http://engine", transport=httpx.MockTransport(engine))
-    with TestClient(app) as client:
-        payload = dict(
-            input_ids=[1],
-            weight_run_id="model-a",
-            weight_version={"min_version": 3},
-            sampling_params={"max_new_tokens": 100},
-        )
-        first = client.post("/generate", json=payload)
-        assert first.status_code == 200
-        assert first.json()["meta_info"]["weight_version_start"] == 3
-        _publish(tmp_path, 4)
-        payload["sampling_params"]["max_new_tokens"] = 1
-        second = client.post("/generate", json=payload)
-        assert second.status_code == 200
-        assert second.json()["meta_info"]["weight_version_start"] == 4
-        assert served == [
-            ("model-a/weight_v000003", "model-a/weight_v000003"),
-            ("model-a/weight_v000004", None),
-        ]
-
-
-def test_mode_admission_bounds_latest_resolution_and_releases_on_cancel(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv(
-        "SGLANG_SPINDLE_MERGE_PROFILE",
-        json.dumps(
-            dict(
-                unmerged_token_seconds=0.1,
-                merged_token_seconds=0.05,
-                prefill_tokens_per_second=1000,
-                merge_seconds=1,
-                unmerge_seconds=1,
-                capacity=1,
-                queue_buffer=1,
-                enabled=False,
-            )
-        ),
-    )
-    bulletin = _publish(tmp_path, 12)
-
-    async def run():
-        entered, release = asyncio.Event(), asyncio.Event()
-        calls = []
-
-        async def refresh():
-            entered.set()
-            await release.wait()
-
-        bulletin._refresh = refresh
-
-        def engine(request):
-            calls.append(request.url.path)
-            return httpx.Response(200, json={"meta_info": {}})
-
+        server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
         app = create_app(
-            bulletin, "http://engine", transport=httpx.MockTransport(engine)
-        )
-        payload = dict(
-            input_ids=[1],
-            weight_run_id="model-a",
-            weight_version={"min_version": 12},
+            SnapshotBulletin(tmp_path / "bulletin"), f"http://127.0.0.1:{port}"
         )
         async with (
+            server,
             app.router.lifespan_context(app),
             httpx.AsyncClient(
-                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+                transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
             ) as client,
         ):
-            first = asyncio.create_task(client.post("/generate", json=payload))
-            await asyncio.wait_for(entered.wait(), 1)
-            second = asyncio.create_task(client.post("/generate", json=payload))
-            await asyncio.sleep(0.01)
-            assert app.state.active == 2
-            assert app.state.mode_scheduler.active == 0
-            rejected = await client.post("/generate", json=payload)
-            assert rejected.status_code == 503
-            assert rejected.headers["x-spindle-capacity-rejected"] == "1"
-            assert app.state.mode_scheduler.rejections == 1
-            assert calls == []
-            first.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await first
-            assert app.state.active == 1
-            replacement = asyncio.create_task(client.post("/generate", json=payload))
-            await asyncio.sleep(0.01)
-            assert app.state.active == 2
-            release.set()
-            responses = await asyncio.wait_for(asyncio.gather(second, replacement), 2)
-            assert all(r.status_code == 200 for r in responses)
-            assert all(
-                r.json()["meta_info"]["weight_version_start"] == 12 for r in responses
-            )
-            assert calls.count("/load_lora_adapter") == 1
-            assert calls.count("/generate") == 2
-            assert app.state.active == 0
-            assert not app.state.routing_requests
+            requests = [
+                asyncio.create_task(client.post("/generate", json={"input_ids": [1]}))
+                for _ in range(128)
+            ]
+            try:
+                await asyncio.wait_for(all_arrived.wait(), 5)
+                health = await asyncio.wait_for(client.get("/health"), 2)
+                assert health.status_code == 200
+            finally:
+                release.set()
+                responses = await asyncio.wait_for(asyncio.gather(*requests), 5)
+                assert all(response.status_code == 200 for response in responses)
 
-    asyncio.run(run())
+    asyncio.run(scenario())
 
 
 def _publish(tmp_path, version):
@@ -197,128 +77,52 @@ def _publish(tmp_path, version):
     return bulletin
 
 
-def test_admission_rejects_before_registration_and_releases_after_completion(tmp_path):
-    async def run():
-        entered, finish = asyncio.Event(), asyncio.Event()
-        calls = []
-
-        async def engine(request):
-            calls.append(request.url.path)
-            if request.url.path == "/generate":
-                entered.set()
-                await finish.wait()
-            return httpx.Response(200, json={"meta_info": {}})
-
-        app = create_app(
-            _publish(tmp_path, 3),
-            "http://sglang",
-            transport=httpx.MockTransport(engine),
-        )
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app), base_url="http://sidecar"
-            ) as client:
-                first = asyncio.create_task(
-                    client.post(
-                        "/generate",
-                        json={"rid": "accepted", "input_ids": [1]},
-                        headers={"X-Spindle-Routing-Limit": "1"},
-                    )
-                )
-                await entered.wait()
-                rejected = await client.post(
-                    "/generate",
-                    json={
-                        "rid": "rejected",
-                        "input_ids": [1],
-                        "weight_run_id": "model-a",
-                        "weight_version": {"exact_version": 3},
-                    },
-                    headers={"X-Spindle-Routing-Limit": "1"},
-                )
-                assert rejected.status_code == 429
-                assert rejected.headers["x-spindle-routing-rejected"] == "1"
-                assert rejected.json()["request_ids"] == ["accepted"]
-                assert calls == ["/generate"]
-                assert app.state.active == 1
-                assert not app.state.registered_adapters
-                finish.set()
-                accepted = await first
-                assert accepted.headers["x-spindle-routing-admitted"] == "1"
-                assert app.state.active == 0 and not app.state.routing_requests
-                invalid = await client.post(
-                    "/generate",
-                    json={"input_ids": [1]},
-                    headers={"X-Spindle-Routing-Limit": "0"},
-                )
-                assert invalid.status_code == 400
-                assert calls == ["/generate"]
-
-    asyncio.run(run())
-
-
-def test_decode_maxima_merge_engine_progress_with_unobserved_ingress(
+def test_routing_state_counts_registration_wait_and_cleans_up_on_cancel(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setenv("SGLANG_SPINDLE_ROUTING_OBSERVATIONS", "1")
-    app = create_app(_publish(tmp_path, 3), "http://sglang")
+    async def scenario():
+        entered = asyncio.Event()
 
-    def row(rid, adapter, decode):
-        return dict(rid=rid, adapter=adapter, prefill_tokens=0, decode_tokens=decode)
+        async def prepare(*args):
+            entered.set()
+            await asyncio.Future()
 
-    with TestClient(app) as client:
-        app.state.routing_read_at = time.monotonic()
-        app.state.routing_requests = {
-            r["rid"]: r
-            for r in [
-                row("running", "m/v1", 100),
-                row("new", "m/v1", 80),
-                row("version2", "m/v2", 90),
-            ]
-        }
-        app.state.routing_snapshot = dict(
-            timestamp=time.time(),
-            incarnation=1,
-            sequence=1,
-            prefixes=[],
-            cpu_adapters=["m/v1", "m/v2"],
-            gpu_adapters=["m/v1"],
-            requests=[row("running", "m/v1", 20), row("completed", "m/v3", 1000)],
-            snapshot_seconds=0.001,
-            cache_kind="RadixCache",
-        )
-        work = client.get("/routing-state").json()["work"]
-        assert work["decode_tokens"] == 190
-        assert work["adapter_decode_maxima"] == {"m/v1": 80, "m/v2": 90}
-        assert set(work["request_ids"]) == {"running", "new", "version2"}
-
-
-def test_prefix_hints_are_scoped_to_the_resolved_adapter_version(tmp_path):
-    bulletin = _publish(tmp_path, 3)
-    _publish(tmp_path, 4)
-
-    def upstream(request):
-        return httpx.Response(200, json={"meta_info": {}})
-
-    app = create_app(bulletin, "http://sglang", transport=httpx.MockTransport(upstream))
-    with TestClient(app) as client:
-        for version in (3, 4):
-            response = client.post(
-                "/generate",
-                json={
-                    "input_ids": [1, 2],
-                    "session_id": "same-prefix",
-                    "weight_run_id": "model-a",
-                    "weight_version": {"exact_version": version},
-                },
+        monkeypatch.setattr(lora_sidecar, "_prepare_adapter", prepare)
+        app = create_app(SnapshotBulletin(tmp_path / "bulletin"), "http://unused")
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
+            ) as client,
+        ):
+            app.state.routing_read_at = time.monotonic()
+            app.state.routing_catalog = {
+                "timestamp": time.time(),
+                "cpu_adapters": ["other/v1"],
+            }
+            request = asyncio.create_task(
+                client.post(
+                    "/generate",
+                    json={
+                        "rid": "waiting",
+                        "input_ids": [1],
+                        "weight_run_id": "model",
+                        "weight_version": {"exact_version": 7, "min_version": None},
+                    },
+                )
             )
-            assert response.status_code == 200
-        state = client.get("/routing-state").json()
-        assert set(state["prefixes"]) == {
-            prefix_key(VersionRef("model-a", version).identity, "same-prefix")
-            for version in (3, 4)
-        }
-        assert state["active"] == 0 and state["adapters"] == {}
+            await asyncio.wait_for(entered.wait(), 2)
+            state = (await client.get("/routing-state")).json()
+            assert state["active"] == 1
+            assert state["request_ids"] == ["waiting"]
+            assert state["pending_adapters"] == [VersionRef("model", 7).identity]
+            assert state["cpu_adapters"] == ["other/v1"]
+            assert 0 <= state["age_seconds"] < 1
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+            assert (await client.get("/routing-state")).json()["active"] == 0
+
+    asyncio.run(scenario())
 
 
 def test_sidecar_resolves_exact_adapter_and_stamps_response(tmp_path) -> None:
@@ -832,74 +636,3 @@ def test_exact_version_refreshes_only_when_snapshot_is_missing(tmp_path):
             assert response.status_code == 200
             assert response.json()["meta_info"]["weight_version_start"] == 21
     assert refreshes == [True]
-
-
-def test_concurrent_models_with_same_version_keep_distinct_adapters_and_load_counts(
-    tmp_path,
-):
-    bulletin = SnapshotBulletin(tmp_path / "bulletin")
-    refs = [VersionRef("model-a", 1), VersionRef("model-b", 1)]
-    for ref in refs:
-        source = tmp_path / ref.run_id
-        source.mkdir()
-        (source / "adapter_model.safetensors").write_bytes(ref.run_id.encode())
-        (source / "adapter_config.json").write_text('{"r":8}')
-        bulletin.publish(ref, source)
-
-    async def run():
-        loaded = []
-        release, started = asyncio.Event(), asyncio.Event()
-        requests = 0
-
-        async def upstream(request):
-            nonlocal requests
-            payload = json.loads(request.content)
-            if request.url.path == "/load_lora_adapter":
-                loaded.append(payload["lora_name"])
-                return httpx.Response(200, json={"success": True})
-            requests += 1
-            if requests == 2:
-                started.set()
-            await release.wait()
-            return httpx.Response(
-                200, json={"adapter": payload["lora_path"], "meta_info": {}}
-            )
-
-        app = create_app(
-            bulletin, "http://sglang", transport=httpx.MockTransport(upstream)
-        )
-        async with (
-            app.router.lifespan_context(app),
-            httpx.AsyncClient(
-                transport=httpx.ASGITransport(app), base_url="http://sidecar"
-            ) as client,
-        ):
-            pending = [
-                asyncio.create_task(
-                    client.post(
-                        "/generate",
-                        json={
-                            "input_ids": [1],
-                            "weight_run_id": ref.run_id,
-                            "weight_version": {"exact_version": 1},
-                        },
-                    )
-                )
-                for ref in refs
-            ]
-            await asyncio.wait_for(started.wait(), 2)
-            state = (await client.get("/routing-state")).json()
-            assert state["active"] == 2
-            assert state["adapters"] == {ref.identity: 1 for ref in refs}
-            release.set()
-            results = await asyncio.gather(*pending)
-            assert [r.json()["adapter"] for r in results] == [
-                ref.identity for ref in refs
-            ]
-            state = (await client.get("/routing-state")).json()
-            assert state["active"] == 0 and state["adapters"] == {}
-            assert state["adapter_loads"] == 2
-            assert len(loaded) == len(set(loaded)) == 2
-            assert all(r.headers["x-spindle-replica"] == "local" for r in results)
-
-    asyncio.run(run())

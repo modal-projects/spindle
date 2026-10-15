@@ -1,9 +1,0 @@
-{
-  "gpu_hours": 36.713534147275816,
-  "first_gpu_start_utc": "2026-10-14T00:30:12.805397+00:00",
-  "last_gpu_finish_utc": "2026-10-14T05:06:26.616306+00:00",
-  "peak_gpus": 8,
-  "active_gpus": 0,
-  "task_count": 8,
-  "note": "Sum of observed Modal GPU task lifetimes; not an invoice or continuous billing audit."
-}

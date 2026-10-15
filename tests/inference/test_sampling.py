@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from spindle.inference import sampling
 from spindle.inference.sampling import sample_task
+from spindle.inference.model_routing import ModelRouter, Replica
 
 
 def response(
@@ -44,6 +45,116 @@ def task(*, latest: bool = False) -> dict:
     }
 
 
+def routing_pool():
+    return ModelRouter(
+        AsyncMock(
+            return_value=[
+                Replica(h, h + ":8000", 0, frozenset(), (), (), 0) for h in ("a", "b")
+            ]
+        ),
+        capacity=8,
+    )
+
+
+@pytest.mark.parametrize("failure", [503, "version", "transport"])
+def test_model_routing_retries_elsewhere_and_releases_reservations(
+    monkeypatch, failure
+):
+    monkeypatch.setattr(sampling, "RETRY_INITIAL_DELAY_SECONDS", 0)
+
+    async def scenario():
+        router = routing_pool()
+        attempts = []
+
+        def handle(request):
+            assert "Modal-Session-ID" not in request.headers
+            assert "Modal-Routing-Affinity-Key" not in request.headers
+            assert json.loads(request.content)["weight_version"]["exact_version"] == 7
+            attempts.append(request.headers["Modal-Flash-Upstream"])
+            if len(attempts) == 1:
+                if failure == "transport":
+                    raise httpx.ReadError("closed")
+                if failure == "version":
+                    return response(6)
+                return httpx.Response(failure)
+            return response(7)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={
+                "Modal-Session-ID": "inherited",
+                "Modal-Routing-Affinity-Key": "old",
+            },
+        ) as client:
+            try:
+                result = await sample_task(
+                    task(), "http://rollout", client=client, model_router=router
+                )
+                assert result["sequences"][0]["tokens"] == [5]
+                assert len(attempts) == 2 and attempts[0] != attempts[1]
+                assert not router.reservations and not router.host_reservations
+            finally:
+                await router.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_model_routing_releases_cancelled_generation():
+    async def scenario():
+        router = routing_pool()
+        entered = asyncio.Event()
+
+        async def handle(request):
+            entered.set()
+            await asyncio.Future()
+
+        operation = asyncio.create_task(
+            sample_task(
+                task(),
+                "http://rollout",
+                transport=httpx.MockTransport(handle),
+                model_router=router,
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert len(router.reservations) == 1
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+            assert not router.reservations and not router.host_reservations
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("latest", [False, True])
+def test_model_routing_falls_back_to_affinity_or_bypasses_latest(latest):
+    async def scenario():
+        router = routing_pool()
+        router.discover.return_value = []
+
+        def handle(request):
+            assert request.headers["Modal-Session-ID"] == "request-a"
+            assert "Modal-Flash-Upstream" not in request.headers
+            return response(7)
+
+        try:
+            await sample_task(
+                task(latest=latest),
+                "http://rollout",
+                transport=httpx.MockTransport(handle),
+                model_router=router,
+            )
+            assert router.discover.await_count == (0 if latest else 1)
+            assert not router.reservations
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_exact_sampling_pins_version() -> None:
     body = {}
 
@@ -62,55 +173,6 @@ def test_exact_sampling_pins_version() -> None:
     assert body["weight_run_id"] == "model-a"
     assert body["weight_version"] == {"min_version": None, "exact_version": 7}
     assert result["sequences"][0]["tokens"] == [5]
-
-
-def test_large_http1_group_dispatches_before_any_generation_finishes():
-    async def run():
-        arrived, release = asyncio.Event(), asyncio.Event()
-        count = 0
-        body = response(7).content
-
-        async def engine(reader, writer):
-            nonlocal count
-            headers = await reader.readuntil(b"\r\n\r\n")
-            length = next(
-                int(line.split(b":", 1)[1])
-                for line in headers.split(b"\r\n")
-                if line.lower().startswith(b"content-length:")
-            )
-            await reader.readexactly(length)
-            count += 1
-            if count == 128:
-                arrived.set()
-            await release.wait()
-            writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
-                + f"Content-Length: {len(body)}\r\n".encode()
-                + b"Connection: close\r\n\r\n"
-                + body
-            )
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-
-        server = await asyncio.start_server(engine, "127.0.0.1", 0, backlog=256)
-        async with server:
-            port = server.sockets[0].getsockname()[1]
-            request = task()
-            request["payload"]["num_samples"] = 128
-            samples = asyncio.create_task(
-                sample_task(request, f"http://127.0.0.1:{port}", timeout=10)
-            )
-            try:
-                # The old transport admits only 100 requests and deadlocks on
-                # this barrier until the test releases their responses.
-                await asyncio.wait_for(arrived.wait(), 5)
-            finally:
-                release.set()
-                result = await asyncio.wait_for(samples, 10)
-            assert len(result["sequences"]) == count == 128
-
-    asyncio.run(run())
 
 
 @pytest.mark.parametrize("first", [None, [None, 1], {"logprob": None, "token_id": 1}])
@@ -216,6 +278,73 @@ def test_multiturn_affinity_tracks_prefix_cache_hit_rate() -> None:
     eligible_prefix_hit_rate = sum(cache_hits[1:]) / sum(expected_reusable)
     assert eligible_prefix_hit_rate == 1.0
     assert sum(cache_hits) / sum(prompt_lengths) > 0.7
+
+
+# A chat-shaped transcript: messages end with END, assistant turns open with HEADER.
+END, START, ASSISTANT, TOOL = 200007, 200006, 173781, 99
+HEADER = [END, START, ASSISTANT]
+
+
+def conversation(question: list[int], replies: list[list[int]]) -> list[list[int]]:
+    """Prompts of each turn: system + question, then reply and tool result per turn."""
+    prompt = [7] * 20 + question + HEADER
+    prompts = [list(prompt)]
+    for reply in replies:
+        prompt += [*reply, END, START, TOOL, 42, *HEADER]
+        prompts.append(list(prompt))
+    return prompts
+
+
+def route_sessions(prompts: list[list[int]], sampling_session_id: str = "sample-a"):
+    sessions = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sessions.append(request.headers["Modal-Session-ID"])
+        return response(7)
+
+    for turn, prompt in enumerate(prompts):
+        request = task()
+        request["request_id"] = f"turn-{turn}"
+        request["sampling_session_id"] = sampling_session_id
+        request["payload"]["prompt"]["chunks"][0]["tokens"] = prompt
+        asyncio.run(
+            sample_task(
+                request, "http://rollout", transport=httpx.MockTransport(handle)
+            )
+        )
+    return sessions
+
+
+def test_conversation_turns_share_a_route_without_affinity_key() -> None:
+    first = route_sessions(conversation([1, 2], [[30, 31], [32], [33, 34]]))
+    # The same question with a different first reply is a different conversation.
+    second = route_sessions(conversation([1, 2], [[40], [32], [33, 34]]))
+
+    assert first[0] == second[0] == "turn-0"
+    assert len(set(first[1:])) == 1 and first[1].startswith("conversation-")
+    assert len(set(second[1:])) == 1 and second[1] != first[1]
+
+
+def test_single_turn_prompts_keep_request_routing() -> None:
+    prompts = [[7] * 20 + [n] + HEADER for n in range(3)] + [[1, 2, 3]]
+    assert route_sessions(prompts) == ["turn-0", "turn-1", "turn-2", "turn-3"]
+
+
+def test_explicit_affinity_key_overrides_conversation_route() -> None:
+    prompt = conversation([1, 2], [[30]])[1]
+    sessions = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        sessions.append(request.headers["Modal-Session-ID"])
+        return response(7)
+
+    request = task()
+    request["payload"]["cache_affinity_key"] = "trajectory-a"
+    request["payload"]["prompt"]["chunks"][0]["tokens"] = prompt
+    asyncio.run(
+        sample_task(request, "http://rollout", transport=httpx.MockTransport(handle))
+    )
+    assert sessions[0].startswith("affinity-")
 
 
 def test_affinity_route_is_namespaced_by_sampling_session_and_key() -> None:
@@ -490,10 +619,8 @@ def test_exact_sampling_rejects_wrong_response_version() -> None:
     assert result["sequences"][0]["tokens"] == [5]
 
 
-@pytest.mark.parametrize("http2", [False, True])
-def test_default_transport_enables_tcp_keepalive(http2) -> None:
-    transport = sampling.keepalive_transport(http2=http2)
-    assert transport._pool._http2 is http2
+def test_default_transport_enables_tcp_keepalive() -> None:
+    transport = sampling.keepalive_transport()
     assert transport._pool._socket_options == list(sampling.TCP_KEEPALIVE_OPTIONS)
     assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in sampling.TCP_KEEPALIVE_OPTIONS
 
@@ -601,3 +728,90 @@ def test_empty_stop_list_disables_eos():
     )
     assert seen[0]["ignore_eos"] is True
     assert "stop" not in seen[0]
+
+
+def test_tokenizerless_sampler_rejects_stop_strings():
+    request = task()
+    request["payload"]["sampling_params"]["stop"] = ["</answer>"]
+
+    def handle(http_request):
+        raise AssertionError("stop strings must not reach a tokenizer-less engine")
+
+    with pytest.raises(ValueError, match="token IDs"):
+        asyncio.run(
+            sample_task(
+                request,
+                "http://rollout",
+                stop_token_ids_only=True,
+                transport=httpx.MockTransport(handle),
+            )
+        )
+
+
+def test_tokenizerless_sampler_accepts_stop_token_ids():
+    seen = []
+    request = task()
+    request["payload"]["sampling_params"]["stop"] = [7, 9]
+
+    def handle(http_request):
+        seen.append(json.loads(http_request.content)["sampling_params"])
+        return response(7)
+
+    asyncio.run(
+        sample_task(
+            request,
+            "http://rollout",
+            stop_token_ids_only=True,
+            transport=httpx.MockTransport(handle),
+        )
+    )
+    assert seen[0]["stop_token_ids"] == [7, 9]
+
+
+def test_large_http1_group_dispatches_before_any_generation_finishes():
+    async def run():
+        arrived, release = asyncio.Event(), asyncio.Event()
+        count = 0
+        body = response(7).content
+
+        async def engine(reader, writer):
+            nonlocal count
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":", 1)[1])
+                for line in headers.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            await reader.readexactly(length)
+            count += 1
+            if count == 128:
+                arrived.set()
+            await release.wait()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode()
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(engine, "127.0.0.1", 0, backlog=256)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            request = task()
+            request["payload"]["num_samples"] = 128
+            samples = asyncio.create_task(
+                sample_task(request, f"http://127.0.0.1:{port}", timeout=10)
+            )
+            try:
+                # The old transport admits only 100 requests and deadlocks on
+                # this barrier until the test releases their responses.
+                await asyncio.wait_for(arrived.wait(), 5)
+            finally:
+                release.set()
+                result = await asyncio.wait_for(samples, 10)
+            assert len(result["sequences"]) == count == 128
+
+    asyncio.run(run())

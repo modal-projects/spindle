@@ -19,7 +19,6 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--upstream-url", required=True)
-    parser.add_argument("--base-checkpoint-dir", required=True)
     parser.add_argument("--bulletin-root", required=True)
     parser.add_argument("--bulletin-volume", default="")
     parser.add_argument("--run-id", required=True)
@@ -45,7 +44,6 @@ def main() -> None:
         )
     engine = SGLangEngine(
         args.upstream_url,
-        args.base_checkpoint_dir,
         delta_update_mode="cpu",
     )
     if args.scoped_registry:

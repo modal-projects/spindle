@@ -118,7 +118,7 @@ The checked-in [deploy_models.sh](../scripts/deploy_models.sh) lists the complet
 Frontend, region, environment, secret names, and volume names default in `BaseConfig.platform`. `platform.modal.region` defaults to `None`, which leaves GPU placement unpinned (Modal schedules trainers and inference pools in any region); set it only to restrict placement. Set them in the same Python config using dotted overrides:
 
 ```python
-from spindle.configs.gpt_oss_20b_lora_64k import Config as Parent
+from spindle.configs.gpt_oss_20b_lora_32k import Config as Parent
 
 
 class Config(Parent):

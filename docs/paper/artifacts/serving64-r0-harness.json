@@ -1,6 +1,0 @@
-{
-  "base_revision": "635f53c807378ab4ec546c16eeee7d2e99c05555",
-  "apply_patch": "serving64-r0-harness.patch",
-  "result_sha256": "a504ae77c2e2c32ab7a6d8b099b55a8fe309e8894e339846e3cd304f63991711",
-  "difference": "Final observation settling was added after this trial started; measured work and routing are unchanged."
-}

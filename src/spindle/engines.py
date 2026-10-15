@@ -20,7 +20,7 @@ class SamplingConfig:
     max_running_requests: int = 32
     max_queued_requests: int = 4
     target_concurrency: int = 16
-    cpu_weight_cache_max_compile_group_gb: float = 16
+    weight_update_max_compile_group_gb: float = 16
     schedule_policy: str = "lpm"
 
 
@@ -120,7 +120,7 @@ def qwen3_6_27b_full_64k() -> Engine:
         sampling=SamplingConfig(
             tensor_parallel_size=4,
             memory_fraction=0.90,
-            cpu_weight_cache_max_compile_group_gb=32,
+            weight_update_max_compile_group_gb=32,
         ),
     )
 
