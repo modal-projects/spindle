@@ -43,6 +43,7 @@ from .megatron_image import image as megatron_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
+from .merge_image import image as merge_rollout_image
 from .serve import run_engine_with_backend
 
 
@@ -217,7 +218,13 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     @app.server(
         name="Server",
         serialized=True,
-        image=image if image is not None else image_for("sglang"),
+        image=image
+        if image is not None
+        else (
+            merge_rollout_image
+            if deployment.inference_settings.get("enable_lora_merge")
+            else image_for("sglang")
+        ),
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
@@ -227,7 +234,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         | (
             {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
             if recipe.inference_lora_routing
-            in {"work", "domains", "capacity", *SIMPLE_POLICIES}
+            in {"work", "domains", "capacity", "dlora", *SIMPLE_POLICIES}
             else {}
         ),
         min_containers=minimum,

@@ -1,5 +1,6 @@
 """Deployment configs and frontend-only platform settings."""
 
+import base64
 import json
 import os
 
@@ -12,13 +13,26 @@ PLATFORM_ENV = "SPINDLE_PLATFORM"
 POOL_CONFIG_ENV = "SPINDLE_POOL_DEPLOYMENT"
 
 
+def image_env_json(value):
+    """Preserve nested JSON quotes/backslashes across image ENV serialization."""
+    if not value or value.startswith("base64:"):
+        return value
+    return "base64:" + base64.b64encode(value.encode()).decode()
+
+
+def parse_env_json(value):
+    if value.startswith("base64:"):
+        value = base64.b64decode(value[7:], validate=True).decode()
+    return json.loads(value)
+
+
 def configs_from_env():
     data = os.environ.get(CONFIGS_ENV)
     if not data:
         raise ValueError(
             "Missing deployment configs. Use spindle deploy with your Python config files."
         )
-    rows = json.loads(data)
+    rows = parse_env_json(data)
     if not isinstance(rows, list) or not rows:
         raise ValueError("Deployment configs must be a nonempty list")
     return [DeploymentConfig.model_validate(row) for row in rows]
@@ -28,7 +42,7 @@ def platform_from_env():
     data = os.environ.get(PLATFORM_ENV)
     if not data:
         return configs_from_env()[0].recipe.platform
-    return json.loads(data)
+    return parse_env_json(data)
 
 
 def deployed_configs(frontend, environment=None):

@@ -11,6 +11,58 @@ from spindle.inference.lora_sidecar import create_app
 from spindle.inference.lora_routing import prefix_key
 
 
+def test_mode_controller_pins_latest_before_merging(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "SGLANG_SPINDLE_MERGE_PROFILE",
+        json.dumps(
+            dict(
+                unmerged_token_seconds=0.1,
+                merged_token_seconds=0.01,
+                prefill_tokens_per_second=10000,
+                merge_seconds=0.1,
+                unmerge_seconds=0.1,
+                capacity=1,
+            )
+        ),
+    )
+    bulletin = _publish(tmp_path, 3)
+    mode = None
+    served = []
+
+    async def engine(request):
+        nonlocal mode
+        body = json.loads(request.content)
+        if request.url.path == "/merge_lora_weights":
+            mode = body["lora_name"]
+        elif request.url.path == "/unmerge_lora_weights":
+            mode = None
+        elif request.url.path == "/generate":
+            assert mode is None or mode == body["lora_path"]
+            served.append((body["lora_path"], mode))
+        return httpx.Response(200, json={"success": True, "meta_info": {}})
+
+    app = create_app(bulletin, "http://engine", transport=httpx.MockTransport(engine))
+    with TestClient(app) as client:
+        payload = dict(
+            input_ids=[1],
+            weight_run_id="model-a",
+            weight_version={"min_version": 3},
+            sampling_params={"max_new_tokens": 100},
+        )
+        first = client.post("/generate", json=payload)
+        assert first.status_code == 200
+        assert first.json()["meta_info"]["weight_version_start"] == 3
+        _publish(tmp_path, 4)
+        payload["sampling_params"]["max_new_tokens"] = 1
+        second = client.post("/generate", json=payload)
+        assert second.status_code == 200
+        assert second.json()["meta_info"]["weight_version_start"] == 4
+        assert served == [
+            ("model-a/weight_v000003", "model-a/weight_v000003"),
+            ("model-a/weight_v000004", None),
+        ]
+
+
 def _publish(tmp_path, version):
     source = tmp_path / f"source-{version}"
     source.mkdir()

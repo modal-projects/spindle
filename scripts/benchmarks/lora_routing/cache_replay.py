@@ -101,6 +101,8 @@ def make_router(pool, gateway, arm, config):
         "stable",
         "capacity",
         "capacity-random",
+        "dlora",
+        "dlora-no-merge",
         *SIMPLE_POLICIES,
     }
     return create_router(
@@ -116,6 +118,7 @@ def make_router(pool, gateway, arm, config):
         prefill_once=arm.endswith("-cohort"),
         simple_policy=policy if policy in SIMPLE_POLICIES else None,
         capacity_aware=policy.startswith("capacity"),
+        dlora=policy.startswith("dlora"),
         capacity_tie_seed=os.environ["MODAL_TASK_ID"]
         if policy == "capacity-random"
         else None,
@@ -517,6 +520,31 @@ async def run_arm(pool, arm, clients, config, executions):
         if len(routers[0].replicas) != 8:
             raise RuntimeError(f"{arm}: eight healthy replicas did not start")
         replicas = dict(routers[0].replicas)
+        if config.get("merge_profile"):
+
+            async def configure_mode(replica):
+                response = await client.get(
+                    gateway + "/benchmark-config",
+                    headers={"Modal-Flash-Upstream": replica.upstream},
+                )
+                response.raise_for_status()
+                actual = response.json()
+                assert actual["replica"] == replica.replica_id
+                assert actual["engine"] == dict(
+                    max_running_requests=config["merge_profile"]["capacity"],
+                    max_queued_requests=config["merge_profile"]["capacity"]
+                    + config["merge_profile"]["queue_buffer"],
+                    enable_lora_merge=True,
+                    lora_unmerge_mode="restore",
+                ), actual
+                response = await client.post(
+                    gateway + "/benchmark-mode",
+                    headers={"Modal-Flash-Upstream": replica.upstream},
+                    json=config["merge_profile"] | {"enabled": arm == "dlora"},
+                )
+                response.raise_for_status()
+
+            await asyncio.gather(*(configure_mode(r) for r in replicas.values()))
 
         async def inspect():
             async def one(replica):
@@ -583,6 +611,21 @@ async def run_arm(pool, arm, clients, config, executions):
                         == meta["weight_version_end"]
                         == version
                     )
+            if config.get("merge_profile"):
+                # Pay first-use snapshot allocation/JIT on every arm before
+                # resetting GPU/KV state. Record cold transition cost separately.
+                adapter = f"{source['model_id']}/weight_v{version:06d}"
+                for action, payload in [
+                    ("merge_lora_weights", {"lora_name": adapter}),
+                    ("unmerge_lora_weights", {}),
+                ]:
+                    response = await setup_client.post(
+                        gateway + "/benchmark-transition/" + action,
+                        headers={"Modal-Flash-Upstream": replica.upstream},
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    assert response.json()["success"]
             # Engine health probes also use the base-model slot. Materialize it
             # explicitly so every trial starts with exactly the same GPU set.
             response = await setup_generate(
@@ -1015,6 +1058,7 @@ def main():
     parser.add_argument("--fixed-version", action="store_true")
     parser.add_argument("--cold-versions", action="store_true")
     parser.add_argument("--work-rates", type=Path)
+    parser.add_argument("--merge-profile", type=Path)
     parser.add_argument("--stagger-seconds", type=float, default=5)
     parser.add_argument("--hot-samples", type=int, default=0)
     parser.add_argument("--large-group-clients", type=int, default=0)
@@ -1041,6 +1085,8 @@ def main():
             "capacity-cohort",
             "capacity-random",
             "capacity-random-cohort",
+            "dlora",
+            "dlora-no-merge",
             *SIMPLE_POLICIES,
             *(p + "-cohort" for p in SIMPLE_POLICIES),
         ),
@@ -1133,6 +1179,8 @@ def main():
             per_round += args.hot_samples - args.groups * args.samples
         config["expected_requests"] = per_round * args.rounds * args.dialogue_turns
         config["max_concurrency"] = per_round
+    if args.merge_profile:
+        config["merge_profile"] = json.loads(args.merge_profile.read_text())
     config["adapter_count"] = sum(len(c["versions"]) for c in clients)
     if args.vary_placement:
         config["affinity_salt"] = f"trial-{args.seed}:"
@@ -1148,6 +1196,8 @@ def main():
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
         for name in (
             "src/spindle/inference/lora_routing.py",
+            "src/spindle/inference/dlora_scheduler.py",
+            "src/spindle/inference/routing_dlora.py",
             "src/spindle/inference/routing_work.py",
             "src/spindle/inference/routing_domains.py",
             "src/spindle/inference/routing_simple.py",

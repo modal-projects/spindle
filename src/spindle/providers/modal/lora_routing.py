@@ -11,6 +11,7 @@ from spindle.inference.routing_work import WorkRates, WorkRouter
 from spindle.inference.routing_domains import DomainRouter
 from spindle.inference.routing_simple import SimpleRouter
 from spindle.inference.routing_capacity import CapacityRouter
+from spindle.inference.routing_dlora import DloraRouter
 
 from .fft_pool import proxy_auth_headers
 
@@ -29,6 +30,7 @@ def create_router(
     prefill_once: bool = False,
     simple_policy: str | None = None,
     capacity_aware: bool = False,
+    dlora: bool = False,
     capacity_tie_seed: str | None = None,
 ) -> LoraRouter:
     containers = []
@@ -66,6 +68,7 @@ def create_router(
                     return None
                 work = state.get("work")
                 if work is not None:
+                    work["mode"] = state.get("mode")
                     work["admission_supported"] = state.get(
                         "admission_supported", False
                     )
@@ -122,6 +125,8 @@ def create_router(
             raise ValueError("Capacity routing requires rates and no placement flags")
         router_type = CapacityRouter
         extra["tie_seed"] = capacity_tie_seed
+    if dlora:
+        router_type = DloraRouter
     return router_type(
         discover,
         target=target,

@@ -257,6 +257,7 @@ async def _sample_one(
     loop = asyncio.get_running_loop()
     started_at = loop.time()
     deadline = started_at + retry_timeout
+    capacity_delay = 0.01
     delay = RETRY_INITIAL_DELAY_SECONDS
     reroute_attempt = 0
     transport_retries = 0
@@ -320,6 +321,7 @@ async def _sample_one(
                 "prompt_tokens": len(prompt),
             },
         )
+        capacity_rejected = False
         routing_details = {}
         if lora_router is not None:
             await lora_router.refresh()
@@ -407,6 +409,10 @@ async def _sample_one(
             )
         else:
             attempt_result["http_status"] = response.status_code
+            capacity_rejected = (
+                response.status_code == 503
+                and response.headers.get("x-spindle-capacity-rejected") == "1"
+            )
             actual_replica = response.headers.get("x-spindle-replica")
             if upstream is not None and actual_replica and actual_replica != upstream:
                 # An older proxy may ignore exact routing. Preserve weight
@@ -447,6 +453,9 @@ async def _sample_one(
                 if not isinstance(result, dict):
                     raise ValueError("SGLang returned a non-object response")
                 attempt_result.update(
+                    lora_merged=(result.get("meta_info") or {}).get(
+                        "lora_merged", False
+                    ),
                     generated_tokens=len(_sequence(result)["tokens"]),
                     **timing_metadata(result.get("meta_info") or {}),
                 )
@@ -478,10 +487,10 @@ async def _sample_one(
             else:
                 reason = f"HTTP {response.status_code}: {response.text[:500]}"
                 if response.status_code >= 500:
-                    if not isinstance(gateway, str):
+                    if not capacity_rejected and not isinstance(gateway, str):
                         rejected.add(gateway_url)
                     reroute_attempt += 1
-                    if index == 0:
+                    if index == 0 and not capacity_rejected:
                         print(
                             "execute_sample reroute "
                             f"request={request_id} attempt={reroute_attempt} "
@@ -498,7 +507,10 @@ async def _sample_one(
                     failed=cause is not None
                     or attempt_result.get("route_mismatch", False)
                     or "version_error" in attempt_result
-                    or attempt_result.get("http_status", 200) >= 500
+                    or (
+                        attempt_result.get("http_status", 200) >= 500
+                        and not capacity_rejected
+                    )
                     or (
                         attempt_result.get("http_status", 200) in {404, 408, 429}
                         and not admission_busy
@@ -511,6 +523,14 @@ async def _sample_one(
             raise RuntimeError(
                 f"rollout {state} after {retry_timeout:g}s: {reason}"
             ) from cause
+        if capacity_rejected:
+            # A bounded local queue is flow control, not a failed engine.
+            # Retain logical KV affinity and reconsider all destinations.
+            await _backoff(
+                stats, min(remaining, capacity_delay * random.uniform(0.8, 1.2))
+            )
+            capacity_delay = min(0.5, capacity_delay * 2)
+            continue
         if admission_busy:
             continue
         if on_wait is not None:

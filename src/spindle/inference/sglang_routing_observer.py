@@ -193,7 +193,7 @@ def snapshot(scheduler, running_batch, last_batch):
             pass
 
 
-def install(sglang_root):
+def install(sglang_root, *, modern=False):
     target = sglang_root / "srt/managers/scheduler.py"
     source = target.read_text()
     old = "        self.process_pending_chunked_abort()\n"
@@ -209,9 +209,12 @@ def install(sglang_root):
         + old,
     )
     target.write_text(source)
-    (sglang_root / "srt/spindle_routing_observer.py").write_text(
-        Path(__file__).read_text()
-    )
+    observer = Path(__file__).read_text()
+    if modern:
+        observer = observer.replace("import xxhash\n", "import xxhash\nfrom sglang.srt.runtime_context import get_parallel\n")
+        observer = observer.replace("scheduler.ps.", "get_parallel().")
+        observer = observer.replace("len(req.prefix_indices)", "req.prefix_len")
+    (sglang_root / "srt/spindle_routing_observer.py").write_text(observer)
 
 
 if __name__ == "__main__":

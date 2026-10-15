@@ -20,6 +20,7 @@ from stitch.types import VersionConstraint, VersionRef
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
 from .lora_routing import prefix_key
+from .dlora_scheduler import MergeProfile, ReplicaBusy, ReplicaScheduler
 
 
 def create_app(
@@ -48,9 +49,26 @@ def create_app(
         app.state.routing_requests = {}
         app.state.routing_snapshot = {}
         app.state.routing_read_at = 0.0
+        app.state.cache_valid_after = 0.0
+        app.state.mode_scheduler = None
+        if raw_profile := os.environ.get("SGLANG_SPINDLE_MERGE_PROFILE"):
+
+            def invalidate():
+                app.state.prefixes.clear()
+                app.state.cache_valid_after = time.time()
+                app.state.routing_snapshot = {}
+                app.state.routing_read_at = 0.0
+
+            app.state.mode_scheduler = ReplicaScheduler(
+                app.state.client,
+                MergeProfile(**json.loads(raw_profile)),
+                invalidate=invalidate,
+            )
         try:
             yield
         finally:
+            if app.state.mode_scheduler is not None:
+                await app.state.mode_scheduler.aclose()
             pending = list(app.state.adapter_resolutions.values())
             for task in pending:
                 task.cancel()
@@ -74,7 +92,7 @@ def create_app(
                 except (OSError, ValueError):
                     app.state.routing_snapshot = {}
             snapshot = app.state.routing_snapshot
-            if snapshot:
+            if snapshot and snapshot["timestamp"] >= app.state.cache_valid_after:
                 current = app.state.routing_requests
                 rows = {
                     r["rid"]: r for r in snapshot["requests"] if r["rid"] in current
@@ -114,6 +132,9 @@ def create_app(
             "adapter_loads": app.state.adapter_loads,
             "adapter_load_seconds": app.state.adapter_load_seconds,
             "work": work,
+            "mode": app.state.mode_scheduler.snapshot()
+            if app.state.mode_scheduler is not None
+            else None,
         }
 
     @app.post("/generate")
@@ -165,7 +186,54 @@ def create_app(
             )
         app.state.active += 1
         try:
-            response = await generate_response(request, payload)
+            scheduler = app.state.mode_scheduler
+            if scheduler is None:
+                response = await generate_response(request, payload)
+            else:
+                if run_id is not None and constraint.exact_version is None:
+                    # Resolve once: merge compatibility and generation must use
+                    # the same immutable version even if a publication arrives.
+                    try:
+                        ref, error = await _prepare_adapter(
+                            app, bulletin, str(run_id), constraint
+                        )
+                    except (SnapshotNotFound, ValueError) as exc:
+                        return JSONResponse(
+                            {"error": f"adapter version is not ready: {exc}"},
+                            status_code=409,
+                        )
+                    if error is not None:
+                        return Response(
+                            content=error.content, status_code=error.status_code
+                        )
+                    payload["weight_version"] = {"exact_version": ref.version}
+                    constraint = VersionConstraint.from_payload(payload)
+                    adapter = ref.identity
+                    if isinstance(rid, str):
+                        app.state.routing_requests[rid]["adapter"] = adapter
+
+                async def prepare():
+                    if run_id is not None:
+                        _, error = await _prepare_adapter(
+                            app, bulletin, str(run_id), constraint
+                        )
+                        if error is not None:
+                            error.raise_for_status()
+
+                try:
+                    response = await scheduler.submit(
+                        adapter,
+                        len(payload.get("input_ids", ())),
+                        payload.get("sampling_params", {}).get("max_new_tokens", 1),
+                        prepare,
+                        lambda: generate_response(request, payload),
+                    )
+                except ReplicaBusy:
+                    response = JSONResponse(
+                        {"detail": "Replica admission capacity is full"},
+                        status_code=503,
+                        headers={"x-spindle-capacity-rejected": "1"},
+                    )
             response.headers["x-spindle-replica"] = os.environ.get(
                 "MODAL_TASK_ID", "local"
             )
@@ -179,6 +247,10 @@ def create_app(
 
     @app.get("/health")
     async def health() -> Response:
+        if app.state.mode_scheduler is not None and app.state.mode_scheduler.failure:
+            return JSONResponse(
+                {"detail": app.state.mode_scheduler.failure}, status_code=503
+            )
         response = await app.state.client.get("/health")
         return Response(
             content=response.content,
@@ -248,7 +320,17 @@ def create_app(
             metadata = body.setdefault("meta_info", {})
             metadata["weight_version_start"] = served_version
             metadata["weight_version_end"] = served_version
-        return JSONResponse(body, status_code=response.status_code)
+        headers = {}
+        if (
+            response.status_code == 503
+            and "request queue is full" in response.text.lower()
+        ):
+            headers["x-spindle-capacity-rejected"] = "1"
+        if isinstance(body, dict) and app.state.mode_scheduler is not None:
+            body.setdefault("meta_info", {})["lora_merged"] = (
+                app.state.mode_scheduler.mode == adapter
+            )
+        return JSONResponse(body, status_code=response.status_code, headers=headers)
 
     return app
 

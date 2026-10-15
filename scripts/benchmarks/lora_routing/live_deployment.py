@@ -14,6 +14,7 @@ import time
 import modal
 
 from cache_deployment import measured_image
+from scripts.benchmarks.dlora.image import measured_image as dlora_image
 from spindle.configs.qwen38_27b_lora_16k import Config as Parent
 from spindle.deployment_cli import deploy
 from spindle.deployments import DeploymentConfig
@@ -67,10 +68,20 @@ def main():
     parser.add_argument("--run", required=True)
     parser.add_argument(
         "--policy",
-        choices=["naive", "affinity", "work", "domains", "capacity", *SIMPLE_POLICIES],
+        choices=[
+            "naive",
+            "affinity",
+            "work",
+            "domains",
+            "capacity",
+            "dlora",
+            *SIMPLE_POLICIES,
+        ],
         required=True,
     )
     parser.add_argument("--work-rates", type=Path, required=True)
+    parser.add_argument("--merge-profile", type=Path)
+    parser.add_argument("--inference-replicas", type=int, default=8)
     parser.add_argument("--trainer-gpu", choices=["H100", "H200"], default="H200")
     parser.add_argument("--trainer-gpus", type=int, choices=[4, 8], default=8)
     parser.add_argument("--trainer-tp", type=int, choices=[2, 4], default=2)
@@ -91,13 +102,34 @@ def main():
         raise ValueError(
             "Initialize once, then switch policies on the existing deployment"
         )
+    merge_settings = {}
+    merge_env = {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
+    if args.merge_profile:
+        profile = json.loads(args.merge_profile.read_text())
+        # The same engine capability and admission bound in every arm.
+        merge_env["SGLANG_SPINDLE_MERGE_PROFILE"] = json.dumps(
+            profile | {"enabled": False}
+        )
+        merge_settings = {
+            "sglang_cfg.enable_lora_merge": True,
+            "sglang_cfg.lora_unmerge_mode": "restore",
+            "sglang_cfg.max_running_requests": profile["capacity"],
+            "sglang_cfg.max_queued_requests": profile["capacity"]
+            + profile["queue_buffer"],
+        }
     recipe = Config(
         name=f"routing27-live-{args.run}",
         inference_lora_routing=args.policy,
+        inference_min_replicas=args.inference_replicas,
+        inference_max_replicas=args.inference_replicas,
+        inference_target_concurrency=36 if args.merge_profile else 64,
+        inference_memory_mib=196608 if args.merge_profile else 65536,
+        inference_env=merge_env,
         trainer_gpu=args.trainer_gpu,
         trainer_gpus_per_node=args.trainer_gpus,
         inference_routing_work_rates=json.loads(args.work_rates.read_text()),
         overrides={
+            **merge_settings,
             "platform.frontend": f"spindle-routing27-live-{args.run}",
             "miles_cfg.tensor_model_parallel_size": args.trainer_tp,
             "platform.modal.region": None if args.region == "any" else args.region,
@@ -137,9 +169,11 @@ def main():
             build_trainer_app(deployment, trainer_platform)[0].deploy(
                 environment_name="lilo-deploy"
             )
-            build_rollout_app(deployment, pool, image=measured_image())[0].deploy(
-                environment_name="lilo-deploy"
-            )
+            build_rollout_app(
+                deployment,
+                pool,
+                image=(dlora_image() if args.merge_profile else measured_image()),
+            )[0].deploy(environment_name="lilo-deploy")
         write(initial, deployment.model_dump(mode="json"))
     endpoint = modal.Function.from_name(
         recipe.platform["frontend"], "server", environment_name="lilo-deploy"

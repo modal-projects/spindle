@@ -21,6 +21,12 @@ COLORS["domains"] = "#c9512c"
 STYLES = {"default": "--", "lora": "-", "kv": "-."}
 STYLES.update({"work": "-", "work-no-adapter": ":"})
 STYLES["domains"] = "--"
+for policy, label, color, style in [
+    ("dlora", "Decentralized merge-aware", "#2864a5", "-"),
+    ("dlora-no-merge", "Same router, merging disabled", "#bd7331", "--"),
+    ("model-spill", "Adapter placement with overflow", "#9252a1", ":"),
+]:
+    LABELS[policy], COLORS[policy], STYLES[policy] = label, color, style
 LABELS["balanced"] = "Balanced adapter domains"
 COLORS["balanced"] = "#ac2f63"
 STYLES["balanced"] = "-"

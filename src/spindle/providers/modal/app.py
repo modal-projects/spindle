@@ -28,6 +28,7 @@ from .checkpoint_storage import (
 )
 from .deployment import trainer_deployment_env
 from .deployment_configs import (
+    image_env_json,
     CONFIGS_ENV,
     PLATFORM_ENV,
     configs_from_env,
@@ -98,8 +99,8 @@ checkpoint_volume = modal.Volume.from_name(
 )
 TRAINER_DEPLOYMENT_ENV = {
     **trainer_deployment_env(),
-    CONFIGS_ENV: os.environ[CONFIGS_ENV],
-    PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
+    CONFIGS_ENV: image_env_json(os.environ[CONFIGS_ENV]),
+    PLATFORM_ENV: image_env_json(os.environ.get(PLATFORM_ENV, "")),
     "SPINDLE_APP_NAME": APP_NAME,
 }
 app = modal.App(APP_NAME)
@@ -293,13 +294,14 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         routing = definition.recipe.inference_lora_routing
-        measured = routing in {"work", "domains", "capacity", *SIMPLE_POLICIES}
+        measured = routing in {"work", "domains", "capacity", "dlora", *SIMPLE_POLICIES}
         if routing not in {
             "affinity",
             "naive",
             "work",
             "domains",
             "capacity",
+            "dlora",
             *SIMPLE_POLICIES,
         }:
             raise ValueError(f"unknown LoRA routing policy: {routing}")
@@ -323,6 +325,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                     stable_domains=routing == "domains",
                     simple_policy=routing if routing in SIMPLE_POLICIES else None,
                     capacity_aware=routing == "capacity",
+                    dlora=routing == "dlora",
                 )
             router = _lora_routers[spec.app_name]
 
