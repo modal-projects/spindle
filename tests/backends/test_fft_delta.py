@@ -1,4 +1,5 @@
 import json
+import shutil
 import struct
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -93,12 +94,12 @@ def _weights(bridge):
 
 
 def use_fake_runtime(monkeypatch) -> None:
-    def read_tensors(path, names):
+    def read_tensor(path, name):
         with safe_open(path, framework="numpy") as shard:
-            return {name: Tensor(shard.get_tensor(name)) for name in names}
+            return Tensor(shard.get_tensor(name))
 
     monkeypatch.setattr(delta_module, "DeltaEncoder", FakeDeltaEncoder)
-    monkeypatch.setattr(delta_module, "_read_tensors", read_tensors)
+    monkeypatch.setattr(delta_module, "_read_tensor", read_tensor)
     monkeypatch.setattr(
         fft_publication,
         "modal",
@@ -129,7 +130,8 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
     )
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -243,7 +245,8 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
 def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> None:
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -348,13 +351,8 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         bulletin_volume="test-bulletin",
     )
 
-    restored = FFTDeltaWriter()
-    restored._load_parent(
-        board,
-        VersionRef("run-a", 2),
-        base_checkpoint=base_dir,
-    )
-    assert restored._snapshot["model.weight"].value.tolist() == [4.0, 3.0]
+    restored = delta_module._ParentSource(base_dir, board, VersionRef("run-a", 2))
+    assert restored.read("model.weight").value.tolist() == [4.0, 3.0]
 
 
 def test_delta_writer_publishes_unchanged_base_as_version_one(
@@ -362,7 +360,8 @@ def test_delta_writer_publishes_unchanged_base_as_version_one(
 ) -> None:
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -458,14 +457,15 @@ def test_delta_writer_loads_bfloat16_parent_as_raw_bytes(tmp_path, monkeypatch) 
         ),
         encoding="utf-8",
     )
+    base = tmp_path / "base"
+    shutil.copytree(source, base)
     board.publish(ref, source, metadata={"optimizer_step": 1})
     monkeypatch.setattr(
         delta_module,
-        "_read_tensors",
-        lambda _path, _names: {"model.weight": Tensor(np.frombuffer(data, np.uint8))},
+        "_read_tensor",
+        lambda _path, _name: Tensor(np.frombuffer(data, np.uint8)),
     )
 
-    writer = FFTDeltaWriter()
-    writer._load_full(board.resolve(ref), ref)
+    parent = delta_module._ParentSource(base, board, ref)
 
-    assert writer._snapshot["model.weight"].value.tobytes() == data
+    assert parent.read("model.weight").value.tobytes() == data
