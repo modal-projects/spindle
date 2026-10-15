@@ -22,7 +22,7 @@ class Config(BaseConfig):
     trainer_nodes = 2
     trainer_cpu = 64
     trainer_memory_mib = 1_200_000
-    trainer_disk_mib = 500_000
+    trainer_disk_mib = 600_000
     trainer_timeout_s = 172800
     trainer_max_clients_per_instance = 2
     miles_cfg = {
@@ -75,7 +75,7 @@ class Config(BaseConfig):
     inference_gpus_per_node = 8
     inference_cpu = 32
     inference_memory_mib = 700_000
-    inference_disk_mib = 500_000
+    inference_disk_mib = 600_000
     inference_max_replicas = 2
     inference_startup_timeout_s = 3600
     inference_env = {
