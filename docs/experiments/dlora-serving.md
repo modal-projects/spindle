@@ -1,7 +1,7 @@
 # Decentralized merge-aware LoRA serving
 
-Status: experimental, opt-in implementation. The initial pool comparison is
-complete; the revised admission policy and live RL comparison are under test.
+Status: experimental, opt-in implementation. The initial pool and live RL
+comparisons are complete; the revised admission policy is under test.
 Trained-adapter BF16 numerical agreement has not passed the merge PR's test
 tolerance. Do not interpret kernel speedups as validated RL improvements.
 
@@ -25,6 +25,14 @@ Each sampling container has one router per inference pool, with asynchronous
 replica observation and local reservations. Selection is synchronous over the
 snapshot. Neither request selection nor replica mode selection requires a global
 controller, distributed lock, or per-request control-plane write.
+
+During active demand each frontend polls replica observations approximately once
+per second, concurrently across hosts; Flash membership is refreshed every five
+seconds. One in-flight refresh is shared by concurrent callers. Fresh selections
+do not await it. The initial/stale burst may await that one refresh, bounded at
+three seconds; unavailable observations fall back to Flash. Work snapshots older
+than three seconds are excluded. This decentralizes decisions, but observation
+traffic still scales with frontends times replicas.
 
 Each replica sidecar has one local mode controller. The event loop owns its
 bounded admission count and pending queue. At most `capacity + queue_buffer`
@@ -66,6 +74,16 @@ token-prefix observations and local reservation accounting. It compares queued
 service plus remaining prefill/decode work in seconds. A measured merged decode
 rate replaces the unmerged rate on a matching specialized replica. This is an
 approximate service model, not an optimal completion-time estimator.
+
+For a group chunk of `q <= capacity` samples, the base score is
+`backlog + registration + GPU_load + q * (uncached_prefill / prefill_rate +
+requested_decode / aggregate_decode_rate)`. Backlog includes observed outstanding
+tokens plus this frontend's requests absent from the observation. Prefix hits
+must match the exact adapter version and a token-prefix boundary advertised by
+the engine. Slot-release and incompatible-merge drain times lower-bound backlog;
+restoration time is added when needed. All terms have units of seconds and use
+measured rates. The minimum score chooses the destination. A planned sibling
+chunk stays together only while its destination has admission capacity.
 
 A bounded group route expires when its observed plus locally reserved demand
 reaches engine capacity. Subsequent groups can use any replica; there is no
@@ -180,7 +198,21 @@ passed with zero logprob difference. The tolerance originates in smaller-model
 tests, but it has not been relaxed to make this experiment pass. Additional
 pool measurements use merging disabled while this discrepancy is investigated.
 
-### Live RL baseline
+A read-only tensor diagnostic on layer 11's value projection found that BF16
+merging leaves 99.27% of base-weight entries unchanged; the norm of the rounding
+error is 99.29% of the LoRA update norm. This layer's largest update is only
+2.50e-6. FP16 reduces the relative error to 95.05%, still large. These are
+one-layer measurements, not an end-to-end attribution, but they demonstrate
+that these small training updates are poorly represented in merged low-precision
+weights. The fixed-prompt merged/unmerged discrepancy is also larger than the
+unmerged adapter/base discrepancy (mean approximately 0.101).
+
+A separate two-H100 FP16 diagnostic failed during engine startup, before serving:
+the pinned hybrid-attention backend assigned Half activations to a BFloat16
+convolution-state buffer. It was stopped and contributes no performance result.
+Changing weight precision is therefore not a validated workaround in this setup.
+
+### Live RL comparison
 
 Eight independently staggered clients completed two optimizer updates each on
 four TP1 H200 inference replicas and one TP4 H100 trainer. Each update retains
@@ -197,6 +229,52 @@ tokens/s including training and publication. It sampled 228 groups, filtered
 occurred, accumulating 3.62 host-seconds of loading. KV token hit ratio was
 35.79%, GPU LoRA-buffer hit ratio 91.28%, and mean executed batch 24.77. This
 workload does not exhibit substantial adapter-transfer overhead.
+
+| Metric | KV affinity | Merge-aware router |
+|---|---:|---:|
+| Completed optimizer updates | 16 | 16 |
+| Wall seconds | 3,380.15 | 3,520.49 |
+| Generated output tokens | 12,295,732 | 12,789,845 |
+| Generated tokens/s including training | 3,637.62 | 3,632.97 |
+| Trained output tokens | 4,057,999 | 3,792,914 |
+| Trained output tokens/s | 1,200.54 | 1,077.38 |
+| Mean / p95 client update seconds | 1,347.63 / 2,419.37 | 1,460.18 / 2,525.25 |
+| Sampled / filtered groups | 228 / 154 | 240 / 169 |
+| Mean output length | 6,741.08 | 6,661.38 |
+| Mean reward | 0.5691 | 0.5557 |
+| KV token hit ratio | 35.79% | 33.88% |
+| GPU LoRA-buffer hit ratio | 91.28% | 94.20% |
+| GPU loads / evictions | 52 / 50 | 32 / 32 |
+| GPU load host-seconds | 3.62 | 2.05 |
+| Mean executed batch / distinct adapters | 24.77 / 3.91 | 23.91 / 4.67 |
+| Merged decode-step fraction | 0% | 15.24% |
+| Mode transitions / aggregate seconds | 0 / 0 | 14 / 16.65 |
+
+There is no RL throughput improvement: generated tokens/s is 0.13% lower. Trained
+tokens/s is 10.26% lower, combining 6.53% fewer retained output tokens with 4.15%
+more wall time. Both arms retain 64 groups, but output lengths and DAPO filtering
+vary with stochastic generation and batching. The new arm samples twelve more
+groups and filters fifteen more. This is an observed end-to-end outcome, not a
+controlled estimate of router-induced training slowdown. The fixed-work replay
+is the corresponding scheduling control.
+
+Fewer adapter loads save only 1.57 aggregate host-seconds; that cannot explain a
+large throughput gain in a roughly one-hour run. The new arm has slightly smaller
+and more heterogeneous native batches and lower KV reuse. Merged execution does
+occur (120 requests in the engine observation window, including overlapping
+initialization), but the benefit does not translate into faster overall sampling.
+These live pools used the reclaim correction and the original admission
+controller, before the optional adapter-slot gate. With eight active clients,
+this workload does not exceed the eight-adapter native batch limit.
+
+All initial policy adapters have zero-initialized LoRA B matrices. The numerical
+zero-adapter check passes, but these two-update prefetched runs do not validate
+merged inference on trained versions. The final client's DAPO filtering was
+allowed to finish under a replacement bounded monitor; client processes,
+workload and policy were unchanged. The completed run still finished within the
+original one-hour budget. Observation coverage is 99.16% for KV and 96.00% for
+the new arm; a 138-second observer-restart gap is excluded from time-weighted
+statistics. Both live arms and their eight GPUs have been stopped.
 
 Every replay arm receives common full-batch unmerged/merged warmup and cache reset
 before measurement. The service profiles describe that warmed regime. A cold
