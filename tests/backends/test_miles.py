@@ -211,6 +211,41 @@ def test_config_points_reference_load_at_the_hf_checkpoint() -> None:
     )
 
 
+def test_config_exports_lora_through_the_raw_converter() -> None:
+    config = _config(megatron_to_hf_mode="raw")
+    config.validate()
+
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
+    assert "--multi-lora-n-adapters" in arguments
+
+
+def test_config_wildcard_targets_serve_by_module_suffix() -> None:
+    targets = (
+        "layers.*.attn.wq_a",
+        "layers.*.attn.wkv",
+        "layers.*.attn.wq_b",
+        "layers.*.attn.wo_b",
+        "layers.*.ffn.shared_experts.w1",
+        "layers.*.ffn.shared_experts.w2",
+        "layers.*.ffn.shared_experts.w3",
+    )
+    config = _config(target_modules=targets)
+
+    assert config.peft_target_modules == (
+        "attn.wq_a",
+        "attn.wkv",
+        "attn.wq_b",
+        "attn.wo_b",
+        "ffn.shared_experts.w1",
+        "ffn.shared_experts.w2",
+        "ffn.shared_experts.w3",
+    )
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--target-modules") + 1] == ",".join(targets)
+    assert lora_target_flags(targets) == (True, True, False)
+
+
 def test_config_context_parallel_topology() -> None:
     config = _config(
         actor_num_gpus_per_node=8,

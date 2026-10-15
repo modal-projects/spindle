@@ -132,11 +132,10 @@ def test_full_config_rejects_context_parallelism() -> None:
         _config(context_parallel_size=2).validate()
 
 
-def test_export_mode_is_selectable_for_full_models_only() -> None:
+def test_export_mode_is_selectable() -> None:
     arguments = _config(megatron_to_hf_mode="raw").miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
-    with pytest.raises(ValueError, match="bridge"):
-        _config(parameterization="lora", megatron_to_hf_mode="raw").validate()
+    _config(parameterization="lora", megatron_to_hf_mode="raw").validate()
     with pytest.raises(ValueError, match="bridge or raw"):
         _config(megatron_to_hf_mode="direct").validate()
 
