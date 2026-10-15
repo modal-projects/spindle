@@ -81,6 +81,15 @@ async def sample_task(
         raise ValueError("num_samples must be positive")
     if topk_prompt_logprobs < 0:
         raise ValueError("topk_prompt_logprobs must be non-negative")
+    # Newer Tinker SDKs send these with inert defaults on every request.
+    for key in (
+        "topk_sample_logprobs",
+        "target_prompt_logprobs",
+        "prompt_alt_tokens_k",
+        "prompt_logprobs_last_n",
+    ):
+        if request.get(key):
+            raise ValueError(f"{key} is not supported by Spindle")
     if data_parallel_size < 1:
         raise ValueError("data_parallel_size must be positive")
     request_id = str(task["request_id"])

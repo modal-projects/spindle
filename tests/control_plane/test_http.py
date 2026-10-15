@@ -352,6 +352,10 @@ def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
         )
 
         assert legacy.status_code == 200
+        assert legacy.json() == {
+            "request_id": "request-1",
+            "sample_sequence_ids": ["request-1:0"],
+        }
         assert "cache_affinity_key" not in plane.requests[0]
         assert affinity.status_code == 200
         assert plane.requests[1]["cache_affinity_key"] == "trajectory-a"

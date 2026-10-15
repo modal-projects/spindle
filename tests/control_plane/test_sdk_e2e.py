@@ -195,6 +195,13 @@ def test_real_sdk_sampling_loop(base_url: str) -> None:
         [0, 1, 2],
         [1, 2, 3],
     ]
+    # Tinker SDK >= 0.26 requires the server to assign one id per sequence.
+    sequence_ids = [
+        getattr(sequence, "sequence_id", None) for sequence in result.sequences
+    ]
+    if any(sequence_ids):
+        assert all(sequence_ids)
+        assert len(set(sequence_ids)) == len(sequence_ids)
     assert sampling.get_base_model() == BASE_MODEL
 
 

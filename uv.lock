@@ -551,7 +551,7 @@ requires-dist = [
     { name = "protobuf", specifier = ">=5.29" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "stitch", git = "https://github.com/modal-projects/stitch.git?rev=d9f681fd894b02257da129ec3483a977659cd7ab" },
-    { name = "tinker", specifier = ">=0.24.1,<0.26" },
+    { name = "tinker", specifier = ">=0.24.1" },
     { name = "uvicorn", specifier = ">=0.52.0" },
     { name = "xxhash", specifier = ">=3.8.1" },
     { name = "zstandard", specifier = ">=0.25.0" },

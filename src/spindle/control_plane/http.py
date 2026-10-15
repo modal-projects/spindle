@@ -423,12 +423,23 @@ def create_control_plane_app(
         }
 
     @app.post("/api/v1/asample")
-    async def asample(body: SampleEnvelope) -> dict[str, str]:
+    async def asample(body: SampleEnvelope) -> dict[str, object]:
         request = body.model_dump(mode="json")
         if body.cache_affinity_key is None:
             request.pop("cache_affinity_key")
         request_id = await control_plane.submit_sample(request)
-        return {"request_id": request_id}
+        # Tinker SDK >= 0.26 stamps these onto SampledSequence.sequence_id and
+        # requires one per sample. They derive from the idempotent request id,
+        # so a resubmitted sample gets the same ids.
+        num_samples = request.get("num_samples", 1)
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int):
+            num_samples = 1
+        return {
+            "request_id": request_id,
+            "sample_sequence_ids": [
+                f"{request_id}:{index}" for index in range(max(num_samples, 0))
+            ],
+        }
 
     @app.get("/api/v1/samplers/{sampling_session_id}")
     async def get_sampler(sampling_session_id: str) -> dict[str, object]:

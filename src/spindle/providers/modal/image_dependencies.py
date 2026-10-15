@@ -21,7 +21,10 @@ STITCH_PACKAGE = (
     "@d9f681fd894b02257da129ec3483a977659cd7ab"
 )
 
-TINKER_PACKAGE = "tinker>=0.24.1,<0.26"
+# Server images only use the SDK's request types, so they pin one tested
+# release for reproducible deploys. Clients may run any SDK the package allows;
+# the server's wire compatibility, not this pin, decides which ones work.
+TINKER_PACKAGE = "tinker==0.33.1"
 TINKER_CLIENT_PACKAGES = ("huggingface-hub", TINKER_PACKAGE)
 MEGATRON_RUNTIME_PACKAGES = (
     *TINKER_CLIENT_PACKAGES,
