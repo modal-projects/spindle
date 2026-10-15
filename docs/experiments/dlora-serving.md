@@ -20,6 +20,15 @@ version identities and bulletin publication still select immutable exact adapter
 versions. This is not prefill/decode disaggregation (the PR currently rejects
 that execution mode). Active generations are not migrated between engines.
 
+The sampling API and payload remain unchanged. Activation is explicit:
+`inference_lora_routing="dlora"`, measured `inference_routing_work_rates`, the
+replica profile in `inference_env["SGLANG_SPINDLE_MERGE_PROFILE"]`, and
+`sglang_cfg.enable_lora_merge=True` with `lora_unmerge_mode="restore"`.
+The deployment selects the pinned merge-capable image only when that engine
+option is enabled. Existing default deployments retain their current image and
+policy. The profile must be calibrated for the model, rank, batch size, and
+hardware; benchmark setup endpoints are confined to the instrumented test image.
+
 ## Ownership and request path
 
 Each sampling container has one router per inference pool, with asynchronous
@@ -45,6 +54,12 @@ The sidecar forwards at most 36 requests, so this does not add a second
 that fit available execution slots in the admission diagnostic.
 Capacity rejection is distinguished from an engine failure and retried with
 short randomized delay. Exact adapter constraints survive every retry.
+The final sidecar also counts latest-version resolution against this admission
+bound before awaiting checkpoint I/O. A regression test blocks resolution,
+checks rejection before registration, cancels a waiter, and verifies that its
+capacity is released. This guard was added after freezing the measured GPU
+images; the replay requests already specify exact versions and do not enter
+that pre-admission resolution path.
 
 The 36-request forwarding budget is not a guarantee of 36 executing sequences:
 adapter-slot, KV-memory, and prefill constraints can leave forwarded work waiting
@@ -223,6 +238,10 @@ including the larger active reservation sets in this trace. Selection itself
 does not make RPCs. A separate in-process snapshot benchmark measured approximately
 49 microseconds median at four replicas, 80 at eight and 1,000 at 128; those CPU
 measurements exclude discovery and do not establish serving scalability.
+The first revised trial runs KV, model-placement overflow, then the revised
+policy. The planned repeat swaps the two controls and still runs the revised
+policy last; it is not a fully counterbalanced experiment. Common cache and
+mode preparation is repeated before every arm.
 
 KV hits count cached input tokens divided by input tokens at first native
 admission. LoRA hits count requests whose exact adapter is already in a GPU
@@ -266,6 +285,42 @@ frontends. Both are retained: the large long-prefix KV trace has a 13.48-second
 collection tail. This instrumentation cost must not be mistaken for inference
 service time. Per-request latency ends at its response and includes time spent
 waiting outside the engine.
+
+The completed long-prefix burst comparison is:
+
+| Policy | Generation seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Mean decode batch |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 824.52 | 4,053.68 | 133.76 / 256.67 | 62.00% | 76.90% | 570 / 566 | 26.32 |
+| Model placement with overflow | 629.75 | 5,307.41 | 97.97 / 195.63 | 78.65% | 96.88% | 94 / 91 | 34.78 |
+| Revised adapter-slot policy | 744.64 | 4,488.52 | 123.70 / 231.24 | 62.56% | 81.40% | 444 / 440 | 31.02 |
+
+Relative to KV, the revised policy gains 10.73% throughput and reduces mean/p95
+latency by 7.52%/9.91%. It still loses to the simple overflow policy. The latter
+uses 2.75 replicas per exact adapter and 2.01 per prefix group, versus 3.97 and
+3.65 for the revised policy. Its native batches contain 4.47 distinct adapters
+on average, versus 7.42. The gate prevents exceeding eight adapter slots, but
+does not capture the benefit of less heterogeneous batches and less replicated
+prefixes within that bound. No busy observation has an idle replica in either
+KV or the revised arm; the failure is not wholesale idle capacity.
+
+Capacity rejections are 587,996 / 416,961 / 546,406 in table order. All arms have
+exactly 3,264 engine admissions; KV has one transport error without a duplicate
+admission, and the other arms have none. Mean time outside the engine is 99.25
+seconds for KV and 94.65 for the revised router, compared with 34.51 and 29.05
+seconds inside it. GPU load host-seconds are 30.89 / 5.55 / 24.94. Merging is
+disabled for these three arms. These measurements identify batching, prefix
+replication, and excess-demand retries as material limitations; fewer adapter
+copies alone are an inadequate objective.
+
+For the selected destination, the revised router's cached-token estimate exactly
+matches native admission in 88.33% of the 64-version serving requests and 72.89%
+of the larger burst requests. It underestimates in 9.33% / 26.07% and
+overestimates in 2.34% / 1.04%, respectively. Mean absolute discrepancies are
+579 / 1,492 tokens. These compare a selection-time estimate with a later engine
+observation: intervening requests can populate or evict prefixes. They do not
+measure counterfactual reuse on unselected replicas and do not establish that
+the selected destination was optimal. The observed cache metadata is useful,
+but accurate matches on many requests do not rescue the current placement rule.
 
 ### Numerical validation
 
@@ -405,7 +460,11 @@ overflow policy despite fewer adapter transfers.
 
 Merging is considered only when the replica has drained. It cannot transform an
 in-flight batch or preserve its KV state across the transition. Continuous mixed
-demand may therefore never create an amortizable merge opportunity. Fixed-size
+demand may therefore never create an amortizable merge opportunity. Engine
+concurrency remains fixed at 36: the scheduler chooses which admitted requests to
+forward, but does not autotune the engine's concurrency limit. The partial-batch
+merge adjustment is a conservative interpolation from a full-batch calibration,
+not a measured service curve for every batch composition. Fixed-size
 pool tests do not establish Flash autoscaling behavior, failover behavior, or
 scaling to hundreds of replicas. The tested native topology is TP1/TP2 with
 DP=PP=1. Model/precision-specific numerical validation is still required before

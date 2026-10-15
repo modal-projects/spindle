@@ -104,6 +104,86 @@ def test_mode_controller_pins_latest_before_merging(tmp_path, monkeypatch):
         ]
 
 
+def test_mode_admission_bounds_latest_resolution_and_releases_on_cancel(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(
+        "SGLANG_SPINDLE_MERGE_PROFILE",
+        json.dumps(
+            dict(
+                unmerged_token_seconds=0.1,
+                merged_token_seconds=0.05,
+                prefill_tokens_per_second=1000,
+                merge_seconds=1,
+                unmerge_seconds=1,
+                capacity=1,
+                queue_buffer=1,
+                enabled=False,
+            )
+        ),
+    )
+    bulletin = _publish(tmp_path, 12)
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def refresh():
+            entered.set()
+            await release.wait()
+
+        bulletin._refresh = refresh
+
+        def engine(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={"meta_info": {}})
+
+        app = create_app(
+            bulletin, "http://engine", transport=httpx.MockTransport(engine)
+        )
+        payload = dict(
+            input_ids=[1],
+            weight_run_id="model-a",
+            weight_version={"min_version": 12},
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+            ) as client,
+        ):
+            first = asyncio.create_task(client.post("/generate", json=payload))
+            await asyncio.wait_for(entered.wait(), 1)
+            second = asyncio.create_task(client.post("/generate", json=payload))
+            await asyncio.sleep(0.01)
+            assert app.state.active == 2
+            assert app.state.mode_scheduler.active == 0
+            rejected = await client.post("/generate", json=payload)
+            assert rejected.status_code == 503
+            assert rejected.headers["x-spindle-capacity-rejected"] == "1"
+            assert app.state.mode_scheduler.rejections == 1
+            assert calls == []
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            assert app.state.active == 1
+            replacement = asyncio.create_task(client.post("/generate", json=payload))
+            await asyncio.sleep(0.01)
+            assert app.state.active == 2
+            release.set()
+            responses = await asyncio.wait_for(asyncio.gather(second, replacement), 2)
+            assert all(r.status_code == 200 for r in responses)
+            assert all(
+                r.json()["meta_info"]["weight_version_start"] == 12 for r in responses
+            )
+            assert calls.count("/load_lora_adapter") == 1
+            assert calls.count("/generate") == 2
+            assert app.state.active == 0
+            assert not app.state.routing_requests
+
+    asyncio.run(run())
+
+
 def _publish(tmp_path, version):
     source = tmp_path / f"source-{version}"
     source.mkdir()

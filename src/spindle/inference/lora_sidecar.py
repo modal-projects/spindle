@@ -175,6 +175,23 @@ def create_app(
                         "x-spindle-replica": os.environ.get("MODAL_TASK_ID", "local"),
                     },
                 )
+        scheduler = app.state.mode_scheduler
+        if (
+            scheduler is not None
+            and app.state.active
+            >= scheduler.profile.capacity + scheduler.profile.queue_buffer
+        ):
+            # Latest-version resolution awaits I/O before scheduler.submit().
+            # Include those requests in the replica's total admission bound.
+            scheduler.rejections += 1
+            return JSONResponse(
+                {"detail": "Replica admission capacity is full"},
+                status_code=503,
+                headers={
+                    "x-spindle-capacity-rejected": "1",
+                    "x-spindle-replica": os.environ.get("MODAL_TASK_ID", "local"),
+                },
+            )
         rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
         constraint = VersionConstraint.from_payload(payload)
         run_id = payload.get("weight_run_id")
@@ -194,7 +211,6 @@ def create_app(
             )
         app.state.active += 1
         try:
-            scheduler = app.state.mode_scheduler
             if scheduler is None:
                 response = await generate_response(request, payload)
             else:
