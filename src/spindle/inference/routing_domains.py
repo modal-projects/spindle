@@ -64,9 +64,11 @@ class DomainRouter(WorkRouter):
                 # entries this yields at most S preferred primaries per replica.
                 host = min(
                     rank,
-                    key=lambda h: assigned[h]
-                    if self.even_primaries
-                    else assigned[h] // self.slots,
+                    key=lambda h: (
+                        assigned[h]
+                        if self.even_primaries
+                        else assigned[h] // self.slots
+                    ),
                 )
                 assigned[host] += 1
                 self.primary_hosts[name] = host

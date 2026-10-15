@@ -82,9 +82,10 @@ def summarize_pairs(frozen, roots):
         ), f"Mixed harness/CPU placement within {job['name']}"
         if len({a["workload_sha256"] for a in arms.values()}) != 1:
             raise ValueError(f"Unmatched workload: {job['name']}")
-        if len({a["pool"] for a in arms.values()}) != 1 or len(
-            {tuple(a["replicas"]) for a in arms.values()}
-        ) != 1:
+        if (
+            len({a["pool"] for a in arms.values()}) != 1
+            or len({tuple(a["replicas"]) for a in arms.values()}) != 1
+        ):
             raise ValueError(f"Unmatched physical pool: {job['name']}")
         candidate = arms[frozen["candidate"]]
         for baseline in ("kv", *frozen["controls"]):

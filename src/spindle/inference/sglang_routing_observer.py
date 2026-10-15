@@ -211,7 +211,10 @@ def install(sglang_root, *, modern=False):
     target.write_text(source)
     observer = Path(__file__).read_text()
     if modern:
-        observer = observer.replace("import xxhash\n", "import xxhash\nfrom sglang.srt.runtime_context import get_parallel\n")
+        observer = observer.replace(
+            "import xxhash\n",
+            "import xxhash\nfrom sglang.srt.runtime_context import get_parallel\n",
+        )
         observer = observer.replace("scheduler.ps.", "get_parallel().")
         observer = observer.replace("len(req.prefix_indices)", "req.prefix_len")
     (sglang_root / "srt/spindle_routing_observer.py").write_text(observer)

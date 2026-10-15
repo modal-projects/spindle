@@ -138,8 +138,10 @@ def main():
             ax.grid(axis="x", alpha=0.2)
             ax.set_axisbelow(True)
         title = (
-            "64-version serving" if job.startswith("screen-serving64")
-            else "Three-turn rollouts" if job.startswith("screen-dialogue")
+            "64-version serving"
+            if job.startswith("screen-serving64")
+            else "Three-turn rollouts"
+            if job.startswith("screen-dialogue")
             else "Independent long rollouts"
         )
         fig.suptitle(title + ": one exploratory trial per policy")
