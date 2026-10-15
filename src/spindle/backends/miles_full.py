@@ -21,7 +21,12 @@ from spindle.errors import BackendFailed
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 from .contract import Backend, ForwardBatch, ModelSpec, SamplerPublication
-from .fft_publication import bulletin_board, discard_staged, publish_staged
+from .fft_publication import (
+    bulletin_board,
+    discard_staged,
+    publish_staged,
+    write_staged_index,
+)
 from .miles_config import MilesBackendConfig, parse_backend_config
 from .miles_lora import _adam_parameters, _commit_volume, _reload_volume
 from .miles_runtime.data import build_outputs, pad_slot_rows, prepare_batch
@@ -259,6 +264,12 @@ class MilesFullBackend(Backend):
             os.environ["SPINDLE_BULLETIN_ROOT"], os.environ["SPINDLE_BULLETIN_VOLUME"]
         )
         try:
+            write_staged_index(
+                board,
+                ref=ref,
+                metadata=manifest["metadata"],
+                weight_map=manifest["weight_map"],
+            )
             publish_staged(board, ref=ref, metadata=manifest["metadata"])
         except BaseException:
             discard_staged(board, ref=ref, parent=parent)

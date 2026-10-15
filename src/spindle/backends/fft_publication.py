@@ -7,6 +7,7 @@ a GPU nor the training framework.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from typing import Any
@@ -23,6 +24,29 @@ def bulletin_board(bulletin_root: str, bulletin_volume: str) -> FFTSnapshotBulle
     return FFTSnapshotBulletin(
         bulletin_root,
         commit=modal.Volume.from_name(bulletin_volume, version=2).commit,
+    )
+
+
+_INDEX = "model.safetensors.index.json"
+
+
+def write_staged_index(
+    board: FFTSnapshotBulletin,
+    *,
+    ref: VersionRef,
+    metadata: dict[str, Any],
+    weight_map: dict[str, str],
+) -> None:
+    """Write the index that names every staged shard of a publication."""
+    staging = board.staging_dir(ref)
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / _INDEX).write_text(
+        json.dumps(
+            {"metadata": metadata, "weight_map": weight_map},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
     )
 
 

@@ -54,6 +54,7 @@ class FakeRuntime:
                 kwargs["model_id"], kwargs["publish_version"] - 1
             ).identity,
             "metadata": {"optimizer_step": kwargs["optimizer_step"]},
+            "weight_map": {"model.weight": "pp00-delta-00001.safetensors"},
             "metrics": {},
         }
 
@@ -275,6 +276,7 @@ def test_failed_publication_discards_staged_delta(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("SPINDLE_BULLETIN_VOLUME", "bulletin")
     discarded = []
     monkeypatch.setattr(miles_full, "bulletin_board", lambda root, volume: "board")
+    monkeypatch.setattr(miles_full, "write_staged_index", lambda board, **kwargs: None)
 
     def fail(board, **kwargs):
         raise RuntimeError("pool wake failed")

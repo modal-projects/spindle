@@ -1016,6 +1016,44 @@ def test_prepare_model_assets_applies_the_recipe_transform(monkeypatch) -> None:
     ]
 
 
+def test_prepare_model_assets_keeps_converted_assets(monkeypatch, tmp_path) -> None:
+    from spindle.assets import TRANSFORM_MARKER
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    original = modal_app.module_for(FULL_DEFINITION)
+    definition = DeploymentConfig.create(
+        BaseConfig(**{**vars(original.recipe), "asset_transform": "dequantize_bf16"})
+    )
+    events = []
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+    monkeypatch.setattr(modal_app, "MODEL_ASSET_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        type(definition), "asset_path", property(lambda self: str(tmp_path / "model"))
+    )
+    (tmp_path / "model").mkdir()
+    (tmp_path / "model" / TRANSFORM_MARKER).write_text("{}")
+    monkeypatch.setattr(
+        "spindle.providers.modal.app.snapshot_download",
+        lambda *, repo_id, local_dir: events.append(("download", repo_id, local_dir)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "apply_transform",
+        lambda name, source, target: events.append(("transform", name)),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "model_assets",
+        SimpleNamespace(commit=lambda: events.append(("commit",))),
+    )
+
+    modal_app.prepare_model_assets.local(FULL_DEFINITION)
+
+    assert events == [("commit",)]
+
+
 def test_unknown_asset_transform_is_rejected_at_creation() -> None:
     from spindle.configuration import BaseConfig
     from spindle.deployments import DeploymentConfig

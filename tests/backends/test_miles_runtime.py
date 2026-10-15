@@ -207,3 +207,30 @@ def test_context_parallel_guard_restores_args_and_installs_once(fails):
         once(args)
     assert seen == [1]
     assert args.context_parallel_size == 8
+
+
+def test_merge_delta_manifests_joins_pipeline_stage_writers():
+    first = {
+        "ref": "run-a:1",
+        "parent": "run-a:0",
+        "metadata": {"version": 1},
+        "weight_map": {"layers.0.weight": "pp00-delta-00001.safetensors"},
+        "metrics": {"capture_seconds": 2.0, "captured_bytes": 10.0},
+    }
+    second = {
+        **first,
+        "weight_map": {"layers.1.weight": "pp01-delta-00001.safetensors"},
+        "metrics": {"capture_seconds": 3.0, "captured_bytes": 5.0},
+    }
+
+    merged = miles_runtime.merge_delta_manifests([first, second])
+
+    assert merged["weight_map"] == {
+        "layers.0.weight": "pp00-delta-00001.safetensors",
+        "layers.1.weight": "pp01-delta-00001.safetensors",
+    }
+    assert merged["metrics"] == {"capture_seconds": 3.0, "captured_bytes": 15.0}
+    with pytest.raises(BackendFailed, match="overlap"):
+        miles_runtime.merge_delta_manifests([first, first])
+    with pytest.raises(BackendFailed, match="disagree"):
+        miles_runtime.merge_delta_manifests([first, {**second, "ref": "run-a:2"}])

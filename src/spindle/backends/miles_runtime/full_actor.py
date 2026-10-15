@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.distributed as dist
 from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.utils import get_model_config, unwrap_model
@@ -79,7 +78,7 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         self._hf_weights = get_hf_weight_iterator(
             self.args,
             self.model,
-            required_placement=WeightUpdatePlacement(gather_pp=True),
+            required_placement=WeightUpdatePlacement(gather_pp=False),
             model_name=self._model_name(),
             quantization_config=None,
         )
@@ -242,7 +241,10 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         the driver publishes from."""
         self._heartbeat.bump()
         if self._delta_writer is None:
-            self._delta_writer = FFTDeltaWriter()
+            self._delta_writer = FFTDeltaWriter(
+                writer=self._writes_deltas(),
+                shard_prefix=f"pp{get_parallel_state().pp.rank:02d}-",
+            )
         weights = dict(self._named_actor_weights())
         exported = (
             (name, tensor)
@@ -260,16 +262,30 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             bulletin_root=bulletin_root,
             definition_revision=definition_revision,
         )
-        if dist.get_rank() != 0:
+        if not self._writes_deltas():
             return None
         board = FFTSnapshotBulletin(bulletin_root)
-        self._delta_writer.stage(snapshot, board)
+        self._delta_writer.stage_shards(snapshot, board)
         return {
             "ref": snapshot.ref.identity,
             "parent": snapshot.parent.identity,
             "metadata": snapshot.metadata,
+            "weight_map": snapshot.weight_map,
             "metrics": snapshot.metrics,
         }
+
+    def _writes_deltas(self) -> bool:
+        """One rank per pipeline stage encodes the stage's weights, or only
+        rank zero when the iterator gathers the whole model on every stage."""
+        parallel = get_parallel_state()
+        if (
+            parallel.tp.rank
+            or parallel.intra_dp_cp.rank
+            or parallel.ep.rank
+            or (self._hf_weights.placement.gather_pp and parallel.pp.rank)
+        ):
+            return False
+        return True
 
     def is_delta_aligned_with(self, identity: str) -> bool:
         from stitch.types import VersionRef

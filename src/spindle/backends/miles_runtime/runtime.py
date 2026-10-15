@@ -203,16 +203,15 @@ class MilesRuntime:
         )
 
     def capture_full_delta(self, **kwargs: Any) -> dict[str, Any]:
-        """Stage a sampler delta on rank 0 and return its manifest."""
+        """Stage a sampler delta on the writer ranks and return the merged
+        manifest."""
         results = self._run(
             self._trainer._execute_slots("capture_sampler_delta", **kwargs)
         )
         manifests = [result for result in results if result is not None]
-        if len(manifests) != 1:
-            raise BackendFailed(
-                f"expected one staged delta manifest, got {len(manifests)}"
-            )
-        return manifests[0]
+        if not manifests:
+            raise BackendFailed("no trainer rank staged a sampler delta")
+        return merge_delta_manifests(manifests)
 
     def full_delta_aligned_with(self, identity: str) -> bool:
         return all(
@@ -471,6 +470,30 @@ _ACTOR_CLASSES = {
         "spindle.backends.miles_runtime.full_actor.SpindleMilesFullTrainRayActor"
     ),
 }
+
+
+def merge_delta_manifests(manifests: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine the manifests of the writer ranks, one per pipeline stage."""
+    first = manifests[0]
+    weight_map: dict[str, str] = {}
+    metrics: dict[str, float] = {}
+    for manifest in manifests:
+        for key in ("ref", "parent", "metadata"):
+            if manifest[key] != first[key]:
+                raise BackendFailed(f"staged delta manifests disagree on {key}")
+        overlap = weight_map.keys() & manifest["weight_map"].keys()
+        if overlap:
+            raise BackendFailed(
+                f"staged delta manifests overlap: {sorted(overlap)[:5]}"
+            )
+        weight_map.update(manifest["weight_map"])
+        for key, value in manifest["metrics"].items():
+            metrics[key] = (
+                max(metrics.get(key, 0.0), value)
+                if key == "capture_seconds"
+                else metrics.get(key, 0.0) + value
+            )
+    return {**first, "weight_map": weight_map, "metrics": metrics}
 
 
 def _neutralize_lr_schedule(args, data_parallel_size: int) -> None:
