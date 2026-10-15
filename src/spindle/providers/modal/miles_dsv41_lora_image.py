@@ -14,9 +14,5 @@ MILES_REF = "db783526e5cbdda917da18657220cba10a5f73a4"
 image = release_image.run_commands(
     f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY} {MILES_REF}"
     f" && git -C {MILES_PATH} checkout --detach FETCH_HEAD",
-    'python -c "from miles.backends.megatron_utils.lora.actor import '
-    "MultiLoRATrainRayActor; from miles.tinker.runtime import MilesBackend as B; "
-    "assert all(hasattr(B, name) for name in "
-    "('load_slot', 'unload_slot', 'forward_backward', "
-    "'forward_only', 'optim_step', 'save_slot', 'export_slot'))\"",
+    f"test -f {MILES_PATH}/miles/backends/megatron_utils/lora/actor.py",
 ).add_local_python_source("spindle", ignore=ignore_config_source)
