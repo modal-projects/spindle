@@ -35,7 +35,7 @@ def _check_release(miles_commit: str) -> None:
     assert head == miles_commit, f"Miles is at {head}, not MILES_COMMIT"
 
 
-image = (
+release_image = (
     modal.Image.from_registry(BASE_IMAGE)
     .entrypoint([])
     .env(
@@ -56,5 +56,5 @@ image = (
     )
     .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
     .run_commands(MEGATRON_RUNTIME_CHECK)
-    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+image = release_image.add_local_python_source("spindle", ignore=ignore_config_source)

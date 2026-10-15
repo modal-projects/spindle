@@ -425,6 +425,28 @@ def test_declared_compute_settings_reach_modal(builders):
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
 
 
+def test_recipes_select_trainer_and_sampler_images(builders):
+    image_for = deployment_apps.image_for
+    assert image_for("miles", "lora") is deployment_apps.miles_image
+    assert image_for("miles", "full") is deployment_apps.miles_full_image
+    assert image_for("sglang") is deployment_apps.rollout_image
+    with pytest.raises(ValueError, match="unknown image"):
+        image_for("miles", "lora", "missing")
+
+    spec = deepcopy(deployment().recipe)
+    spec.trainer_image = "miles-dsv41-lora"
+    spec.inference_image = "sglang-dsv41-lora"
+    row = DeploymentConfig.create(spec)
+    trainer_app, _ = deployment_apps.build_trainer_app(row)
+    trainer, _ = trainer_app.functions["trainer"]
+    assert trainer["image"] is deployment_apps.miles_dsv41_lora_image
+    pool_app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id)
+    )
+    server, _ = pool_app.servers["Server"]
+    assert server["image"] is deployment_apps.sglang_dsv41_lora_image
+
+
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     row = deployment("qwen38-27b-lora-256k")
     clusters = []

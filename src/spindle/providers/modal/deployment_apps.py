@@ -40,9 +40,11 @@ from .kv import shared_kv
 from .lora_pool import LoraPoolSpec
 from .lora_pool import deploy_pool as deploy_lora
 from .megatron_image import image as megatron_image
+from .miles_dsv41_lora_image import image as miles_dsv41_lora_image
 from .miles_full_image import image as miles_full_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
+from .rollout_image import dsv41_lora_image as sglang_dsv41_lora_image
 from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
@@ -53,9 +55,19 @@ TRAINER_EXECUTORS = {
 }
 
 
-def image_for(backend, parameterization="lora"):
+# Images a recipe selects by name through trainer_image or inference_image.
+TRAINER_IMAGES = {"miles-dsv41-lora": miles_dsv41_lora_image}
+INFERENCE_IMAGES = {"sglang-dsv41-lora": sglang_dsv41_lora_image}
+
+
+def image_for(backend, parameterization="lora", name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
+    if name:
+        images = INFERENCE_IMAGES if backend == "sglang" else TRAINER_IMAGES
+        if name not in images:
+            raise ValueError(f"unknown image {name!r}; choose from {sorted(images)}")
+        return images[name]
     if backend == "miles":
         return miles_full_image if parameterization == "full" else miles_image
     return {"megatron": megatron_image, "sglang": rollout_image}[backend]
@@ -131,7 +143,9 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         image=(
             image
             if image is not None
-            else image_for(recipe.backend, recipe.parameterization)
+            else image_for(
+                recipe.backend, recipe.parameterization, recipe.trainer_image
+            )
         ),
         gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
         region=platform["modal"]["region"],
@@ -237,7 +251,11 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     @app.server(
         name="Server",
         serialized=True,
-        image=image if image is not None else image_for("sglang"),
+        image=(
+            image
+            if image is not None
+            else image_for("sglang", name=recipe.inference_image)
+        ),
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,

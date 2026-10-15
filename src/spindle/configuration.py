@@ -48,6 +48,9 @@ class BaseConfig:
     trainer_max_clients_per_instance = 1
     trainer_timeout_s = 86400
     trainer_env = {}
+    # Named images in spindle.providers.modal.deployment_apps; empty selects
+    # the backend's default image.
+    trainer_image = ""
     sampler_persistence_concurrency = 8
 
     inference_gpu = "H100"
@@ -61,6 +64,7 @@ class BaseConfig:
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}
+    inference_image = ""
 
     miles_cfg = {}
     megatron_cfg = {}
