@@ -30,7 +30,7 @@ try:
     from miles.tinker import runtime as tinker_runtime
     from miles.utils import object_store
     from miles.utils.arguments import parse_args
-    from miles.utils.audit_utils.process_identity import MainProcessIdentity
+    from miles.utils.audit_utils import process_identity
     from miles.utils.external_utils.model_args_utils import load_model_args
     from miles.utils.logging_utils import configure_logger
     from miles.utils.lora import arguments as lora_arguments
@@ -38,6 +38,15 @@ except ModuleNotFoundError as exc:
     if exc.name not in {"ray", "miles"}:
         raise
     _runtime_import_error = exc
+
+try:
+    # Miles v0.1.2 runs the trainer controller as a worker reached by handle.
+    from miles.backends.megatron_utils.megatron_config import compute_trainer_args
+    from miles.ray.placement_group import create_trainer_handles
+    from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_configs
+    from miles.ray.wiring import shutdown_worker_manager
+except ImportError:
+    create_trainer_handles = None
 
 
 class MilesRuntime:
@@ -163,6 +172,60 @@ class MilesRuntime:
         self._run(self._bridge.export_slot(slot, rank, alpha, path))
         _materialize_capture(path)
 
+    def full_optim_step(self, adam_params: dict[str, float]) -> dict[str, float]:
+        return _first(
+            self._run(
+                self._trainer._execute_slots("optim_step", adam_params=adam_params)
+            )
+        )
+
+    def save_full_checkpoint(
+        self,
+        path: str,
+        *,
+        include_optimizer: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._run(
+            self._trainer._execute_slots(
+                "save_checkpoint",
+                path=path,
+                include_optimizer=include_optimizer,
+                metadata=metadata,
+            )
+        )
+
+    def load_full_checkpoint(self, path: str, *, restore_optimizer: bool) -> None:
+        self._run(
+            self._trainer._execute_slots(
+                "load_checkpoint", path=path, restore_optimizer=restore_optimizer
+            )
+        )
+
+    def capture_full_delta(self, **kwargs: Any) -> dict[str, Any]:
+        """Stage a sampler delta on the writer ranks and return the merged
+        manifest."""
+        results = self._run(
+            self._trainer._execute_slots("capture_sampler_delta", **kwargs)
+        )
+        manifests = [result for result in results if result is not None]
+        if not manifests:
+            raise BackendFailed("no trainer rank staged a sampler delta")
+        return merge_delta_manifests(manifests)
+
+    def full_delta_aligned_with(self, identity: str) -> bool:
+        return all(
+            self._run(
+                self._trainer._execute_slots("is_delta_aligned_with", identity=identity)
+            )
+        )
+
+    def forget_full_delta_parent(self) -> None:
+        self._run(self._trainer._execute_slots("forget_delta_parent"))
+
+    def reload_base_weights(self) -> None:
+        self._run(self._trainer._execute_slots("reload_base_weights"))
+
     def torch_profile_start(self) -> None:
         self._run_best_effort(self._trainer._execute_slots("torch_profile_start"))
 
@@ -224,7 +287,7 @@ class MilesRuntime:
         os.environ.setdefault("no_proxy", "127.0.0.1")
 
         install_bridge_replay(tinker_runtime)
-        _configure_actor_spec(train_specs)
+        _configure_actor_spec(train_specs, full=self.config.full)
         _allow_context_parallel_multi_lora(lora_arguments)
         architecture = (
             shlex.split(load_model_args(self.config.model_type))
@@ -248,7 +311,9 @@ class MilesRuntime:
         args.lora_A_init_method = "kaiming"
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
-        configure_logger(args, source=MainProcessIdentity())
+        if self.config.full:
+            _neutralize_lr_schedule(args, self.config.data_parallel_size)
+        configure_logger(args, source=_main_process_identity())
 
         if ray.is_initialized():
             raise RuntimeError("MilesRuntime requires exclusive ownership of Ray")
@@ -279,22 +344,32 @@ class MilesRuntime:
         self._worker_manager = launch_worker_manager(args)
         object_store.init_instance(args, contribute_segment=False)
         self._owns_object_store = True
-        self._trainer = TrainerController(
-            args=args,
-            role="actor",
-            with_ref=False,
-            with_opd_teacher=False,
-            inference_controller=None,
-            rollout_executor=None,
-        )
-        await self._trainer.init()
+        if create_trainer_handles is not None:
+            configs = compute_trainer_configs(args)
+            (actor_config,) = [c for c in configs if c.role == ACTOR_ROLE]
+            handles = create_trainer_handles(args, trainer_configs=configs)
+            self._trainer = handles[actor_config.trainer_id]
+            await self._trainer.init(compute_trainer_args(args, actor_config))
+        else:
+            self._trainer = TrainerController(
+                args=args,
+                role="actor",
+                with_ref=False,
+                with_opd_teacher=False,
+                inference_controller=None,
+                rollout_executor=None,
+            )
+            await self._trainer.init()
         self._bridge = tinker_runtime.MilesBackend(
             self._trainer, router_url="", dp_size=1
         )
 
     async def _close(self) -> None:
         try:
-            if self._trainer is not None:
+            if self._trainer is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await self._trainer.dispose()
+            elif self._trainer is not None:
                 cell_ids = list(self._trainer.cell_ids)
                 try:
                     await self._trainer.dispose()
@@ -303,7 +378,10 @@ class MilesRuntime:
                         with suppress(BaseException):
                             await self._worker_manager.stop_cells.remote(cell_ids)
         finally:
-            if self._worker_manager is not None:
+            if self._worker_manager is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await shutdown_worker_manager(self._worker_manager)
+            elif self._worker_manager is not None:
                 with suppress(BaseException):
                     ray.kill(self._worker_manager, no_restart=True)
             if self._owns_object_store:
@@ -373,26 +451,79 @@ def _check_result(result) -> None:
         raise RuntimeError(f"Miles operation failed: {result['error']}")
 
 
-def _configure_actor_spec(train_specs) -> None:
+def _first(results):
+    return results[0]
+
+
+def _main_process_identity():
+    # Miles v0.1.2 folded the per-process identity classes into one.
+    if hasattr(process_identity, "MainProcessIdentity"):
+        return process_identity.MainProcessIdentity()
+    return process_identity.SimpleProcessIdentity(component="main")
+
+
+_ACTOR_CLASSES = {
+    "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor": (
+        "spindle.backends.miles_runtime.actor.SpindleMilesTrainRayActor"
+    ),
+    "miles.backends.megatron_utils.actor.MegatronTrainRayActor": (
+        "spindle.backends.miles_runtime.full_actor.SpindleMilesFullTrainRayActor"
+    ),
+}
+
+
+def merge_delta_manifests(manifests: list[dict[str, Any]]) -> dict[str, Any]:
+    """Combine the manifests of the writer ranks, one per pipeline stage."""
+    first = manifests[0]
+    weight_map: dict[str, str] = {}
+    metrics: dict[str, float] = {}
+    for manifest in manifests:
+        for key in ("ref", "parent", "metadata"):
+            if manifest[key] != first[key]:
+                raise BackendFailed(f"staged delta manifests disagree on {key}")
+        overlap = weight_map.keys() & manifest["weight_map"].keys()
+        if overlap:
+            raise BackendFailed(
+                f"staged delta manifests overlap: {sorted(overlap)[:5]}"
+            )
+        weight_map.update(manifest["weight_map"])
+        for key, value in manifest["metrics"].items():
+            metrics[key] = (
+                max(metrics.get(key, 0.0), value)
+                if key == "capture_seconds"
+                else metrics.get(key, 0.0) + value
+            )
+    return {**first, "weight_map": weight_map, "metrics": metrics}
+
+
+def _neutralize_lr_schedule(args, data_parallel_size: int) -> None:
+    """Miles sizes its LR schedule from a rollout plan; Spindle sets optimizer
+    hyperparameters on every ``optim_step`` instead."""
+    args.num_rollout = 1
+    args.rollout_batch_size = data_parallel_size
+    args.n_samples_per_prompt = 1
+    args.global_batch_size = data_parallel_size
+    args.micro_batch_size = 1
+
+
+def _configure_actor_spec(train_specs, *, full: bool = False) -> None:
     original = train_specs._compute_spec_trainer
-    if getattr(original, "_spindle_actor_spec", False):
+    if getattr(original, "_spindle_actor_spec", None) == full:
         return
+    if getattr(original, "_spindle_actor_spec", None) is not None:
+        original = original.__wrapped__
 
     @wraps(original)
     def compute(*args, **kwargs):
         spec = original(*args, **kwargs)
-        if (
-            spec.worker_class
-            == "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
+        replacement = _ACTOR_CLASSES.get(spec.worker_class)
+        if replacement is None or (
+            not full and spec.worker_class.endswith("MegatronTrainRayActor")
         ):
-            return spec.model_copy(
-                update={
-                    "worker_class": "spindle.backends.miles_runtime.actor.SpindleMilesTrainRayActor"
-                }
-            )
-        return spec
+            return spec
+        return spec.model_copy(update={"worker_class": replacement})
 
-    compute._spindle_actor_spec = True
+    compute._spindle_actor_spec = full
     train_specs._compute_spec_trainer = compute
 
 

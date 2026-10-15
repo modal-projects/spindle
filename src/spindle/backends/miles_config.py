@@ -61,7 +61,10 @@ class MilesBackendConfig:
     model_type: str
     actor_num_gpus_per_node: int
     actor_num_nodes: int = 1
+    parameterization: str = "lora"
+    megatron_to_hf_mode: str = "bridge"
     tensor_model_parallel_size: int = 1
+    pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: int = 1
@@ -77,9 +80,14 @@ class MilesBackendConfig:
         "output_layer",
     )
     max_tokens_per_gpu: int = 8192
+    dynamic_batch_size: bool = True
     align_sequences_to_parallel_layout: bool = False
     extra_args: tuple[str, ...] = ()
     cli_options: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def full(self) -> bool:
+        return self.parameterization == "full"
 
     @property
     def world_size(self) -> int:
@@ -88,7 +96,9 @@ class MilesBackendConfig:
     @property
     def data_parallel_size(self) -> int:
         return self.world_size // (
-            self.tensor_model_parallel_size * self.context_parallel_size
+            self.tensor_model_parallel_size
+            * self.pipeline_model_parallel_size
+            * self.context_parallel_size
         )
 
     @property
@@ -108,10 +118,23 @@ class MilesBackendConfig:
         return tuple(targets)
 
     def validate(self) -> None:
+        if self.parameterization not in ("lora", "full"):
+            raise ValueError("parameterization must be lora or full")
+        if not self.full and self.pipeline_model_parallel_size != 1:
+            raise ValueError("pipeline parallelism requires full parameterization")
+        if self.full and self.context_parallel_size != 1:
+            raise ValueError(
+                "full parameterization on Miles does not support context parallelism"
+            )
+        if self.megatron_to_hf_mode not in ("bridge", "raw"):
+            raise ValueError("megatron_to_hf_mode must be bridge or raw")
+        if not self.full and self.megatron_to_hf_mode != "bridge":
+            raise ValueError("LoRA adapters are exported through the bridge")
         positive = {
             "actor_num_gpus_per_node": self.actor_num_gpus_per_node,
             "actor_num_nodes": self.actor_num_nodes,
             "tensor_model_parallel_size": self.tensor_model_parallel_size,
+            "pipeline_model_parallel_size": self.pipeline_model_parallel_size,
             "context_parallel_size": self.context_parallel_size,
             "expert_model_parallel_size": self.expert_model_parallel_size,
             "expert_tensor_parallel_size": self.expert_tensor_parallel_size,
@@ -141,14 +164,16 @@ class MilesBackendConfig:
             raise ValueError("default_lora_alpha must be a positive integer")
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("lora_dropout must be in [0, 1)")
-        if (
-            self.world_size
-            % (self.tensor_model_parallel_size * self.context_parallel_size)
-            != 0
-        ):
+        model_parallel_size = (
+            self.tensor_model_parallel_size
+            * self.pipeline_model_parallel_size
+            * self.context_parallel_size
+        )
+        if self.world_size % model_parallel_size != 0:
             raise ValueError(
                 "actor_num_nodes * actor_num_gpus_per_node must be a multiple of "
-                "tensor_model_parallel_size * context_parallel_size"
+                "tensor_model_parallel_size * pipeline_model_parallel_size * "
+                "context_parallel_size"
             )
         if (
             self.actor_num_nodes > 1
@@ -171,8 +196,10 @@ class MilesBackendConfig:
             self.hf_checkpoint,
             "--pretrained-checkpoint",
             self.hf_checkpoint,
+            "--ref-load",
+            self.hf_checkpoint,
             "--megatron-to-hf-mode",
-            "bridge",
+            self.megatron_to_hf_mode,
             "--debug-train-only",
             "--rollout-num-gpus",
             "0",
@@ -180,16 +207,7 @@ class MilesBackendConfig:
             str(self.actor_num_nodes),
             "--actor-num-gpus-per-node",
             str(self.actor_num_gpus_per_node),
-            "--multi-lora-n-adapters",
-            str(self.max_lora_slots),
-            "--lora-rank",
-            str(self.max_lora_rank),
-            "--lora-alpha",
-            str(int(self.default_lora_alpha)),
-            "--lora-dropout",
-            str(self.lora_dropout),
-            "--target-modules",
-            ",".join(self.target_modules),
+            *self._parameterization_arguments(),
             "--no-gradient-accumulation-fusion",
             "--optimizer",
             "adam",
@@ -198,16 +216,14 @@ class MilesBackendConfig:
             "--tensor-model-parallel-size",
             str(self.tensor_model_parallel_size),
             "--pipeline-model-parallel-size",
-            "1",
+            str(self.pipeline_model_parallel_size),
             "--context-parallel-size",
             str(self.context_parallel_size),
             "--expert-model-parallel-size",
             str(self.expert_model_parallel_size),
             "--expert-tensor-parallel-size",
             str(self.expert_tensor_parallel_size),
-            "--use-dynamic-batch-size",
-            "--max-tokens-per-gpu",
-            str(self.max_tokens_per_gpu),
+            *self._batching_arguments(),
             "--attention-dropout",
             "0.0",
             "--hidden-dropout",
@@ -220,6 +236,32 @@ class MilesBackendConfig:
         if self.tensor_model_parallel_size > 1:
             arguments.append("--sequence-parallel")
         return [*arguments, *self.extra_args]
+
+    def _batching_arguments(self) -> list[str]:
+        if self.dynamic_batch_size:
+            return [
+                "--use-dynamic-batch-size",
+                "--max-tokens-per-gpu",
+                str(self.max_tokens_per_gpu),
+            ]
+        # Attention layouts such as bshd take one sequence per micro-batch.
+        return ["--micro-batch-size", "1"]
+
+    def _parameterization_arguments(self) -> list[str]:
+        if self.full:
+            return []
+        return [
+            "--multi-lora-n-adapters",
+            str(self.max_lora_slots),
+            "--lora-rank",
+            str(self.max_lora_rank),
+            "--lora-alpha",
+            str(int(self.default_lora_alpha)),
+            "--lora-dropout",
+            str(self.lora_dropout),
+            "--target-modules",
+            ",".join(self.target_modules),
+        ]
 
 
 def parse_backend_config(

@@ -27,6 +27,11 @@ def bulletin_board(bulletin_root: str, bulletin_volume: str) -> FFTSnapshotBulle
     )
 
 
+def reload_bulletin_volume(bulletin_volume: str) -> None:
+    """See the shards other nodes committed to the bulletin volume."""
+    modal.Volume.from_name(bulletin_volume, version=2).reload()
+
+
 _INDEX = "model.safetensors.index.json"
 
 

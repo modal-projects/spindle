@@ -126,11 +126,22 @@ def _node_identity() -> str:
 
 def sync_checkpoint_volume(action: str) -> None:
     """Commit or reload the checkpoint volume once per node."""
-    name = os.environ.get("SPINDLE_CHECKPOINT_VOLUME")
+    sync_volume("SPINDLE_CHECKPOINT_VOLUME", action)
+
+
+def sync_bulletin_volume(action: str) -> None:
+    """Commit or reload the sampler bulletin volume once per node."""
+    sync_volume("SPINDLE_BULLETIN_VOLUME", action)
+
+
+def sync_volume(variable: str, action: str) -> None:
+    """Commit or reload the volume named by ``variable`` once per node; every
+    rank takes part because the nodes are found with collectives."""
+    name = os.environ.get(variable)
     if name is None:
         if "MODAL_TASK_ID" in os.environ:
             print(
-                "spindle_checkpoint_volume action=skipped reason=unset",
+                f"spindle_checkpoint_volume action=skipped reason=unset variable={variable}",
                 flush=True,
             )
         return
