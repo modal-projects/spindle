@@ -312,6 +312,8 @@ class MilesRuntime:
         args.lora_A_init_method = "kaiming"
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
+        if self.config.full:
+            _neutralize_lr_schedule(args, self.config.data_parallel_size)
         configure_logger(args, source=_main_process_identity())
 
         if ray.is_initialized():
@@ -469,6 +471,16 @@ _ACTOR_CLASSES = {
         "spindle.backends.miles_runtime.full_actor.SpindleMilesFullTrainRayActor"
     ),
 }
+
+
+def _neutralize_lr_schedule(args, data_parallel_size: int) -> None:
+    """Miles sizes its LR schedule from a rollout plan; Spindle sets optimizer
+    hyperparameters on every ``optim_step`` instead."""
+    args.num_rollout = 1
+    args.rollout_batch_size = data_parallel_size
+    args.n_samples_per_prompt = 1
+    args.global_batch_size = data_parallel_size
+    args.micro_batch_size = 1
 
 
 def _configure_actor_spec(train_specs, *, full: bool = False) -> None:

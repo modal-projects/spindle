@@ -23,6 +23,9 @@ BASE_IMAGE = (
 )
 MILES_COMMIT = "a22fd824191c64ba7c5d6c531f125406e4ce9cc6"
 MILES_PATH = "/root/miles"
+# Megatron-LM is only partially installed as a package; full-parameter model
+# construction imports modules that resolve from the source tree.
+MEGATRON_PATH = "/root/Megatron-LM"
 
 
 def _check_release(miles_commit: str) -> None:
@@ -38,6 +41,7 @@ image = (
     .env(
         {
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH",
+            "PYTHONPATH": f"{MEGATRON_PATH}:$PYTHONPATH",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
             "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }

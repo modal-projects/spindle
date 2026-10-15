@@ -15,9 +15,9 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from megatron.core import dist_checkpointing
+from megatron.core import dist_checkpointing, parallel_state
 from megatron.core.distributed import finalize_model_grads
-from megatron.core.utils import get_model_config
+from megatron.core.utils import get_model_config, unwrap_model
 from miles.backends.megatron_utils.actor import MegatronTrainRayActor
 from miles.backends.megatron_utils.checkpoint import _load_checkpoint_hf
 from miles.backends.megatron_utils.model import (
@@ -53,6 +53,19 @@ _MODEL_KEY = "model"
 _OPTIMIZER_KEY = "optimizer"
 
 
+def _sharded_state_dict_metadata() -> dict[str, Any]:
+    """Optimizer state is saved per data-parallel shard without gathering, so a
+    checkpoint restores onto the same parallel layout it was written from."""
+    return {
+        "distrib_optim_sharding_type": "dp_reshardable",
+        "singleton_local_shards": False,
+        "chained_optim_avoid_prefix": True,
+        "dp_cp_group": parallel_state.get_data_parallel_group(
+            with_context_parallel=True
+        ),
+    }
+
+
 class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
     def _init_training_state(self) -> None:
         self._init_weight_updater_and_publisher(
@@ -60,6 +73,8 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         )
         (chunk,) = self.model
         self._chunk = chunk
+        # Checkpoints are keyed on the bare model, as in Megatron's own save path.
+        (self._bare_model,) = unwrap_model(self.model)
         self._delta_writer: FFTDeltaWriter | None = None
         self._hf_weights = get_hf_weight_iterator(
             self.args,
@@ -93,6 +108,9 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
                 self.args, rollout_data_ref
             )
             stack.enter_context(store_get_result)
+            # The Tinker bridge tags rows with LoRA slots; the full model has none.
+            rollout_data.pop("adapter_slots", None)
+            rollout_data.pop("n_adapters", None)
             data_iterator, num_microbatches = get_data_iterator(
                 self.args, self.model, rollout_data
             )
@@ -163,13 +181,10 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         self._heartbeat.bump()
 
         def write(checkpoint_dir: Path) -> None:
-            model_state = self._chunk.sharded_state_dict()
-            sharded = {_MODEL_KEY: model_state}
-            if include_optimizer:
-                sharded[_OPTIMIZER_KEY] = self.optimizer.sharded_state_dict(
-                    model_state, is_loading=False
-                )
-            dist_checkpointing.save(sharded, str(checkpoint_dir))
+            dist_checkpointing.save(
+                self._sharded_state_dict(include_optimizer, is_loading=False),
+                str(checkpoint_dir),
+            )
 
         checkpoint_io.write_checkpoint_dir(path, write, metadata=metadata)
         sync_checkpoint_volume("commit")
@@ -177,14 +192,10 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
     def load_checkpoint(self, path: str, restore_optimizer: bool) -> None:
         self._heartbeat.bump()
         sync_checkpoint_volume("reload")
-        model_state = self._chunk.sharded_state_dict()
-        shells = {_MODEL_KEY: model_state}
-        if restore_optimizer:
-            shells[_OPTIMIZER_KEY] = self.optimizer.sharded_state_dict(
-                model_state, is_loading=True
-            )
-        loaded = dist_checkpointing.load(shells, path)
-        self._chunk.load_state_dict(loaded[_MODEL_KEY], strict=True)
+        loaded = dist_checkpointing.load(
+            self._sharded_state_dict(restore_optimizer, is_loading=True), path
+        )
+        self._bare_model.load_state_dict(loaded[_MODEL_KEY], strict=True)
         if restore_optimizer:
             self.optimizer.load_state_dict(loaded[_OPTIMIZER_KEY])
         else:
@@ -192,6 +203,18 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             reset_optimizer_states(self.optimizer)
         self._zero_grads()
         self._delta_writer = None
+
+    def _sharded_state_dict(
+        self, with_optimizer: bool, *, is_loading: bool
+    ) -> dict[str, Any]:
+        metadata = _sharded_state_dict_metadata()
+        model_state = self._bare_model.sharded_state_dict(metadata=metadata)
+        sharded = {_MODEL_KEY: model_state}
+        if with_optimizer:
+            sharded[_OPTIMIZER_KEY] = self.optimizer.sharded_state_dict(
+                model_state, is_loading=is_loading, metadata=metadata
+            )
+        return sharded
 
     def reload_base_weights(self) -> None:
         """Return to the deployment's base checkpoint with fresh optimizer state."""
@@ -225,6 +248,7 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             (name, tensor)
             for bucket in self._hf_weights.iter_hf_weights(weights)
             for name, tensor in bucket
+            if not name.startswith("mtp.")
         )
         snapshot = self._delta_writer.capture(
             weights=exported,
