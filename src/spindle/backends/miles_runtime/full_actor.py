@@ -184,6 +184,9 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
                 self._sharded_state_dict(include_optimizer, is_loading=False),
                 str(checkpoint_dir),
             )
+            if include_optimizer:
+                for store in self._streamed_optimizer_stores():
+                    store.save_to(str(checkpoint_dir))
 
         checkpoint_io.write_checkpoint_dir(path, write, metadata=metadata)
         sync_checkpoint_volume("commit")
@@ -197,11 +200,38 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         self._bare_model.load_state_dict(loaded[_MODEL_KEY], strict=True)
         if restore_optimizer:
             self.optimizer.load_state_dict(loaded[_OPTIMIZER_KEY])
+            for store in self._streamed_optimizer_stores():
+                if not store.load_from(path):
+                    raise RuntimeError(
+                        f"checkpoint {path} carries no streamed optimizer state"
+                    )
         else:
             self.optimizer.reload_model_params()
-            reset_optimizer_states(self.optimizer)
+            self._reset_optimizer_state()
         self._zero_grads()
         self._delta_writer = None
+
+    def _streamed_optimizer_stores(self) -> list:
+        """Miles keeps the master weights and Adam moments of a disk-streamed
+        optimizer in per-rank stores that the optimizer's state dict omits."""
+        optimizers = getattr(self.optimizer, "chained_optimizers", None) or [
+            self.optimizer
+        ]
+        stores = (getattr(opt, "_nvme_state_store", None) for opt in optimizers)
+        return [store for store in stores if store is not None]
+
+    def _reset_optimizer_state(self) -> None:
+        reset_optimizer_states(self.optimizer)
+        for store in self._streamed_optimizer_stores():
+            adams = [bucket.adam for bucket in store.buckets]
+            if store._fp32_adam is not None:
+                adams.append(store._fp32_adam)
+            for adam in adams:
+                adam.state.clear()
+                for group in adam.param_groups:
+                    group.pop("step", None)
+            for bucket in store.buckets:
+                bucket.moments_ready = False
 
     def _sharded_state_dict(
         self, with_optimizer: bool, *, is_loading: bool
@@ -221,7 +251,7 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
         _load_checkpoint_hf(
             self.model, self.optimizer, self.args, self.args.hf_checkpoint
         )
-        reset_optimizer_states(self.optimizer)
+        self._reset_optimizer_state()
         self._zero_grads()
         self._delta_writer = None
 

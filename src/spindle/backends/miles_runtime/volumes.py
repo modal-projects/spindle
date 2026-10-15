@@ -67,7 +67,10 @@ def _write_checkpoint_dir_on_volume(
         if remote:
             volume.copy_files(remote, relative, recursive=True)
         for name, shard in local.items():
-            shutil.copy2(shard, path / name)
+            if shard.is_dir():
+                shutil.copytree(shard, path / name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(shard, path / name)
         print(
             f"spindle_checkpoint_publish path={relative} "
             f"local={len(local)} remote={len(remote)}",
