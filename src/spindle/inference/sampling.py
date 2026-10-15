@@ -36,7 +36,12 @@ GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 
 def keepalive_transport(*, http2: bool = False) -> httpx.AsyncHTTPTransport:
     return httpx.AsyncHTTPTransport(
-        http2=http2, socket_options=list(TCP_KEEPALIVE_OPTIONS)
+        http2=http2,
+        socket_options=list(TCP_KEEPALIVE_OPTIONS),
+        # The replica admission gate bounds execution. A hidden 100-connection
+        # client queue can hold a large sampling group's tail until its first
+        # generations finish, invalidating reservations made before dispatch.
+        limits=httpx.Limits(max_connections=None),
     )
 
 

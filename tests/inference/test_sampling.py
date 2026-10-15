@@ -64,6 +64,55 @@ def test_exact_sampling_pins_version() -> None:
     assert result["sequences"][0]["tokens"] == [5]
 
 
+def test_large_http1_group_dispatches_before_any_generation_finishes():
+    async def run():
+        arrived, release = asyncio.Event(), asyncio.Event()
+        count = 0
+        body = response(7).content
+
+        async def engine(reader, writer):
+            nonlocal count
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":", 1)[1])
+                for line in headers.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            await reader.readexactly(length)
+            count += 1
+            if count == 128:
+                arrived.set()
+            await release.wait()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode()
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(engine, "127.0.0.1", 0, backlog=256)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            request = task()
+            request["payload"]["num_samples"] = 128
+            samples = asyncio.create_task(
+                sample_task(request, f"http://127.0.0.1:{port}", timeout=10)
+            )
+            try:
+                # The old transport admits only 100 requests and deadlocks on
+                # this barrier until the test releases their responses.
+                await asyncio.wait_for(arrived.wait(), 5)
+            finally:
+                release.set()
+                result = await asyncio.wait_for(samples, 10)
+            assert len(result["sequences"]) == count == 128
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("first", [None, [None, 1], {"logprob": None, "token_id": 1}])
 def test_prompt_logprobs_preserve_undefined_first_token(first) -> None:
     request = task()

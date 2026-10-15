@@ -256,8 +256,9 @@ All three replays use four TP2 H100 replicas, the same 27B model and rank-32
 adapters, eight separate CPU frontends, HTTP/1.1, and seed 15101. Clients start
 0.5 seconds apart and advance independently. Each policy receives identical
 initial CPU registrations and prefix warmup. Generation uses `ignore_eos=True`;
-output lengths and request counts are checked, as are exact adapter versions,
-finite logprobs, and one engine admission per completed request. Recorded update
+output lengths and request counts are checked, as are exact adapter versions
+and finite logprobs. Native admission counts detect extra generation caused by
+transport retries. Recorded update
 delays are replayed alongside the next prefetched rollout; they are not new
 optimizer work and do not impose a cross-client barrier.
 The long-prefix and multi-turn GPUs are in `us-east`; the short-decode-study
@@ -265,7 +266,7 @@ GPUs are in `us-west`, while its frontends remain in `us-east`. Every policy
 within that comparison uses the same cross-region path. Absolute latency across
 these differently placed pools is not a controlled comparison.
 
-| Trace | Clients / active versions | Concurrent requests, maximum | Requests / output tokens | Prompt / decode lengths | Arrival structure |
+| Trace | Clients / active versions | Logical concurrent requests, maximum | Requests / output tokens | Prompt / decode lengths | Arrival structure |
 |---|---:|---:|---:|---|---|
 | Long-prefix bursts | 16 / 16, with 32 versions over the run | 1,088 | 3,264 / 3,342,336 | 8,192 / 1,024 | Three rounds; hot client 128 samples, seven clients one 64-sample group, eight clients eight groups of eight |
 | Multi-turn continuation | 16 / 16, with 32 versions over the run | 256 | 2,304 / 2,359,296 | 8,192 then 9,472 then 10,752 / 1,024 each turn | Three rounds, two groups of eight per client, three turns per trajectory |
@@ -321,6 +322,50 @@ observation: intervening requests can populate or evict prefixes. They do not
 measure counterfactual reuse on unselected replicas and do not establish that
 the selected destination was optimal. The observed cache metadata is useful,
 but accurate matches on many requests do not rescue the current placement rule.
+
+The first revised-policy multi-turn trial has one such transport incident.
+An accepted attempt appears in native observations from 466.03 to 496.27 seconds
+of the trace, but its HTTP/1 response-header wait fails only after 360.06 seconds.
+The retry succeeds on another replica, causing 2,305 admissions for 2,304 useful
+responses. Useful generation makespan is 842.65 seconds (2,799.85 tokens/s);
+mean/p95 request latency is 44.39/81.72 seconds. This is a retained operational
+result, not a clean fixed-native-work comparison. The last other response arrives
+at 569.42 seconds; removing the failed request is not used to manufacture a
+replacement throughput result. A single repeat with a fresh driver and identical
+settings is scheduled. The underlying transport failure is not attributed to a
+specific proxy component, and production connection settings are unchanged.
+
+### HTTP/1 connection admission
+
+The initial short-prompt comparison exposed a separate client-side bottleneck.
+HTTPX's default transport limit permits 100 concurrent connections per sampling
+call. For the hot client's first 128-sample batch in the merge-enabled arm, the
+first 100 attempts reach their first HTTP event within 0.173 seconds and all
+complete in merged mode. The other 28 wait 63.81–64.03 seconds before their first
+TCP-connect event. Their routing reservations were made before that wait, so
+their placement observations were already obsolete when dispatched.
+
+Those 100 merged requests complete in 67.40 seconds on average, with a maximum
+of 68.83 seconds. The other 28 average 222.48 seconds and the final response takes
+402.50 seconds. Mean latency for the 128-request batch improves from 126.19
+seconds without merging to 101.33 with it, while its last response worsens from
+326.78 to 402.50 seconds. The group-return API makes that tail visible to the RL
+client. This is a demonstrated transport admission effect; it must not be
+attributed entirely to the replica scheduling objective.
+
+The final HTTP/1 sampling transport removes that hidden connection limit while
+retaining TCP keepalive and the bounded replica scheduler. A real local HTTP
+regression test holds every response until all 128 requests arrive: the old
+100-connection limit times out, and the revised transport passes. A caller that
+supplies its own client or transport still owns its connection settings. This
+change does not remove HTTP/2's independently negotiated stream limit.
+
+The four-policy short-prompt workload is being repeated with the fix applied
+equally to every arm and the policy order reversed. Its model, adapters, forced
+output lengths, client loops and GPU topology are unchanged. The original
+results remain visible as measurements of the previous transport. The scheduled
+multi-turn recovery also uses the corrected helper, but its sampling calls have
+one or eight samples, below the old limit; that limit never binds there.
 
 ### Numerical validation
 
