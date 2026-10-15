@@ -68,6 +68,8 @@ class Config(BaseConfig):
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
         "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
+        # A BF16 checkpoint must not be routed to the FP4 expert kernels.
+        "SGLANG_DSV4_FP4_EXPERTS": "0",
     }
     sglang_cfg = {
         "tp_size": 8,
