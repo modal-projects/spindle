@@ -14,6 +14,7 @@ from tinker import types
 from spindle.client import create_full_training_client
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.engine import OperationKind
+from spindle.engine.operations import parse_model_spec
 from spindle.providers import SamplingTask
 from spindle.providers.local import (
     InMemoryKeyValueStore,
@@ -347,6 +348,11 @@ def volume_plane(tmp_path, monkeypatch) -> tuple[ControlPlane, object, list[str]
     loaded: list[str] = []
 
     class VolumeExecutor(TinkerStubExecutor):
+        user_metadata: dict[str, dict[str, str] | None] = {}
+
+        async def accept_model(self, model_id, spec):
+            self.user_metadata[model_id] = parse_model_spec(spec).user_metadata
+
         async def execute(self, model_id, kind, payload):
             if kind == OperationKind.LOAD_WEIGHTS:
                 loaded.append(payload.uri)
@@ -356,7 +362,8 @@ def volume_plane(tmp_path, monkeypatch) -> tuple[ControlPlane, object, list[str]
             target = root / payload.destination / model_id
             target.mkdir(parents=True)
             (target / "checkpoint_rank0.pt").write_bytes(b"\0" * 64)
-            (target / "metadata.json").write_text(json.dumps(LORA_METADATA))
+            metadata = {**LORA_METADATA, "user_metadata": self.user_metadata[model_id]}
+            (target / "metadata.json").write_text(json.dumps(metadata))
             stamp = next(clock)
             os.utime(target, (stamp, stamp))
             return {"path": str(target), "type": "save_weights"}
@@ -380,7 +387,11 @@ def test_real_sdk_lists_and_deletes_checkpoints(tmp_path, monkeypatch) -> None:
     with serve(app) as url:
         service = tinker.ServiceClient(base_url=url, api_key=API_KEY)
         rest = service.create_rest_client()
-        training = service.create_lora_training_client(base_model=BASE_MODEL, rank=32)
+        training = service.create_lora_training_client(
+            base_model=BASE_MODEL,
+            rank=32,
+            user_metadata={"renderer_name": "qwen3"},
+        )
         training.save_state("first").result(timeout=30)
         saved = training.save_state("second").result(timeout=30)
         first = root / "first" / training.model_id
@@ -402,6 +413,12 @@ def test_real_sdk_lists_and_deletes_checkpoints(tmp_path, monkeypatch) -> None:
         assert (run.base_model, run.is_lora, run.lora_rank) == (BASE_MODEL, True, 32)
         assert run.last_checkpoint is not None
         assert run.last_checkpoint.tinker_path == newest.tinker_path
+        assert run.user_metadata == {"renderer_name": "qwen3"}
+        sampler_run = rest.get_training_run_by_tinker_path(
+            f"tinker://{training.model_id}:train:0/sampler_weights/second"
+        ).result(timeout=30)
+        assert sampler_run.training_run_id == training.model_id
+        assert sampler_run.user_metadata == {"renderer_name": "qwen3"}
         runs = rest.list_training_runs().result(timeout=30)
         assert [r.training_run_id for r in runs.training_runs] == [training.model_id]
         assert runs.cursor.total_count == 1

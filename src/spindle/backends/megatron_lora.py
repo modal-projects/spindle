@@ -63,6 +63,7 @@ class LoraJobState:
     train_attn: bool = True
     train_mlp: bool = True
     train_unembed: bool = True
+    user_metadata: dict[str, str] | None = None
     accumulating: bool = False
     optimizer_step: int = 0
     load_optimizer: bool = False
@@ -138,6 +139,7 @@ class LoraMegatronBackend(Backend):
                 train_mlp=bool(lora.train_mlp),
                 train_unembed=bool(lora.train_unembed),
             )
+        self.jobs[model_id].user_metadata = spec.user_metadata
         if model_id not in self.job_to_slot:
             self._load_job_to_slot(model_id)
 
@@ -188,6 +190,7 @@ class LoraMegatronBackend(Backend):
                     "train_mlp": state.train_mlp,
                     "train_unembed": state.train_unembed,
                 },
+                "user_metadata": state.user_metadata,
             },
         }
 

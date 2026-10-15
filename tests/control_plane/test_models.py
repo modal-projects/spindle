@@ -108,6 +108,7 @@ CHECKPOINTS = [
             "base_model": "Qwen/Qwen3-4B",
             "parameterization": {"type": "lora"},
             "lora_config": {"rank": 32},
+            "user_metadata": {"renderer_name": "qwen3"},
         },
     },
     {
@@ -160,9 +161,12 @@ def test_checkpoint_listing_derives_sdk_records() -> None:
         assert run_a["is_lora"] is True
         assert run_a["lora_rank"] == 32
         assert run_a["last_checkpoint"]["tinker_path"] == "tinker://run-a/weights/newer"
+        assert run_a["user_metadata"] == {"renderer_name": "qwen3"}
+        assert await plane.training_run("run-a:train:0") == run_a
         runs = await plane.training_runs()
         assert [run["training_run_id"] for run in runs] == ["run-a", "run-b"]
         assert runs[1]["is_lora"] is False
+        assert runs[1]["user_metadata"] is None
         with pytest.raises(RecordNotFound):
             await plane.training_run("run-c")
         with pytest.raises(RecordNotFound):

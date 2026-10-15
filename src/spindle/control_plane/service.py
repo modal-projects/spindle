@@ -318,6 +318,8 @@ class ControlPlane:
 
     async def training_run(self, training_run_id: str) -> dict[str, object]:
         entries = await self.checkpoints(training_run_id)
+        if not entries and training_run_id.endswith(":train:0"):
+            entries = await self.checkpoints(training_run_id.removesuffix(":train:0"))
         if not entries:
             raise RecordNotFound("training run", training_run_id)
         return self._training_run(entries)
@@ -342,6 +344,7 @@ class ControlPlane:
             "lora_rank": lora_config.get("rank"),
             "last_request_time": latest["time"],
             "last_checkpoint": latest,
+            "user_metadata": metadata.get("user_metadata"),
         }
 
     async def remove_checkpoint(self, training_run_id: str, checkpoint_id: str) -> None:
