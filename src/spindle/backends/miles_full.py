@@ -25,6 +25,7 @@ from .fft_publication import (
     bulletin_board,
     discard_staged,
     publish_staged,
+    reload_bulletin_volume,
     write_staged_index,
 )
 from .miles_config import MilesBackendConfig, parse_backend_config
@@ -264,6 +265,7 @@ class MilesFullBackend(Backend):
             os.environ["SPINDLE_BULLETIN_ROOT"], os.environ["SPINDLE_BULLETIN_VOLUME"]
         )
         try:
+            reload_bulletin_volume(os.environ["SPINDLE_BULLETIN_VOLUME"])
             write_staged_index(
                 board,
                 ref=ref,

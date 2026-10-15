@@ -241,6 +241,8 @@ def test_sampler_publication_is_contiguous_and_staged_by_trainer(
     published = []
     monkeypatch.setattr(miles_full, "FFTSnapshotBulletin", lambda root: board)
     monkeypatch.setattr(miles_full, "bulletin_board", lambda root, volume: board)
+    reloaded = []
+    monkeypatch.setattr(miles_full, "reload_bulletin_volume", reloaded.append)
     monkeypatch.setattr(
         miles_full,
         "publish_staged",
@@ -254,6 +256,7 @@ def test_sampler_publication_is_contiguous_and_staged_by_trainer(
     assert runtime.calls[-1] == ("capture", 1)
     backend.publish_sampler_snapshot("capture-1")
     assert published == [(VersionRef("run-a", 1), {"optimizer_step": 0})]
+    assert reloaded == ["bulletin"]
 
     board.advance(VersionRef("run-a", 1))
     monkeypatch.setattr(board, "metadata", lambda ref: {"optimizer_step": 0})
@@ -276,6 +279,7 @@ def test_failed_publication_discards_staged_delta(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("SPINDLE_BULLETIN_VOLUME", "bulletin")
     discarded = []
     monkeypatch.setattr(miles_full, "bulletin_board", lambda root, volume: "board")
+    monkeypatch.setattr(miles_full, "reload_bulletin_volume", lambda volume: None)
     monkeypatch.setattr(miles_full, "write_staged_index", lambda board, **kwargs: None)
 
     def fail(board, **kwargs):

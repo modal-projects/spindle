@@ -205,9 +205,10 @@ def test_config_static_micro_batches_replace_dynamic_batching() -> None:
 def test_config_points_reference_load_at_the_hf_checkpoint() -> None:
     arguments = _config().miles_arguments()
 
-    assert arguments[arguments.index("--ref-load") + 1] == arguments[
-        arguments.index("--hf-checkpoint") + 1
-    ]
+    assert (
+        arguments[arguments.index("--ref-load") + 1]
+        == arguments[arguments.index("--hf-checkpoint") + 1]
+    )
 
 
 def test_config_context_parallel_topology() -> None:

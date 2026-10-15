@@ -45,7 +45,11 @@ from spindle.backends.megatron_runtime.fft.delta import FFTDeltaWriter
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 from .bounded_copy import copy_file_bounded
-from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volume
+from .volumes import (
+    install_cross_node_checkpoint_publish,
+    sync_bulletin_volume,
+    sync_checkpoint_volume,
+)
 
 install_cross_node_checkpoint_publish(checkpoint_io, snapshot_publisher, hf_export)
 
@@ -310,10 +314,14 @@ class SpindleMilesFullTrainRayActor(MegatronTrainRayActor):
             bulletin_root=bulletin_root,
             definition_revision=definition_revision,
         )
+        if self._writes_deltas():
+            board = FFTSnapshotBulletin(bulletin_root)
+            self._delta_writer.stage_shards(snapshot, board)
+        # Each node sees only its own writes until committed; the driver
+        # reloads the volume before it promotes the version.
+        sync_bulletin_volume("commit")
         if not self._writes_deltas():
             return None
-        board = FFTSnapshotBulletin(bulletin_root)
-        self._delta_writer.stage_shards(snapshot, board)
         return {
             "ref": snapshot.ref.identity,
             "parent": snapshot.parent.identity,
