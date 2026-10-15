@@ -77,6 +77,7 @@ class Config(BaseConfig):
         "mem_fraction_static": 0.7,
         "model_loader_extra_config": {"enable_multithread_load": False},
         "weight_loader_drop_cache_after_load": True,
+        "weight_loader_disable_mmap": False,
         "max_running_requests": 32,
         "max_queued_requests": 8,
         "weight_update_staging": "disk",
