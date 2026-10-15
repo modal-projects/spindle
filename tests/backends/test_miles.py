@@ -193,6 +193,15 @@ def test_config_translates_stable_fields_to_miles_arguments() -> None:
     assert capture_dir == Path("/tmp/spindle-miles-captures")
 
 
+def test_config_static_micro_batches_replace_dynamic_batching() -> None:
+    arguments = _config(dynamic_batch_size=False).miles_arguments()
+
+    assert "--use-dynamic-batch-size" not in arguments
+    assert "--max-tokens-per-gpu" not in arguments
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert "--use-dynamic-batch-size" in _config().miles_arguments()
+
+
 def test_config_context_parallel_topology() -> None:
     config = _config(
         actor_num_gpus_per_node=8,

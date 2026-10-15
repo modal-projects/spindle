@@ -80,6 +80,7 @@ class MilesBackendConfig:
         "output_layer",
     )
     max_tokens_per_gpu: int = 8192
+    dynamic_batch_size: bool = True
     align_sequences_to_parallel_layout: bool = False
     extra_args: tuple[str, ...] = ()
     cli_options: dict[str, Any] = field(default_factory=dict)
@@ -220,9 +221,7 @@ class MilesBackendConfig:
             str(self.expert_model_parallel_size),
             "--expert-tensor-parallel-size",
             str(self.expert_tensor_parallel_size),
-            "--use-dynamic-batch-size",
-            "--max-tokens-per-gpu",
-            str(self.max_tokens_per_gpu),
+            *self._batching_arguments(),
             "--attention-dropout",
             "0.0",
             "--hidden-dropout",
@@ -235,6 +234,16 @@ class MilesBackendConfig:
         if self.tensor_model_parallel_size > 1:
             arguments.append("--sequence-parallel")
         return [*arguments, *self.extra_args]
+
+    def _batching_arguments(self) -> list[str]:
+        if self.dynamic_batch_size:
+            return [
+                "--use-dynamic-batch-size",
+                "--max-tokens-per-gpu",
+                str(self.max_tokens_per_gpu),
+            ]
+        # Attention layouts such as bshd take one sequence per micro-batch.
+        return ["--micro-batch-size", "1"]
 
     def _parameterization_arguments(self) -> list[str]:
         if self.full:
