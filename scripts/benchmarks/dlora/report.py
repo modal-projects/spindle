@@ -31,6 +31,14 @@ def counters(states):
 
 def metrics(data):
     result = summarize(data)
+    generation_end = max(r["end"] for r in data["requests"])
+    result.update(
+        generation_makespan_seconds=generation_end,
+        generation_tokens_per_second=result["output_tokens"] / generation_end,
+        # Independent CPU frontends return detailed benchmark traces after
+        # serving. Keep that collection tail visible, outside generation time.
+        collector_tail_seconds=data["seconds"] - generation_end,
+    )
     before, after = counters(data["baseline"]), counters(data["final"])
     delta = {k: after.get(k, 0) - before.get(k, 0) for k in after}
     steps = sum(
@@ -79,18 +87,15 @@ def metrics(data):
 
 def render(root, arms):
     paths = [root / (arm + ".json") for arm in arms]
-    data = {p.stem: json.loads(p.read_text()) for p in paths}
-    assert len({d["workload_sha256"] for d in data.values()}) == 1
-    summary = {arm: metrics(d) for arm, d in data.items()}
-    (root / "dlora-summary.json").write_text(json.dumps(summary, indent=2))
-    with (root / "dlora-summary.csv").open("w") as stream:
-        writer = csv.DictWriter(
-            stream, fieldnames=["policy", *next(iter(summary.values()))]
-        )
-        writer.writeheader()
-        writer.writerows({"policy": k, **v} for k, v in summary.items())
+    summary, workload_hashes = {}, set()
     fig, axes = plt.subplots(3, 2, figsize=(12, 10), layout="constrained")
-    for arm, d in data.items():
+    # Retry traces can exceed 800 MiB per arm. Retain only one arm's raw
+    # evidence at a time; plotting and comparison need small aggregate arrays.
+    for path in paths:
+        arm = path.stem
+        d = json.loads(path.read_text())
+        workload_hashes.add(d["workload_sha256"])
+        summary[arm] = metrics(d)
         kwargs = dict(label=LABELS[arm], color=COLORS[arm], linestyle=STYLES[arm])
         bins = np.arange(0, d["seconds"] + 20, 20)
         rows = d["requests"]
@@ -145,6 +150,15 @@ def render(root, arms):
             (axes[2, 1], loads),
         ]:
             ax.plot(xs, values, **kwargs)
+        del d, rows, snapshots, window
+    assert len(workload_hashes) == 1
+    (root / "dlora-summary.json").write_text(json.dumps(summary, indent=2))
+    with (root / "dlora-summary.csv").open("w") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=["policy", *next(iter(summary.values()))]
+        )
+        writer.writeheader()
+        writer.writerows({"policy": k, **v} for k, v in summary.items())
     labels = [
         "KV token hit ratio",
         "Mean request completion time (s)",

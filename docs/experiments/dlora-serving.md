@@ -1,9 +1,10 @@
 # Decentralized merge-aware LoRA serving
 
-Status: experimental, opt-in implementation. The initial pool and live RL
-comparisons are complete; the revised admission policy is under test.
-Trained-adapter BF16 numerical agreement has not passed the merge PR's test
-tolerance. Do not interpret kernel speedups as validated RL improvements.
+Status: experimental, opt-in implementation. The initial pool, revised admission,
+and live RL comparisons are complete; additional burst workloads are under test.
+Trained-adapter BF16 agreement passes the merge PR's tolerance on twelve generated
+trajectories but fails on the original prompt tokens. These are different tests;
+neither establishes numerical agreement for arbitrary requests or batches.
 
 ## Scope and dependencies
 
@@ -129,6 +130,13 @@ and this router with merging enabled. Count retries and transition time in the
 measured interval. Do not compare this engine directly against old-engine runs
 as if only routing changed.
 
+The KV control uses Flash's session-affinity header and the existing sample
+retry path. A capacity rejection changes the physical retry affinity while
+retaining the logical conversation identity. It is therefore an affinity policy
+with overflow, not a baseline that waits forever on one replica. The custom
+router uses exact-upstream headers after stripping conflicting Flash affinity
+headers; native request payloads still retain their logical cache identity.
+
 Retain the existing 64-version long-prefix serving trace, independently staggered
 RL-shaped bursts with version turnover, and multi-turn continuation workloads.
 Live RL uses independent client rollout/train/publication loops and common
@@ -144,7 +152,8 @@ Resource monitors stop only task-owned apps and preserve allocation evidence.
 ## Results
 
 The revised inference/provider/deployment regression suite passed 408 tests with
-one skipped. Real-engine checks on both one H200
+one skipped. Full CI passed 916 tests with one skip on Tinker 0.24.1 and 911
+with six skips on 0.25.0. Real-engine checks on both one H200
 (TP1) and two H100s (TP2) passed exact greedy-output and input-logprob restoration,
 automatic specialization for 36 requests, and restoration before another adapter.
 
@@ -187,6 +196,77 @@ this observed batch constraint. GPU copy measurements alone do not explain the
 result: the KV arm accumulated about 75 host-seconds of loading across four
 replicas during 644 wall-seconds, and that counter is not critical-path time.
 
+### Revised adapter-slot admission
+
+A new four-replica pool repeats the same serving configuration with the
+adapter-slot gate and slot-release estimate enabled only for the new policy.
+All three arms disable merging during measurement. Per-replica source hashes and
+the pinned engine revision were verified. The controls retain the same overall
+36+4 admission bound; only the new policy reserves native adapter slots.
+
+| Policy | Wall seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Mean decode batch |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 643.56 | 1,629.34 | 120.17 / 310.02 | 14.97% | 36.52% | 1,295 / 1,291 | 11.45 |
+| Model placement with overflow | 391.16 | 2,680.67 | 73.37 / 175.23 | 49.46% | 60.79% | 657 / 653 | 20.41 |
+| Revised adapter-slot policy | 418.55 | 2,505.26 | 72.09 / 266.77 | 49.49% | 77.29% | 424 / 420 | 18.43 |
+
+The revised policy improves throughput by 53.76% over KV, reduces mean latency
+by 40.01%, and reduces adapter loads by 67.26%. However, it remains 6.54% slower
+than model placement with overflow, with 52.24% higher p95 latency. Its 35.46%
+fewer loads than overflow do not compensate for smaller native batches and the
+long tail. Cache/load counters are explanatory measurements, not optimization
+objectives on their own. Rejections are 74,190 / 34,831 / 30,554 respectively;
+all 2,048 requests execute exactly once in each arm, with no transport errors.
+
+The measured new-policy routing selection p50/p95 is 157.6/220.2 microseconds,
+including the larger active reservation sets in this trace. Selection itself
+does not make RPCs. A separate in-process snapshot benchmark measured approximately
+49 microseconds median at four replicas, 80 at eight and 1,000 at 128; those CPU
+measurements exclude discovery and do not establish serving scalability.
+
+KV hits count cached input tokens divided by input tokens at first native
+admission. LoRA hits count requests whose exact adapter is already in a GPU
+buffer before fetching it. Loads/evictions are logical per-replica adapter-buffer
+events, observed on TP rank zero, not separate counts for every GPU shard.
+Loading seconds are aggregate host elapsed time across replicas, not isolated
+CUDA transfer time or exposed request delay.
+
+### Additional fixed-work workloads
+
+All three replays use four TP2 H100 replicas, the same 27B model and rank-32
+adapters, eight separate CPU frontends, HTTP/1.1, and seed 15101. Clients start
+0.5 seconds apart and advance independently. Each policy receives identical
+initial CPU registrations and prefix warmup. Generation uses `ignore_eos=True`;
+output lengths and request counts are checked, as are exact adapter versions,
+finite logprobs, and one engine admission per completed request. Recorded update
+delays are replayed alongside the next prefetched rollout; they are not new
+optimizer work and do not impose a cross-client barrier.
+The long-prefix and multi-turn GPUs are in `us-east`; the short-decode-study
+GPUs are in `us-west`, while its frontends remain in `us-east`. Every policy
+within that comparison uses the same cross-region path. Absolute latency across
+these differently placed pools is not a controlled comparison.
+
+| Trace | Clients / active versions | Concurrent requests, maximum | Requests / output tokens | Prompt / decode lengths | Arrival structure |
+|---|---:|---:|---:|---|---|
+| Long-prefix bursts | 16 / 16, with 32 versions over the run | 1,088 | 3,264 / 3,342,336 | 8,192 / 1,024 | Three rounds; hot client 128 samples, seven clients one 64-sample group, eight clients eight groups of eight |
+| Multi-turn continuation | 16 / 16, with 32 versions over the run | 256 | 2,304 / 2,359,296 | 8,192 then 9,472 then 10,752 / 1,024 each turn | Three rounds, two groups of eight per client, three turns per trajectory |
+| Short-prompt, long-decode | 12 / 12 | 480 | 960 / 3,932,160 | Actual short RL math prompts / 4,096 | Two rounds; hot client one 128-sample group, eleven clients four groups of eight |
+
+Long-prefix and multi-turn rounds zero and one reuse version 4; round two uses
+version 7, initially absent from the CPU adapter registry. The two-round short
+trace uses version 4 throughout. Multi-turn prompts append each trajectory's
+actual previous output and a deterministic 256-token synthetic tool reply.
+Consequently their lengths and dependency graph match across policies, while
+generated token contents can differ. This is a tool-shaped replay, not a claim
+to execute a real external tool or measure task reward.
+
+Generation makespan ends at the last response and includes routing/retry delay.
+End-to-end harness wall time also includes returning detailed traces from CPU
+frontends. Both are retained: the large long-prefix KV trace has a 13.48-second
+collection tail. This instrumentation cost must not be mistaken for inference
+service time. Per-request latency ends at its response and includes time spent
+waiting outside the engine.
+
 ### Numerical validation
 
 On two trained rank-32 version-4 adapters, fixed-prompt input logprobs differed
@@ -195,8 +275,21 @@ maximum 1.5861 / 1.4355. Both exceed the pinned PR test's mean 0.03 / maximum 0.
 bounds. The first 32 greedy output tokens matched and restoration was exact;
 neither establishes merged numerical equivalence. A zero-initialized adapter
 passed with zero logprob difference. The tolerance originates in smaller-model
-tests, but it has not been relaxed to make this experiment pass. Additional
-pool measurements use merging disabled while this discrepancy is investigated.
+tests, but it has not been relaxed to make this experiment pass.
+
+A second check uses actual RL math prompts (250 and 217 tokens), generates
+2,048 tokens with each trained adapter, and teacher-forces those same tokens
+through unmerged, merged, and restored execution. On the generated-token
+positions, mean differences are 0.007731 / 0.007621 and maxima are
+0.138362 / 0.120170: both pass the unchanged bounds. Restoration remains exact.
+This check compares conditional logprobs on a fixed trajectory; it does not
+establish that independently generated 2,048-token trajectories agree, nor does
+it test numerical agreement in a 36-sequence batch. The original prompt-token
+failure remains a separate result. The expanded check covers all twelve adapters
+used by the short-prompt, long-decode replay: all pass on 2,048 generated tokens
+each, with per-adapter mean differences 0.005944–0.011387 and maxima
+0.109493–0.171487. Exact restoration passes for every adapter. This numerical
+gate completed before starting that replay's four-policy comparison.
 
 A read-only tensor diagnostic on layer 11's value projection found that BF16
 merging leaves 99.27% of base-weight entries unchanged; the norm of the rounding
@@ -214,12 +307,15 @@ Changing weight precision is therefore not a validated workaround in this setup.
 
 ### Live RL comparison
 
-Eight independently staggered clients completed two optimizer updates each on
+Eight clients staggered by five seconds completed two optimizer updates each on
 four TP1 H200 inference replicas and one TP4 H100 trainer. Each update retains
 four DAPO groups of eight samples, filtering all-correct/all-wrong groups, with
 four-group refills and a 64-candidate-group budget. Generation permits 8,192
 output tokens, thinking enabled, temperature/top-p 1.0, seed 4242. One rollout is
 prefetched. Initial checkpoints are identical across the paired arms.
+The optimizer uses learning rate 1e-5, Adam betas 0.9/0.95, epsilon 1e-12, gradient
+clip norm 1.0, and asymmetric policy-ratio clipping at 0.8/1.28. Each inference
+replica has eight CPUs and 192 GiB RAM; the trainer has 32 CPUs and 256 GiB RAM.
 
 The completed KV baseline took 3,380.15 seconds for 12,295,732 generated and
 4,057,999 trained output tokens: 3,637.63 generated tokens/s and 1,200.54 trained
@@ -282,16 +378,41 @@ production replica cannot assume the warm transition cost on its first merge;
 the profile's `initial_merge_seconds` charges the measured first-use cost until
 one merge succeeds. Calibration emits this separate value. Evaluation's common
 preparation pays that cost before measurement, identically in every arm.
-The measured pool images precede the optional first-use guard; their source
-hashes and engine commit are recorded in `deployed-source-hashes.json`. The guard
-has a separate regression test. Warm comparisons do not validate its cold-start
-behavior on a production pool.
+The initial pool and live images precede the optional first-use guard; the
+revised pool includes it. Source hashes and engine commits are recorded in
+`deployed-source-hashes.json`. A separate real-engine cold-start check merged all
+36 requests with 4,096 forced output tokens, charging a 6.35-second first merge,
+then restored before another adapter. This checks mode transitions and the cold
+cost guard, not trained-adapter numerical equivalence.
 
 The live comparison runs two optimizer updates per client with one prefetched
 rollout. Both measured rollouts may therefore use the initial policy. It tests
 real sampling, filtering, gradients, optimizer steps, and publication, but does
 not establish updated-policy sampling. The replay experiments separately test
 new exact versions. These are distinct claims.
+
+## Limits of the implementation
+
+No policy here is established as uniformly better than KV affinity or the simple
+overflow control. The score uses aggregate token rates, not a model of every
+continuous-batching or hybrid-attention kernel. Replica observations can be stale
+and different frontends can make correlated choices. Local reservations do not
+constitute a global semaphore: the authoritative admission gate prevents excess
+execution, but thousands of rejected retries remain possible. Fairness applies
+to admitted work; it does not guarantee fairness among clients still retrying
+outside the sidecar. The revised serving trial's p95 is worse than the simpler
+overflow policy despite fewer adapter transfers.
+
+Merging is considered only when the replica has drained. It cannot transform an
+in-flight batch or preserve its KV state across the transition. Continuous mixed
+demand may therefore never create an amortizable merge opportunity. Fixed-size
+pool tests do not establish Flash autoscaling behavior, failover behavior, or
+scaling to hundreds of replicas. The tested native topology is TP1/TP2 with
+DP=PP=1. Model/precision-specific numerical validation is still required before
+enabling trained-adapter merging; exact unmerge restoration is insufficient.
+Replay version turnover makes a saved exact version new to the engine's CPU
+adapter registry; it does not guarantee a cold operating-system page cache or
+Modal Volume network fetch. Those storage tiers are not isolated by this study.
 
 Artifacts are recorded under `analysis/dlora-20261015`. The earlier eight-H200
 attempt with retained pre-update replicas is excluded. Later H200 pool attempts
