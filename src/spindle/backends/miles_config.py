@@ -196,6 +196,8 @@ class MilesBackendConfig:
             self.hf_checkpoint,
             "--pretrained-checkpoint",
             self.hf_checkpoint,
+            "--ref-load",
+            self.hf_checkpoint,
             "--megatron-to-hf-mode",
             self.megatron_to_hf_mode,
             "--debug-train-only",
