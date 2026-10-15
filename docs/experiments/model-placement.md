@@ -1,10 +1,20 @@
 # Model placement with overflow
 
-This PR retains `model-spill`, the simple model-placement policy evaluated in
-the serving study. It improves throughput over the matched Flash KV-affinity
-baseline on the five comparisons below. It does not establish a universal
-speedup: the long-decode result is nearly flat, with slightly worse p95 latency.
-There is no completed live-RL comparison for this policy.
+This PR retains `model-spill`, a candidate selected from the earlier serving
+study. **Its throughput improvement over unmodified current Spindle has not
+been measured.** The historical comparisons below use the study's Flash-affinity
+control, engine pin and admission settings. They do not establish that this is
+the best policy for current Spindle. There is no completed live-RL comparison
+for this policy.
+
+The required baseline is current Spindle main (`c73680e1ca1679675ede3690ed425280caab9711`
+at this audit): its existing `execute_sample` path through Flash, affinity-key
+precedence (explicit cache key, supplied session, automatic conversation key,
+then request ID), native admission, retry handling and engine version. A new
+comparison must run this unchanged stack and the PR against the same request
+trace and resource allocation. A separate comparison with only the router
+switched off would isolate routing from this PR's HTTP transport change. Neither
+comparison has been completed; the historical control is not a substitute.
 
 Enable it in a deployment recipe:
 
