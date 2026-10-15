@@ -96,7 +96,10 @@ def render(root, arms):
         d = json.loads(path.read_text())
         workload_hashes.add(d["workload_sha256"])
         summary[arm] = metrics(d)
-        kwargs = dict(label=LABELS[arm], color=COLORS[arm], linestyle=STYLES[arm])
+        label = LABELS[arm]
+        if summary[arm]["extra_engine_admissions"]:
+            label += " [extra admission]"
+        kwargs = dict(label=label, color=COLORS[arm], linestyle=STYLES[arm])
         bins = np.arange(0, d["seconds"] + 20, 20)
         rows = d["requests"]
         for column, metric in [(0, "kv"), (1, "latency")]:

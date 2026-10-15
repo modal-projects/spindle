@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from scripts.benchmarks.lora_routing.cache_report import COLORS, LABELS, STYLES
+from scripts.benchmarks.dlora.report import metrics
 
 
 def render(root, arms):
@@ -19,6 +20,7 @@ def render(root, arms):
     for arm in arms:
         data = json.loads((root / f"{arm}.json").read_text())
         hashes.add(data["workload_sha256"])
+        extra_admissions = metrics(data)["extra_engine_admissions"]
         for dimension in ["turn", "dialogue_turn"]:
             values = sorted({r[dimension] for r in data["requests"]})
             for value in values:
@@ -29,6 +31,7 @@ def render(root, arms):
                         dimension=dimension,
                         index=value,
                         requests=len(requests),
+                        extra_engine_admissions=extra_admissions,
                         versions=sorted({r["version"] for r in requests}),
                         kv_hit_ratio=sum(r["cached_tokens"] for r in requests)
                         / sum(r["prompt_tokens"] for r in requests),
@@ -62,7 +65,12 @@ def render(root, arms):
                     marker="o",
                     color=COLORS[arm],
                     linestyle=STYLES[arm],
-                    label=LABELS[arm],
+                    label=LABELS[arm]
+                    + (
+                        " [extra admission]"
+                        if selected[0]["extra_engine_admissions"]
+                        else ""
+                    ),
                 )
                 ax.set_xticks(
                     xs,

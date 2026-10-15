@@ -171,9 +171,10 @@ class ReplicaScheduler:
             return None
         batch = [e for e in self.pending if e.adapter == adapter][: p.capacity]
         mixed = self.pending[: p.capacity]
-        # Compare the sum of completion times for two feasible local plans:
-        # mixed unmerged batch, or a homogeneous merged batch then the rest.
-        # Partial batches get proportionally less credit for merge savings.
+        # Compare local completion-cost proxies. The candidate cohort may extend
+        # beyond the first capacity entries, so this is not an exact schedule
+        # comparison over the entire admission queue. Partial batches get
+        # proportionally less credit for merge savings.
         fill = min(1.0, len(batch) / p.capacity)
         merged_step = p.unmerged_token_seconds + fill * (
             p.merged_token_seconds - p.unmerged_token_seconds

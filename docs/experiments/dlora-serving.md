@@ -1,10 +1,19 @@
 # Decentralized merge-aware LoRA serving
 
-Status: experimental, opt-in implementation. The initial pool, revised admission,
-and live RL comparisons are complete; additional burst workloads are under test.
+Status: experimental, opt-in implementation. Adapter-slot admission improves the
+64-version serving trace over KV affinity, but does not consistently outperform
+simple model placement with overflow. Live RL shows no throughput improvement.
+The implementation is not recommended as the default serving policy.
 Trained-adapter BF16 agreement passes the merge PR's tolerance on twelve generated
 trajectories but fails on the original prompt tokens. These are different tests;
 neither establishes numerical agreement for arbitrary requests or batches.
+
+The main observed constraint under adapter diversity is native batch occupancy,
+not weight-copy time alone. Preserving locality can improve both batch occupancy
+and prefix reuse. Merging accelerates homogeneous decode in isolation, but
+draining, cache invalidation, and the tail of a client sampling group can offset
+that saving. The evaluation therefore retains negative results and compares
+useful output throughput and client latency alongside cache and load counters.
 
 ## Scope and dependencies
 
@@ -28,6 +37,9 @@ The deployment selects the pinned merge-capable image only when that engine
 option is enabled. Existing default deployments retain their current image and
 policy. The profile must be calibrated for the model, rank, batch size, and
 hardware; benchmark setup endpoints are confined to the instrumented test image.
+The evaluated sampling transport is HTTP/1.1; set `inference_http2=False` to
+reproduce that path in a full deployment. The replay driver explicitly selects
+HTTP/1.1 independently of the inference-pool recipe's transport default.
 
 ## Ownership and request path
 
@@ -57,8 +69,9 @@ short randomized delay. Exact adapter constraints survive every retry.
 The final sidecar also counts latest-version resolution against this admission
 bound before awaiting checkpoint I/O. A regression test blocks resolution,
 checks rejection before registration, cancels a waiter, and verifies that its
-capacity is released. This guard was added after freezing the measured GPU
-images; the replay requests already specify exact versions and do not enter
+capacity is released. This guard was added after freezing the first measured GPU
+images and is included in the final short-prompt pool; replay requests specify
+exact versions and do not enter
 that pre-admission resolution path.
 
 The 36-request forwarding budget is not a guarantee of 36 executing sequences:
@@ -121,7 +134,7 @@ snapshots predating the transition cannot advertise those invalidated prefixes.
 
 At an idle decision boundary, compare two plans for admitted work: a mixed
 unmerged batch versus a homogeneous merged batch followed by the minority work.
-The objective is estimated sum of completion times for that local batch.
+The decision uses a proxy for the sum of completion times in a local batch.
 The candidate adapter is the largest pending cohort. The specialized plan pays
 merge time, restoration time, and full candidate-prompt prefill after cache
 invalidation. It receives no credit for future requests that have not arrived.
@@ -129,6 +142,20 @@ Partial batches receive proportionally less decode-saving credit than the
 calibrated full batch. The oldest minority's waiting time acts as a fairness
 credit: a new specialization cannot bypass it after the configured wait bound.
 Once incompatible demand arrives on a merged engine, refill stops and it drains.
+
+Precisely, let `U` be the first `capacity` pending entries, `B` the first
+`capacity` entries of the most frequent adapter in the pending queue, and `M`
+the entries in `U` from other adapters. Let `u` and `m` be measured unmerged and
+merged decode-step seconds, and `f = len(B) / capacity`. The mixed proxy is
+`len(U) * max_output(U) * u`. The candidate time is
+`t = merge_cost + sum_prompt(B) / prefill_rate + max_output(B) * (u + f*(m-u))`.
+The specialized proxy is `len(U)*t + len(M)*(restore_cost + max_output(M)*u)`;
+when `M` is empty it instead adds `len(U)*restore_cost`. Merge only if the
+specialized proxy is smaller and no incompatible pending entry has exceeded
+the bypass limit. `B` can include entries beyond `U`, so this is a heuristic
+comparison, not an exact schedule over the entire admission queue. It also
+does not optimize the maximum completion time of a sampling group or predict
+future arrivals.
 
 This adapts [dLoRA's](https://www.usenix.org/system/files/osdi24-wu-bingyang.pdf)
 merge/batching and demand-driven replication ideas to local
@@ -152,6 +179,15 @@ with overflow, not a baseline that waits forever on one replica. The custom
 router uses exact-upstream headers after stripping conflicting Flash affinity
 headers; native request payloads still retain their logical cache identity.
 
+The model-placement control assigns balanced preferred replicas by adapter model
+identity, preserving placement across optimizer versions while keeping cache and
+weight identities version-specific. It retains the preferred replica while its
+observed-plus-local request count is at most 1.25 times the mean replica count
+plus the current group chunk. Above that bound it permits all candidates and
+uses request count to choose among them. The 25% allowance is a strawman policy
+parameter, not a measured service-time relation. Thus this control can spill
+beyond a preferred replica; it is not strict static single-replica placement.
+
 Retain the existing 64-version long-prefix serving trace, independently staggered
 RL-shaped bursts with version turnover, and multi-turn continuation workloads.
 Live RL uses independent client rollout/train/publication loops and common
@@ -167,7 +203,7 @@ Resource monitors stop only task-owned apps and preserve allocation evidence.
 ## Results
 
 The revised inference/provider/deployment regression suite passed 408 tests with
-one skipped. Full CI passed 916 tests with one skip on Tinker 0.24.1 and 911
+one skipped. Final implementation CI passed 918 tests with one skip on Tinker 0.24.1 and 913
 with six skips on 0.25.0. Real-engine checks on both one H200
 (TP1) and two H100s (TP2) passed exact greedy-output and input-logprob restoration,
 automatic specialization for 36 requests, and restoration before another adapter.
@@ -189,6 +225,28 @@ router instances and 512 outstanding streams: 64 exact adapter versions, eight
 streams per version, four requests per stream, 2,048 requests total. Each request
 has 8,192 input tokens (7,168 shared) and 512 forced output tokens. All arms use
 the same seed, adapters, HTTP/1.1 transport and common warmup/cache reset.
+
+The targets are `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`,
+and `down_proj`, with LoRA alpha 32. Native scheduling uses `lpm`, static memory
+fraction 0.8, and no overlapped LoRA loading. Each TP2 replica has eight CPUs and
+128 GiB RAM. The base image is `lmsysorg/sglang:nightly-dev-cu13-20261014-684fea8a`,
+with the merge PR source placed first on `PYTHONPATH` and the Python unified
+radix-tree core backend. Installed wheel metadata alone does not identify the
+executing source; the deployed source hashes record that distinction.
+
+| TP2 H100 service-profile parameter | Value |
+|---|---:|
+| Unmerged / merged full-batch decode-step seconds | 0.02078665 / 0.01725233 |
+| Aggregate unmerged output tokens/s used by router | 1,731.88 |
+| Prefill tokens/s used by router | 15,265.31 |
+| CPU registration / GPU adapter load seconds | 0.527289 / 0.052398 |
+| First merge / warm merge / exact restore seconds | 6.221928 / 0.551970 / 0.430292 |
+| Forwarding capacity / overflow requests / adapter slots | 36 / 4 / 8 |
+| Incompatible-request bypass bound, seconds | 5 |
+
+These measured constants are shared across the TP2 comparisons; they are not
+retuned per workload or per baseline. They approximate service cost and are not
+an observed throughput ceiling.
 
 | Policy | Wall seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | GPU loads | Mean decode batch |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -239,9 +297,24 @@ does not make RPCs. A separate in-process snapshot benchmark measured approximat
 49 microseconds median at four replicas, 80 at eight and 1,000 at 128; those CPU
 measurements exclude discovery and do not establish serving scalability.
 The first revised trial runs KV, model-placement overflow, then the revised
-policy. The planned repeat swaps the two controls and still runs the revised
+policy. The completed repeat swaps the two controls and still runs the revised
 policy last; it is not a fully counterbalanced experiment. Common cache and
 mode preparation is repeated before every arm.
+
+| Repeated policy | Generation seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Mean decode batch |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 639.27 | 1,640.27 | 121.79 / 295.66 | 14.73% | 36.13% | 1,301 / 1,297 | 11.71 |
+| Model placement with overflow | 407.73 | 2,571.77 | 76.36 / 184.23 | 47.52% | 60.30% | 677 / 673 | 19.32 |
+| Revised adapter-slot policy | 406.69 | 2,578.29 | 71.51 / 261.53 | 47.22% | 77.15% | 425 / 421 | 19.03 |
+
+Across the two trials the new policy is 53.8–57.2% faster than KV affinity,
+but ranges from 6.54% slower to 0.25% faster than model placement. Its p95 is
+42.0–52.2% worse than model placement in both trials. Two trials establish
+neither confidence intervals nor a reliable throughput advantage over that
+baseline. The repeat has 75,689 / 39,826 / 28,993 capacity rejections, no transport
+errors, and exactly 2,048 native admissions per arm. Its periodic new-policy
+observer covers 84.73% of the run with at most a 28.45-second observation gap;
+full-run decode and load totals come from native counter differences.
 
 KV hits count cached input tokens divided by input tokens at first native
 admission. LoRA hits count requests whose exact adapter is already in a GPU
@@ -331,9 +404,55 @@ responses. Useful generation makespan is 842.65 seconds (2,799.85 tokens/s);
 mean/p95 request latency is 44.39/81.72 seconds. This is a retained operational
 result, not a clean fixed-native-work comparison. The last other response arrives
 at 569.42 seconds; removing the failed request is not used to manufacture a
-replacement throughput result. A single repeat with a fresh driver and identical
-settings is scheduled. The underlying transport failure is not attributed to a
-specific proxy component, and production connection settings are unchanged.
+replacement throughput result.
+
+A single repeat with a fresh driver also has one lost response and one extra
+native admission. This attempt opens a new TCP connection, appears in native
+observations from 189.99 to 216.25 seconds, and fails after 360.03 seconds waiting
+for response headers. Both incidents involve the same client/model and replica,
+but different requests and rounds; that correlation does not establish a cause.
+The preserved replica logs contain no matching engine exception. Fresh connection
+creation in the repeat means stale connection reuse alone cannot explain both
+incidents. The transport failure remains unresolved, and TCP keepalive settings
+are unchanged. No further repeat was launched.
+
+| Multi-turn policy / trial | Generation seconds | Useful output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Extra native admissions |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 525.06 | 4,493.43 | 36.78 / 74.41 | 75.53% | 84.64% | 249 / 245 | 0 |
+| Model placement with overflow | 469.33 | 5,026.98 | 34.82 / 65.97 | 81.08% | 95.79% | 82 / 78 | 0 |
+| Revised policy, first trial | 842.65 | 2,799.85 | 44.39 / 81.72 | 65.66% | 81.52% | 348 / 344 | 1 |
+| Revised policy, bounded repeat | 654.10 | 3,606.92 | 40.85 / 72.56 | 69.25% | 80.22% | 345 / 341 | 1 |
+
+The two affected arms remain valid operational outcomes but are not comparisons
+with equal native work. Their additional generation is excluded from useful
+throughput's numerator and its time remains in the denominator. There is no clean
+new-policy multi-turn win. The controls each execute 2,304 native requests without
+transport errors; both new-policy trials execute 2,305. In the KV control, token
+reuse rises from 59.00% on the initial turn to 78.24% and 85.75% on continuations.
+Its per-round reuse is 75.45%, 77.76%, and 73.38% across versions 4, 4, and 7.
+Thus long-prefix continuation reuse is measurable in this workload; the revised
+placement does not preserve it as well as the simpler control.
+
+### Short-prompt, long-decode comparison: original transport
+
+This four-policy comparison precedes the connection-limit correction below.
+Every arm completes 960 requests and exactly 3,932,160 useful output tokens,
+with 960 native admissions and no transport errors.
+
+| Policy | Generation seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Mean decode batch |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 645.00 | 6,096.37 | 166.24 / 327.89 | 46.60% | 79.17% | 78 / 74 | 29.90 |
+| Model placement with overflow | 637.52 | 6,167.89 | 168.31 / 321.94 | 58.58% | 92.08% | 24 / 24 | 32.99 |
+| Revised router, merge disabled | 640.41 | 6,140.03 | 172.90 / 313.93 | 48.19% | 72.19% | 88 / 84 | 29.96 |
+| Revised router, merge enabled | 641.94 | 6,125.44 | 159.25 / 315.70 | 46.11% | 70.42% | 89 / 85 | 29.62 |
+
+The merged arm executes 100 requests in merged mode, representing 9.26% of
+native decode steps. Six transitions consume 8.48 aggregate replica-seconds.
+Compared with disabling merge, mean request latency falls 7.90%, but throughput
+falls 0.24% and p95 rises 0.56%. Mean client rollout time rises from 261.98 to
+271.78 seconds. All four throughputs are within 1.2% in this single comparison;
+there is no demonstrated throughput improvement. The merge-disabled model
+placement baseline has the highest throughput despite serving no merged work.
 
 ### HTTP/1 connection admission
 
@@ -360,12 +479,56 @@ regression test holds every response until all 128 requests arrive: the old
 supplies its own client or transport still owns its connection settings. This
 change does not remove HTTP/2's independently negotiated stream limit.
 
-The four-policy short-prompt workload is being repeated with the fix applied
-equally to every arm and the policy order reversed. Its model, adapters, forced
-output lengths, client loops and GPU topology are unchanged. The original
-results remain visible as measurements of the previous transport. The scheduled
-multi-turn recovery also uses the corrected helper, but its sampling calls have
-one or eight samples, below the old limit; that limit never binds there.
+The four-policy short-prompt workload was repeated with the fix applied equally
+to every arm and the policy order reversed: merge enabled, merge disabled,
+model placement, then KV. Its model, adapters, forced output lengths, client
+loops and GPU topology are unchanged. The original results remain visible as
+measurements of the previous transport. The bounded multi-turn repeat also uses
+the corrected helper, but its sampling calls have one or eight samples, below
+the old limit; that limit never binds there.
+
+### Short-prompt, long-decode comparison: corrected transport
+
+All four arms complete 960 useful responses with exactly 960 native admissions
+and no transport errors. This is a single matched comparison on the corrected
+transport, not repeated trials establishing statistical significance.
+
+| Policy | Generation seconds | Output tokens/s | Mean / p95 request seconds | KV token hit | GPU LoRA hit | Loads / evictions | Mean decode batch |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| KV affinity | 646.59 | 6,081.34 | 169.93 / 322.46 | 50.72% | 84.48% | 77 / 73 | 29.91 |
+| Model placement with overflow | 639.26 | 6,151.10 | 166.27 / 326.81 | 56.33% | 90.10% | 31 / 31 | 33.02 |
+| Revised router, merge disabled | 583.16 | 6,742.87 | 172.70 / 333.97 | 44.24% | 75.00% | 89 / 85 | 34.20 |
+| Revised router, merge enabled | 642.02 | 6,124.70 | 169.42 / 328.84 | 39.67% | 73.44% | 87 / 83 | 31.04 |
+
+With merging disabled, the revised router is 9.62% faster than model placement,
+but mean request latency is 3.86% higher and p95 is 2.19% higher. Its 89 GPU loads
+versus 31 for model placement show that minimizing copies is not equivalent to
+minimizing this workload's makespan. The new policy has fuller native batches,
+but this single comparison does not isolate every cause of the throughput gap.
+
+Enabling merge reduces throughput by 9.17% relative to disabling it. Mean and
+p95 request latency improve by 1.90% and 1.54%, while mean/p95 client rollout
+time worsen by 4.03%/10.08% (272.96/418.16 to 283.97/460.33 seconds). Mean native
+decode-batch size falls from 34.20 to 31.04. Eight mode transitions consume
+10.03 aggregate replica-seconds; 128 requests execute merged, accounting for
+12.93% of decode steps. GPU loading consumes 5.00 aggregate host-seconds versus
+4.88 without merging. The performance loss cannot be explained as additional
+weight-transfer time alone.
+
+The first 128-sample hot group completes in 72.96 seconds with merging versus
+83.28 without it. All 128 merged requests reach their first HTTP event within
+0.099 seconds; the old transport held 28 requests for about 64 seconds before
+TCP connection creation. Fixing that delay improves the group's last response
+from 402.50 to 72.96 seconds, but whole-pool merged throughput remains essentially
+unchanged at 6,125 tokens/s. Optimizing a local sum-of-completions proxy can help
+one cohort while worsening later batch occupancy and group completion. These
+results do not support enabling the merge heuristic by default.
+
+Capacity rejections in table order are 112,942, 113,569, 108,771, 104,755.
+They are included in latency and generation makespan. The unbounded HTTP/1
+connection setting removes a hidden per-call transport queue; it does not bound
+frontend demand or eliminate the rejected-retry overhead. Replica execution
+remains bounded by the admission controller.
 
 ### Numerical validation
 
@@ -413,6 +576,11 @@ four DAPO groups of eight samples, filtering all-correct/all-wrong groups, with
 four-group refills and a 64-candidate-group budget. Generation permits 8,192
 output tokens, thinking enabled, temperature/top-p 1.0, seed 4242. One rollout is
 prefetched. Initial checkpoints are identical across the paired arms.
+The math fixture is `scripts/benchmarks/lora_routing/dapo.jsonl`, with source
+rows from `open-r1/DAPO-Math-17k-Processed`. Clients use a problem stride of 20,
+top-k -1, and tokenizer revision `1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`.
+The recorded client warmup is eight samples with a 128-token limit; measured
+sampling uses the 8,192-token limit above and ordinary EOS termination.
 The optimizer uses learning rate 1e-5, Adam betas 0.9/0.95, epsilon 1e-12, gradient
 clip norm 1.0, and asymmetric policy-ratio clipping at 0.8/1.28. Each inference
 replica has eight CPUs and 192 GiB RAM; the trainer has 32 CPUs and 256 GiB RAM.
@@ -524,5 +692,59 @@ could not obtain the complete allocation. The replay study uses four TP2 H100
 replicas (eight GPUs); live RL uses four TP1 H200 replicas and a four-H100 TP4
 trainer. Initial live setup failures from environment JSON escaping and selection
 of an incompatible initial checkpoint set are preserved, followed by a corrected
-run using the four-GPU checkpoint set. Final tables must identify complete,
-failed, and interrupted runs explicitly.
+run using the four-GPU checkpoint set.
+
+## Reproduction and artifact inventory
+
+The draft implementation is in [Spindle PR #59](https://github.com/modal-projects/spindle/pull/59),
+stacked on PR #52. The integration uses the source revision in
+[SGLang PR #44354](https://github.com/sgl-project/sglang/pull/44354).
+Launch and validation scripts are under `scripts/benchmarks/dlora`; the replay
+driver is `scripts/benchmarks/lora_routing/cache_replay.py`. Exact launch argument
+arrays are retained in each pool's `controls-*.json` manifests. Each replay
+stores a workload hash, source snapshot, request attempts, served versions,
+native counters, and observation timeline. Reproducing the results requires
+access to the recorded model assets and exact adapter checkpoints; it is not
+equivalent to substituting random LoRA weights.
+
+The following paths are relative to `analysis/dlora-20261015`:
+
+| Artifact | Disposition |
+|---|---|
+| `validation/admission40`, `validation-h100` | Completed TP1 H200 / TP2 H100 microbenchmarks and restoration checks |
+| `pool-h100/serving64` | Completed initial four-policy comparison; no measured merges |
+| `pool-h100/interrupted-http2` | Interrupted transport diagnostic; excluded from performance tables |
+| `pool-h100/long1024` | Preparation interrupted when replacing the pool with the adapter-slot implementation; no performance result |
+| `pool-admission/serving64`, `serving64-repeat` | Two complete adapter-slot admission comparisons |
+| `pool-admission/long1024` | Complete independent long-prefix bursts and version turnover |
+| `pool-admission/dialogue1024`, `dialogue1024-retry` | Complete useful responses, one lost-response retry and extra native admission in each new-policy trial |
+| `pool-admission/dialogue1024-comparison` | Original controls and bounded repeat, with explicit source provenance; no claim of equal native work |
+| `pool-decode4096/short4096` | Completed original four-policy long-decode comparison with the hidden connection limit |
+| `pool-uncapped4096/short4096` | Matched four-policy comparison with corrected HTTP/1 connection admission |
+| `pool-admission/equivalence*.json` | Original fixed-prompt numerical failures, retained |
+| `validation-trajectory`, `pool-decode4096/equivalence.json` | Generated-trajectory checks, including all twelve replay adapters |
+| `validation-fp16` | Startup dtype failure; no serving performance result |
+| `live-corrected/kv`, `live-corrected/dlora` | Completed independent real DAPO training comparisons |
+| `live-corrected/interrupted-hard-exclusion` | Interrupted early routing attempt; no completed optimizer updates |
+| `live`, `pool-1`, `pool-2`, `pool-3` | Setup/allocation failures or incomplete allocation; excluded |
+
+`report/workload-overview.csv` contains individual fixed-work measurements,
+not averages across workloads. Multi-turn trials with extra native work are
+reported separately. Each comparison's `dlora-summary.json` and CSV retain
+latency, cache ratios, load/eviction counts, mode-transition time, admission
+counts, and retry counts. Time-series plots use 20-second completion windows for
+request latency and token hits, and successive native-counter observations for
+engine metrics. Empty windows are not zero measurements. Instrumentation is
+enabled for every arm; its execution overhead has not been isolated with a
+separate observer-disabled experiment.
+
+## Resource accounting
+
+All task-owned GPU applications are stopped. The recorded peak allocation is
+24 GPUs, below the requested 48-GPU limit. Deduplicated started container
+lifetimes total 67.15 GPU-hours, including deployment, warmup, failed
+attempts, and diagnostics (13.23 H200 and 53.92 H100 GPU-hours).
+This is observed allocation time, not a billing or GPU-utilization measurement.
+`report/resources.json` records every included lifetime manifest, deduplication,
+and queued tasks without a recorded start. Final per-pool resource audits report
+zero active GPUs.

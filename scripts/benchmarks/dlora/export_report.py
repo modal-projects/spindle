@@ -2,6 +2,7 @@
 
 import argparse
 from html import escape
+import json
 from pathlib import Path
 import re
 
@@ -31,7 +32,9 @@ def main():
     parser.add_argument("--note", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--plots", type=Path, nargs="*", default=[])
+    parser.add_argument("--captions", type=Path)
     args = parser.parse_args()
+    captions = json.loads(args.captions.read_text()) if args.captions else {}
     styles = getSampleStyleSheet()
     styles["BodyText"].fontSize = 9
     styles["BodyText"].leading = 12
@@ -102,16 +105,22 @@ def main():
             flow.append(Paragraph(inline(" ".join(paragraph)), styles["BodyText"]))
     for path in args.plots:
         flow.append(PageBreak())
+        caption = captions.get(str(path), {})
         flow.append(
-            Paragraph(escape(path.parent.name + ": " + path.stem), styles["Heading2"])
+            Paragraph(
+                escape(caption.get("title", path.parent.name + ": " + path.stem)),
+                styles["Heading2"],
+            )
         )
         figure = Image(str(path))
         ratio = min(
-            doc.width / figure.imageWidth, (doc.height - 70) / figure.imageHeight
+            doc.width / figure.imageWidth, (doc.height - 150) / figure.imageHeight
         )
         figure.drawWidth = figure.imageWidth * ratio
         figure.drawHeight = figure.imageHeight * ratio
         flow.append(figure)
+        if caption.get("text"):
+            flow.append(Paragraph(inline(caption["text"]), styles["BodyText"]))
         flow.append(Paragraph(escape(str(path)), styles["Cell"]))
 
     def footer(canvas, document):
