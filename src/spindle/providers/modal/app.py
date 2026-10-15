@@ -5,11 +5,13 @@ import logging
 import os
 import time
 from dataclasses import asdict
+from pathlib import Path
 
 import modal
 from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
+from spindle.assets import TRANSFORM_MARKER, apply_transform
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
@@ -180,10 +182,14 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
-    snapshot_download(
-        repo_id=definition.weights_repo,
-        local_dir=checkpoint,
-    )
+    if definition.asset_transform:
+        if not Path(checkpoint, TRANSFORM_MARKER).exists():
+            release = f"{checkpoint}.release"
+            snapshot_download(repo_id=definition.weights_repo, local_dir=release)
+            model_assets.commit()
+            apply_transform(definition.asset_transform, Path(release), Path(checkpoint))
+    else:
+        snapshot_download(repo_id=definition.weights_repo, local_dir=checkpoint)
     model_assets.commit()
 
 

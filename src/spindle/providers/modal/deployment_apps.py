@@ -137,6 +137,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
+        ephemeral_disk=recipe.trainer_disk_mib or None,
         timeout=recipe.trainer_timeout_s,
         max_containers=None,
         min_containers=0,
@@ -240,6 +241,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
+        ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),
@@ -287,6 +289,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                         **kwargs,
                         run_id=pool.model_id,
                         pinned_version=None if pool.latest else pool.version,
+                        staging_mode=options["weight_update_staging"],
+                        local_checkpoint_dir=options.get(
+                            "weight_update_local_checkpoint_dir"
+                        ),
                     )
                 )
                 self.supervisor = supervise_children(self.sglang, self.sidecar)

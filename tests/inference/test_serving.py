@@ -77,7 +77,11 @@ def test_fft_sidecar_receives_store_scope() -> None:
             bulletin_volume="bulletin",
             run_id="run-a",
             pinned_version=7,
+            staging_mode="disk",
+            local_checkpoint_dir="/scratch/canonical",
         )
     command = popen.call_args.args[0]
     assert command[command.index("--run-id") + 1] == "run-a"
     assert command[command.index("--pinned-version") + 1] == "7"
+    assert command[command.index("--staging-mode") + 1] == "disk"
+    assert command[command.index("--local-checkpoint-dir") + 1] == "/scratch/canonical"
