@@ -41,7 +41,17 @@ def main():
         assert 1 <= len(owned) <= 3 and all(
             p.startswith("spindle-lora-cache27-") for p in owned
         )
-        gpu_limit = 8 * len(owned)
+        deployments = {
+            p["pool"]: p["deployment"]["recipe"]
+            for p in json.loads((args.root / "pools.json").read_text())
+        }
+        gpu_limit = min(
+            args.max_gpus,
+            sum(
+                r["inference_max_replicas"] * r["inference_gpus_per_node"]
+                for r in deployments.values()
+            ),
+        )
     lifetimes = args.root / "gpu-lifetimes.json"
     known = (
         {r["task_id"]: r for r in json.loads(lifetimes.read_text())}

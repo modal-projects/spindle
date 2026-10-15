@@ -50,6 +50,11 @@ def main():
         "--reports", nargs="+", required=True, help="policy=report.json"
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--initial-policy-only",
+        action="store_true",
+        help="Explicitly allow short prefetched runs without updated-policy sampling; still require every optimizer update and publication",
+    )
     args = parser.parse_args()
     reports = {}
     for item in args.reports:
@@ -68,7 +73,8 @@ def main():
         assert report["clients"] == baseline["clients"]
         assert report["updates"] == report["clients"] * report["config"]["updates"]
         assert report["nonzero_gradient_updates"] == report["updates"]
-        assert report["clients_sampling_updated_policies"] == report["clients"]
+        if not args.initial_policy_only:
+            assert report["clients_sampling_updated_policies"] == report["clients"]
         assert len(report["restored_initial_states"]) == report["clients"]
     args.output.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -106,6 +112,11 @@ def main():
             percent_change_from_kv=changes,
             interpretation="One completed workload execution per policy. Shared-pool clients are not independent trials. Same initial checkpoints, prompts, hyperparameters, and seeds do not guarantee identical generated trajectories under different batching; token volume, filtering, lengths, and rewards are reported separately. No population confidence interval or convergence claim.",
             updates_per_arm=baseline["updates"],
+            updated_policy_sampling_required=not args.initial_policy_only,
+            clients_sampling_updated_policies={
+                policy: report["clients_sampling_updated_policies"]
+                for policy, report in reports.items()
+            },
             clients_per_arm=baseline["clients"],
             config=baseline["config"],
             deployment_hardware=baseline["deployment_hardware"],

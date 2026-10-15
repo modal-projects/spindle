@@ -42,6 +42,8 @@ source = source.replace(
         response = await app.state.client.post("/" + action, json=await request.json())
         if not response.is_error and action != "flush_cache":
             app.state.mode_scheduler.mode = response.json().get("merged_lora_name")
+            if action == "merge_lora_weights" and response.json().get("success"):
+                app.state.mode_scheduler.merge_initialized = True
         app.state.prefixes.clear()
         app.state.routing_snapshot = {}
         return Response(content=response.content, status_code=response.status_code, media_type="application/json")
@@ -53,8 +55,15 @@ sidecar.write_text(source)
 
 # Observe actual executed decode batches, not merely outstanding requests.
 metrics = root / "srt/lora/routing_benchmark.py"
+source = metrics.read_text().replace(
+    "def flush(force=False):\n",
+    "def flush(force=False):\n    if get_parallel().tp_rank != 0:\n        return\n",
+)
+metrics.write_text(source)
 with metrics.open("a") as stream:
     stream.write("""
+from sglang.srt.runtime_context import get_parallel
+
 def batch(reqs, merged):
     counts['merged_decode_steps' if merged else 'unmerged_decode_steps'] += 1
     adapters = Counter(req.lora_id for req in reqs)

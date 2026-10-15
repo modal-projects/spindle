@@ -11,7 +11,7 @@ from report import events, percentile, summarize
 from supervise import write
 
 
-def summarize_live(root, observations=None):
+def summarize_live(root, observations=None, replicas=8):
     status = json.loads((root / "status.json").read_text())
     assert status["state"] == "completed", status
     result = summarize(root, require_independence=True)
@@ -122,11 +122,22 @@ def summarize_live(root, observations=None):
         complete = [
             r
             for r in events(observations)
-            if len(r.get("replicas", [])) == 8
+            if len(r.get("replicas", [])) == replicas
             and all("error" not in s for s in r["replicas"])
         ]
-        assert complete[0]["time"] < result["measured_start"]
-        assert complete[-1]["time"] >= result["measured_end"]
+        # One observer may span pool restarts and consecutive policy arms.
+        # Bracket this arm with the closest complete observations; never mix
+        # counters from a previous incarnation or the next arm's preparation.
+        before_window = [r for r in complete if r["time"] < result["measured_start"]]
+        after_window = [
+            r
+            for r in complete
+            if r["time"] >= result["measured_end"]
+            and all(s["active"] == 0 for s in r["replicas"])
+        ]
+        assert before_window and after_window, "Missing observation boundary"
+        first, last = before_window[-1], after_window[0]
+        complete = [r for r in complete if first["time"] <= r["time"] <= last["time"]]
         before = {s["replica"]: s for s in complete[0]["replicas"]}
         after = {s["replica"]: s for s in complete[-1]["replicas"]}
         assert before.keys() == after.keys()
@@ -201,8 +212,42 @@ def summarize_live(root, observations=None):
             / (counters["request_lora_hits"] + counters["request_lora_misses"]),
             window_start=complete[0]["time"],
             window_end=complete[-1]["time"],
-            measurement="Complete observation window, including sampling warmup and later client initialization. Cache counts are recorded once at first native prefill admission; adapter load time is host elapsed time, not isolated CUDA time.",
+            measurement="Closest complete observations bracketing measured rollouts and updates; later client initialization can overlap this interval. Cache counts are recorded once at first native prefill admission; adapter load time is host elapsed time, not isolated CUDA time.",
         )
+        if all("mode" in s and s["mode"] for s in after.values()):
+
+            def delta(key):
+                return sum(
+                    after[h]["gpu_lora"].get(key, 0) - before[h]["gpu_lora"].get(key, 0)
+                    for h in before
+                )
+
+            steps = delta("merged_decode_steps") + delta("unmerged_decode_steps")
+            result["engine"].update(
+                mean_executed_decode_batch=delta("decode_batch_sequences")
+                / max(1, steps),
+                mean_distinct_adapters_per_decode_batch=delta(
+                    "decode_batch_distinct_adapters"
+                )
+                / max(1, steps),
+                merged_decode_step_fraction=delta("merged_decode_steps")
+                / max(1, steps),
+                merged_requests=sum(
+                    after[h]["mode"]["completed"].get("merged", 0)
+                    - before[h]["mode"]["completed"].get("merged", 0)
+                    for h in before
+                ),
+                mode_transitions=sum(
+                    after[h]["mode"]["transition_totals"].get("count", 0)
+                    - before[h]["mode"]["transition_totals"].get("count", 0)
+                    for h in before
+                ),
+                mode_transition_replica_seconds=sum(
+                    after[h]["mode"]["transition_totals"].get("seconds", 0)
+                    - before[h]["mode"]["transition_totals"].get("seconds", 0)
+                    for h in before
+                ),
+            )
     return result
 
 
@@ -211,9 +256,10 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--observations", type=Path)
     parser.add_argument("--deployment", type=Path)
+    parser.add_argument("--replicas", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    result = summarize_live(args.root, args.observations)
+    result = summarize_live(args.root, args.observations, args.replicas)
     if args.deployment:
         deployment = json.loads(args.deployment.read_text())
         recipe = deployment["recipe"]

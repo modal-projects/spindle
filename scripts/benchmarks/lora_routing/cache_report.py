@@ -102,7 +102,7 @@ def summarize(data):
     assert {s["replica"] for s in data["baseline"]} == {
         s["replica"] for s in data["final"]
     }
-    assert len(data["baseline"]) == 8
+    assert len(data["baseline"]) == config.get("replicas", 8)
     assert all(s["active"] == 0 for s in data["final"])
     stale_final_loads = []
     for state in data["final"]:

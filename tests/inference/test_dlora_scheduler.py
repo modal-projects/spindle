@@ -117,6 +117,52 @@ def test_warm_long_prefix_rebuild_can_make_merge_unprofitable():
     asyncio.run(run())
 
 
+def test_first_merge_pays_cold_cost_then_uses_warm_cost():
+    async def run():
+        actions = []
+
+        async def engine(request):
+            actions.append(request.url.path)
+            return httpx.Response(200, json={"success": True})
+
+        async def prepare():
+            pass
+
+        async def execute():
+            return 1
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(engine), base_url="http://engine"
+        ) as client:
+            scheduler = ReplicaScheduler(
+                client, profile(initial_merge_seconds=2), invalidate=lambda: None
+            )
+
+            async def cohort(adapter, output):
+                return await asyncio.gather(
+                    *(
+                        scheduler.submit(adapter, 8, output, prepare, execute)
+                        for _ in range(4)
+                    )
+                )
+
+            await cohort("a", 100)
+            assert actions == []  # Warm cost would have justified this merge.
+            await cohort("a", 400)
+            assert actions == ["/merge_lora_weights"]
+            await cohort("b", 1)
+            assert scheduler.mode is None
+            await cohort("a", 100)
+            assert actions == [
+                "/merge_lora_weights",
+                "/unmerge_lora_weights",
+                "/merge_lora_weights",
+            ]
+            await scheduler.aclose()
+
+    asyncio.run(run())
+
+
 def test_uncertain_merge_fails_closed_and_cancellation_releases_capacity():
     async def run():
         async def engine(request):

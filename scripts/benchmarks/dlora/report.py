@@ -42,6 +42,13 @@ def metrics(data):
             s["mode"]["transition_totals"].get(key, 0) for s in data["final"]
         ) - sum(s["mode"]["transition_totals"].get(key, 0) for s in data["baseline"])
     result.update(
+        merged_requests=sum(
+            any(
+                a["attrs"].get("ok") and a["attrs"].get("lora_merged")
+                for a in r["attempts"]
+            )
+            for r in data["requests"]
+        ),
         merged_decode_step_fraction=delta.get("merged_decode_steps", 0) / max(1, steps),
         observed_decode_steps=steps,
         mean_executed_decode_batch=delta.get("decode_batch_sequences", 0)

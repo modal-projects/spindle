@@ -23,6 +23,7 @@ class MergeProfile:
     queue_buffer: int = 4
     max_wait_seconds: float = 5.0
     enabled: bool = True
+    initial_merge_seconds: float | None = None
 
     def __post_init__(self):
         if self.capacity < 1 or self.queue_buffer < 1:
@@ -39,6 +40,11 @@ class MergeProfile:
             )
         ):
             raise ValueError("Merge service measurements must be positive")
+        if self.initial_merge_seconds is not None and (
+            not math.isfinite(self.initial_merge_seconds)
+            or self.initial_merge_seconds <= 0
+        ):
+            raise ValueError("Initial merge measurement must be positive")
 
 
 class ReplicaBusy(Exception):
@@ -62,6 +68,7 @@ class ReplicaScheduler:
         self.pending = []
         self.running = {}
         self.mode = None
+        self.merge_initialized = False
         self.transitioning = False
         self.failure = None
         self.changed = asyncio.Event()
@@ -78,6 +85,7 @@ class ReplicaScheduler:
     def snapshot(self):
         return dict(
             merged_adapter=self.mode,
+            merge_initialized=self.merge_initialized,
             transitioning=self.transitioning,
             pending=len(self.pending),
             running=len(self.running),
@@ -145,8 +153,17 @@ class ReplicaScheduler:
             p.merged_token_seconds - p.unmerged_token_seconds
         )
         merged_finish = max(e.output_tokens for e in batch) * merged_step
-        merged_finish += (
+        merge_seconds = (
             p.merge_seconds
+            if self.merge_initialized
+            else (
+                p.initial_merge_seconds
+                if p.initial_merge_seconds is not None
+                else p.merge_seconds
+            )
+        )
+        merged_finish += (
+            merge_seconds
             + sum(e.prompt_tokens for e in batch) / p.prefill_tokens_per_second
         )
         unmerged_finish = max(e.output_tokens for e in mixed) * p.unmerged_token_seconds
@@ -186,6 +203,7 @@ class ReplicaScheduler:
                 if not response.json()["success"]:
                     raise RuntimeError(response.text)
                 self.mode = adapter
+                self.merge_initialized = True
                 self.invalidate()
             self.events.append(
                 dict(

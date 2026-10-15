@@ -513,12 +513,17 @@ async def run_arm(pool, arm, clients, config, executions):
         )
         while time.monotonic() < deadline:
             await routers[0]._refresh()
-            if len(routers[0].replicas) == 8:
+            if len(routers[0].replicas) == config["replicas"]:
                 break
-            print(f"{arm}: {len(routers[0].replicas)}/8 replicas ready", flush=True)
+            print(
+                f"{arm}: {len(routers[0].replicas)}/{config['replicas']} replicas ready",
+                flush=True,
+            )
             await asyncio.sleep(5)
-        if len(routers[0].replicas) != 8:
-            raise RuntimeError(f"{arm}: eight healthy replicas did not start")
+        if len(routers[0].replicas) != config["replicas"]:
+            raise RuntimeError(
+                f"{arm}: {config['replicas']} healthy replicas did not start"
+            )
         replicas = dict(routers[0].replicas)
         if config.get("merge_profile"):
 
@@ -615,6 +620,32 @@ async def run_arm(pool, arm, clients, config, executions):
                 # Pay first-use snapshot allocation/JIT on every arm before
                 # resetting GPU/KV state. Record cold transition cost separately.
                 adapter = f"{source['model_id']}/weight_v{version:06d}"
+
+                async def warm_batch():
+                    async def one():
+                        response = await setup_generate(
+                            setup_client,
+                            gateway,
+                            replica,
+                            {
+                                "input_ids": source["prompts"][0][:16],
+                                "weight_run_id": source["model_id"],
+                                "weight_version": {"exact_version": version},
+                                "sampling_params": {
+                                    "max_new_tokens": 8,
+                                    "ignore_eos": True,
+                                    "temperature": 0,
+                                },
+                            },
+                            preparation_retries,
+                        )
+                        response.raise_for_status()
+
+                    await asyncio.gather(
+                        *(one() for _ in range(config["merge_profile"]["capacity"]))
+                    )
+
+                await warm_batch()
                 for action, payload in [
                     ("merge_lora_weights", {"lora_name": adapter}),
                     ("unmerge_lora_weights", {}),
@@ -626,6 +657,8 @@ async def run_arm(pool, arm, clients, config, executions):
                     )
                     response.raise_for_status()
                     assert response.json()["success"]
+                    if action == "merge_lora_weights":
+                        await warm_batch()
             # Engine health probes also use the base-model slot. Materialize it
             # explicitly so every trial starts with exactly the same GPU set.
             response = await setup_generate(
@@ -650,7 +683,10 @@ async def run_arm(pool, arm, clients, config, executions):
             response.raise_for_status()
 
         await asyncio.gather(*(warm(r) for r in replicas.values()))
-        print(f"{arm}: adapter reset completed on all eight replicas", flush=True)
+        print(
+            f"{arm}: adapter reset completed on all {config['replicas']} replicas",
+            flush=True,
+        )
         warmup = []
         if config.get("warm_prefixes"):
 
@@ -1059,6 +1095,7 @@ def main():
     parser.add_argument("--cold-versions", action="store_true")
     parser.add_argument("--work-rates", type=Path)
     parser.add_argument("--merge-profile", type=Path)
+    parser.add_argument("--replicas", type=int, choices=[4, 8], default=8)
     parser.add_argument("--stagger-seconds", type=float, default=5)
     parser.add_argument("--hot-samples", type=int, default=0)
     parser.add_argument("--large-group-clients", type=int, default=0)
@@ -1181,6 +1218,7 @@ def main():
         config["max_concurrency"] = per_round
     if args.merge_profile:
         config["merge_profile"] = json.loads(args.merge_profile.read_text())
+    config["replicas"] = args.replicas
     config["adapter_count"] = sum(len(c["versions"]) for c in clients)
     if args.vary_placement:
         config["affinity_salt"] = f"trial-{args.seed}:"

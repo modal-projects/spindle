@@ -175,6 +175,9 @@ async def calibrate(pool, sources):
         await asyncio.gather(*[request(p, 1) for p in prompts])
         prefill_seconds = time.monotonic() - began
         profile = dict(
+            initial_merge_seconds=next(
+                r["seconds"] for r in timings if r["action"] == "merge_lora_weights"
+            ),
             unmerged_token_seconds=statistics.median(
                 r["seconds"] / 256 for r in rows if r["mode"] == "unmerged"
             ),

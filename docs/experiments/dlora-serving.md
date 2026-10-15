@@ -35,6 +35,12 @@ that fit available execution slots in the admission diagnostic.
 Capacity rejection is distinguished from an engine failure and retried with
 short randomized delay. Exact adapter constraints survive every retry.
 
+The 36-request forwarding budget is not a guarantee of 36 executing sequences:
+adapter-slot, KV-memory, and prefill constraints can leave forwarded work waiting
+inside SGLang. Evaluation therefore records native running and waiting counts
+separately from sidecar admission. Autoscaling is not established by these
+fixed-size-pool comparisons.
+
 The sidecar serializes only transitions on its own engine. It stops incompatible
 refill, drains active work, restores the original weights, and then serves other
 versions/adapters. A failed or ambiguous transition fails closed and makes the
@@ -73,7 +79,8 @@ calibrated full batch. The oldest minority's waiting time acts as a fairness
 credit: a new specialization cannot bypass it after the configured wait bound.
 Once incompatible demand arrives on a merged engine, refill stops and it drains.
 
-This adapts dLoRA's merge/batching and demand-driven replication ideas to local
+This adapts [dLoRA's](https://www.usenix.org/system/files/osdi24-wu-bingyang.pdf)
+merge/batching and demand-driven replication ideas to local
 ownership. It does not reproduce dLoRA's active request/KV co-migration or claim
 equivalent optimality. Important limitations are the approximate batch service
 model, conservative prefix-rebuild accounting, and transitions only after drain.
@@ -101,6 +108,41 @@ Resource monitors stop only task-owned apps and preserve allocation evidence.
 
 ## Results
 
-Pending. Local regression tests and real-engine validation artifacts are recorded
-under `analysis/dlora-20261015`; final tables must identify complete versus failed
-or interrupted runs explicitly.
+Pool and live-RL comparisons are pending. The inference/deployment regression
+suite passed 303 tests with one skipped. Real-engine checks on both one H200
+(TP1) and two H100s (TP2) passed exact greedy-output and input-logprob restoration,
+automatic specialization for 36 requests, and restoration before another adapter.
+
+For 36 requests, 225 input tokens and 256 forced output tokens, warm H200 trials
+took 6.97–7.14 seconds unmerged and 5.56–5.57 seconds merged. TP2 H100 trials took
+5.21–5.32 seconds unmerged and 4.39–4.49 seconds merged. The initial unmerged trial
+was slower on both configurations and is retained in the calibration artifacts.
+First-use merge costs were 26.7 seconds on the H200 and 6.22 seconds on TP2 H100;
+warm merge/restore costs were approximately 0.93/0.69 and 0.55/0.43 seconds,
+respectively. These are microbenchmarks, not pool-level or RL improvements.
+
+Every replay arm receives common full-batch unmerged/merged warmup and cache reset
+before measurement. The service profiles describe that warmed regime. A cold
+production replica cannot assume the warm transition cost on its first merge;
+the profile's `initial_merge_seconds` charges the measured first-use cost until
+one merge succeeds. Calibration emits this separate value. Evaluation's common
+preparation pays that cost before measurement, identically in every arm.
+The measured pool images precede the optional first-use guard; their source
+hashes and engine commit are recorded in `deployed-source-hashes.json`. The guard
+has a separate regression test. Warm comparisons do not validate its cold-start
+behavior on a production pool.
+
+The live comparison runs two optimizer updates per client with one prefetched
+rollout. Both measured rollouts may therefore use the initial policy. It tests
+real sampling, filtering, gradients, optimizer steps, and publication, but does
+not establish updated-policy sampling. The replay experiments separately test
+new exact versions. These are distinct claims.
+
+Artifacts are recorded under `analysis/dlora-20261015`. The earlier eight-H200
+attempt with retained pre-update replicas is excluded. Later H200 pool attempts
+could not obtain the complete allocation. The replay study uses four TP2 H100
+replicas (eight GPUs); live RL uses four TP1 H200 replicas and a four-H100 TP4
+trainer. Initial live setup failures from environment JSON escaping and selection
+of an incompatible initial checkpoint set are preserved, followed by a corrected
+run using the four-GPU checkpoint set. Final tables must identify complete,
+failed, and interrupted runs explicitly.

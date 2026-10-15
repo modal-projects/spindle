@@ -41,6 +41,10 @@ def main():
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--region", choices=["us-west", "us-east"], default="us-west")
+    parser.add_argument("--gpu", choices=["H100", "H200"], default="H200")
+    parser.add_argument("--tensor-parallel", type=int, choices=[1, 2], default=1)
+    parser.add_argument("--memory-mib", type=int, default=131072)
+    parser.add_argument("--cpu", type=int, default=8)
     args = parser.parse_args()
     assert 1 <= args.replicas <= 8
     args.root.mkdir(parents=True, exist_ok=True)
@@ -49,7 +53,14 @@ def main():
         name=f"cache27-dlora-{args.run}",
         inference_min_replicas=args.replicas,
         inference_max_replicas=args.replicas,
-        overrides={"platform.modal.region": args.region},
+        inference_gpu=args.gpu,
+        inference_gpus_per_node=args.tensor_parallel,
+        inference_cpu=args.cpu,
+        inference_memory_mib=args.memory_mib,
+        overrides={
+            "platform.modal.region": args.region,
+            "sglang_cfg.tp_size": args.tensor_parallel,
+        },
         inference_env={
             "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
             "SGLANG_SPINDLE_MERGE_PROFILE": json.dumps(profile),
