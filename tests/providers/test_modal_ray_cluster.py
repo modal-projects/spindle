@@ -56,3 +56,27 @@ def test_start_trainer_cluster_runs_asset_hooks_in_order(monkeypatch) -> None:
         "start_worker",
         "idle",
     ]
+
+
+def test_cluster_interface_follows_the_node_address(monkeypatch) -> None:
+    import socket
+    import sys
+    import types
+
+    psutil = types.ModuleType("psutil")
+
+    def entry(family, address):
+        return types.SimpleNamespace(family=family, address=address)
+
+    psutil.net_if_addrs = lambda: {
+        "eth0": [entry(socket.AF_INET, "172.20.5.133")],
+        "overlay0": [
+            entry(socket.AF_INET6, "fe80::1"),
+            entry(socket.AF_INET, "10.100.0.2"),
+        ],
+    }
+    monkeypatch.setitem(sys.modules, "psutil", psutil)
+    assert ray_cluster.cluster_interface("10.100.0.2") == "overlay0"
+    assert ray_cluster.cluster_interface("10.1.1.1") == "eth0"
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert ray_cluster.cluster_interface("10.100.0.2") == "eth0"

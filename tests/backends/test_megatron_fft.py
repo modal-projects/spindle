@@ -278,7 +278,7 @@ def test_write_fft_checkpoint_includes_hf_weights(tmp_path, monkeypatch) -> None
 def test_fft_backend_captures_and_persists_checkpoint(tmp_path, monkeypatch) -> None:
     backend = backend_state("run-a")
     backend.checkpoint_dir = tmp_path
-    backend.bridge = "bridge"
+    backend.bridge = SimpleNamespace(export_hf_weights=lambda model, **kwargs: iter(()))
     backend.config = EngineModelConfig(hf_checkpoint="/base-checkpoint")
     backend.model = "model"
     backend.optimizer = "optimizer"
@@ -808,7 +808,7 @@ def test_full_backend_publishes_initial_policy_as_root_delta(
     tmp_path, monkeypatch
 ) -> None:
     backend = backend_state("run-a")
-    backend.bridge = "bridge"
+    backend.bridge = SimpleNamespace(export_hf_weights=lambda model, **kwargs: iter(()))
     backend.model = "model"
     publications = []
     backend._delta_writer = SimpleNamespace(
@@ -832,7 +832,7 @@ def test_full_backend_publishes_initial_policy_as_root_delta(
 def test_full_backend_publishes_after_loading_an_older_step(monkeypatch) -> None:
     backend = backend_state("run-a")
     backend.optimizer_step = 4
-    backend.bridge = "bridge"
+    backend.bridge = SimpleNamespace(export_hf_weights=lambda model, **kwargs: iter(()))
     backend.model = "model"
     captures = []
 
