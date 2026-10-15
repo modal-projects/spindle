@@ -34,7 +34,7 @@ class Config(BaseConfig):
             "dsv4_impl": "miles",
             "model_name": "deepseekv41",
             "qkv_format": "bshd",
-            "attention_backend": "dsv4",
+            "attention_backend": "auto",
             "moe_router_freeze_gate": True,
             "freeze_e_score_correction_bias": True,
             "recompute_granularity": "full",
