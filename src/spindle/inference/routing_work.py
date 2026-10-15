@@ -188,6 +188,8 @@ class WorkRouter(LoraRouter):
                 requested_decode_tokens=output_tokens,
             )
         candidates = self.placement_candidates(model, adapter, candidates, count)
+        if not candidates:
+            return None
         chosen = min(candidates, key=lambda h: candidates[h]["score"])
         # Retain locality only inside a narrow numerical tie. No arbitrary
         # target-concurrency allowance or multiplicative affinity bonus.

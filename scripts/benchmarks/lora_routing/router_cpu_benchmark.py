@@ -12,6 +12,7 @@ import numpy as np
 from spindle.inference.lora_routing import Replica
 from spindle.inference.routing_domains import DomainRouter
 from spindle.inference.routing_capacity import CapacityRouter
+from spindle.inference.routing_dlora import DloraRouter
 from spindle.inference.routing_simple import SIMPLE_POLICIES, SimpleRouter
 from spindle.inference.routing_work import WorkRates, WorkRouter, token_prefixes
 
@@ -28,6 +29,8 @@ def make_router(policy, tie_seed=None):
         return SimpleRouter(empty, policy=policy, **options)
     if policy == "capacity-random":
         return CapacityRouter(empty, tie_seed=tie_seed or "cpu-benchmark", **options)
+    if policy == "dlora":
+        return DloraRouter(empty, **options)
     return (CapacityRouter if policy == "capacity" else WorkRouter)(empty, **options)
 
 
@@ -105,6 +108,7 @@ def run():
             "stable",
             "capacity",
             "capacity-random",
+            "dlora",
             *SIMPLE_POLICIES,
         ],
     )
@@ -116,6 +120,7 @@ def run():
             "stable",
             "capacity",
             "capacity-random",
+            "dlora",
             *SIMPLE_POLICIES,
         ],
     )

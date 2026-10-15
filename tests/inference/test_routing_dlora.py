@@ -47,13 +47,71 @@ def test_wait_for_warm_prefix_until_queue_delay_exceeds_rebuild():
 
 def test_busy_merged_replica_does_not_accept_another_version_when_mixed_worker_exists():
     pool = router(
-        merged=dict(mode=dict(merged_adapter="a/v1", running=4)),
+        merged=dict(
+            decode_tokens=400,
+            adapter_decode_maxima={"a/v1": 100},
+            mode=dict(
+                merged_adapter="a/v1",
+                running=4,
+                profile=dict(
+                    merged_token_seconds=0.03,
+                    unmerge_seconds=0.5,
+                ),
+            ),
+        ),
         mixed=dict(decode_tokens=1),
     )
     assert choose(pool, adapter="a/v2") == "mixed"
     del pool.replicas["mixed"]
     # New versions remain serviceable even when all engines are specialized.
     assert choose(pool, ident="new", adapter="a/v2") == "merged"
+
+
+def test_overloaded_mixed_engine_does_not_strand_demand_behind_specialization():
+    pool = router(
+        specialized=dict(
+            decode_tokens=400,
+            adapter_decode_maxima={"a/v1": 100},
+            mode=dict(
+                merged_adapter="a/v1",
+                running=4,
+                profile=dict(
+                    merged_token_seconds=0.03,
+                    unmerge_seconds=0.5,
+                ),
+            ),
+        ),
+        mixed=dict(decode_tokens=2000),
+    )
+    # Three seconds to drain + restoration beats twenty seconds of mixed work.
+    assert choose(pool, adapter="a/v2") == "specialized"
+
+
+def test_failed_and_transitioning_engines_are_not_selected_as_fallbacks():
+    pool = router(
+        failed=dict(mode=dict(failed="uncertain merge")),
+        transitioning=dict(mode=dict(transitioning=True)),
+    )
+    assert choose(pool) is None
+    assert not pool.host_reservations
+
+
+def test_partial_merged_batch_pays_drain_latency_before_switching():
+    pool = router(
+        specialized=dict(
+            decode_tokens=100,
+            adapter_decode_maxima={"a/v1": 100},
+            mode=dict(
+                merged_adapter="a/v1",
+                running=1,
+                profile=dict(merged_token_seconds=0.1, unmerge_seconds=0.5),
+            ),
+        ),
+        mixed=dict(decode_tokens=500),
+    )
+    # Aggregate full-batch throughput says one second; this request actually
+    # blocks restoration for ten seconds. Five seconds of mixed work is better.
+    assert choose(pool, adapter="a/v2") == "mixed"
 
 
 def test_local_reservations_expand_hot_adapter_without_permanent_home():

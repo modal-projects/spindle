@@ -57,10 +57,15 @@ approximate service model, not an optimal completion-time estimator.
 
 A bounded group route expires when its observed plus locally reserved demand
 reaches engine capacity. Subsequent groups can use any replica; there is no
-permanent adapter home or fixed replication factor. A busy replica merged with
-another adapter is excluded while compatible destinations exist. If every
-replica is specialized, new versions remain eligible: the selected owner drains
-and restores before serving them. Idle specialization is reclaimable.
+permanent adapter home or fixed replication factor. A replica merged with another
+adapter remains eligible. Its backlog estimate is lower-bounded by the longest
+observed remaining decode in that merged cohort, multiplied by the measured
+merged token time, and it pays restoration time. The selected owner drains and
+restores before serving the new adapter. This lets mixed demand reclaim a busy
+specialized engine when that beats waiting behind an overloaded mixed engine.
+The initial implementation excluded such engines while any mixed destination
+existed. An early live RL trial exposed stranded demand, so that rule was removed
+before restarting the measured comparison from the same initial checkpoints.
 
 Waiting for a warm prefix remains a valid choice. There is no rule that an idle
 cold replica always wins. Prefix observations are discarded after transitions;
@@ -109,7 +114,7 @@ Resource monitors stop only task-owned apps and preserve allocation evidence.
 ## Results
 
 Pool and live-RL comparisons are pending. The inference/deployment regression
-suite passed 303 tests with one skipped. Real-engine checks on both one H200
+suite passed 303 tests with one skipped before the reclaim correction. Real-engine checks on both one H200
 (TP1) and two H100s (TP2) passed exact greedy-output and input-logprob restoration,
 automatic specialization for 36 requests, and restoration before another adapter.
 

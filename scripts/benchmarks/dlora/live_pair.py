@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--run", required=True)
+    parser.add_argument("--start-arm", choices=["kv", "dlora"], default="kv")
     args = parser.parse_args()
     root = args.root
     study = root.parent
@@ -40,24 +41,31 @@ def main():
     try:
         # Start trainer initialization while the independent inference warmup
         # runs. This model only holds the trainer until the first measured client.
-        service = tinker.ServiceClient(base_url=endpoint["base_url"])
-        trainer = service.create_lora_training_client(
-            config["model"],
-            rank=config["rank"],
-            train_attn=True,
-            train_mlp=True,
-            train_unembed=False,
-        )
-        initialization_model = trainer.model_id
-        (root / "initialization-model.json").write_text(
-            json.dumps(initialization_model)
-        )
+        initialization_model = None
+        if args.start_arm == "kv":
+            service = tinker.ServiceClient(base_url=endpoint["base_url"])
+            trainer = service.create_lora_training_client(
+                config["model"],
+                rank=config["rank"],
+                train_attn=True,
+                train_mlp=True,
+                train_unembed=False,
+            )
+            initialization_model = trainer.model_id
+            (root / "initialization-model.json").write_text(
+                json.dumps(initialization_model)
+            )
+        else:
+            assert (
+                json.loads((root / "kv/status.json").read_text())["state"]
+                == "completed"
+            )
         deadline = time.monotonic() + 900
         while not (root / "prepare-kv.json").exists():
             if time.monotonic() >= deadline:
                 raise TimeoutError("Inference preparation did not complete")
             time.sleep(5)
-        for arm in ["kv", "dlora"]:
+        for arm in ["kv", "dlora"] if args.start_arm == "kv" else ["dlora"]:
             if arm == "dlora":
                 run(
                     [

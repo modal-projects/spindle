@@ -24,12 +24,20 @@ class DloraRouter(WorkRouter):
             if mode.get("failed") or mode.get("transitioning"):
                 continue
             merged = mode.get("merged_adapter")
-            # Avoid forcing a busy specialized engine through a drain and two
-            # cache flushes when another engine can serve the adapter directly.
-            if merged is not None and merged != adapter and mode.get("running", 0):
-                continue
             profile = mode.get("profile")
             if merged is not None and merged != adapter and profile:
+                # A specialized engine is reclaimable even while busy. A hard
+                # exclusion strands all other adapters on the last mixed
+                # engine, regardless of its queue. Account for the drain barrier
+                # in seconds and let the ordinary completion comparison decide.
+                work = self.replicas[host].work
+                remaining = work.get("adapter_decode_maxima", {}).get(
+                    merged, work["decode_tokens"]
+                )
+                drain = remaining * profile["merged_token_seconds"]
+                candidate["drain_seconds"] = drain
+                candidate["score"] += max(0, drain - candidate["backlog_seconds"])
+                candidate["backlog_seconds"] = max(drain, candidate["backlog_seconds"])
                 candidate["unmerge_seconds"] = profile["unmerge_seconds"]
                 candidate["score"] += profile["unmerge_seconds"]
             if merged == adapter and profile:
@@ -55,6 +63,5 @@ class DloraRouter(WorkRouter):
                 candidate["score"] -= saving
                 candidate["merged_decode_saving_seconds"] = saving
             eligible[host] = candidate
-        # All-specialized pools must still serve new versions/cold adapters.
-        # The owning sidecar will drain and unmerge before admitting that work.
-        return eligible or candidates
+        # The owner drains and restores before executing incompatible work.
+        return eligible
