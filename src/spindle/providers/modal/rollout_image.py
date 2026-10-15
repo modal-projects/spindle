@@ -9,7 +9,6 @@ from .image_dependencies import (
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-SGLANG_BRANCH = "codex/csgmv-split-k"
 SGLANG_REVISION = "a270ed4ed5bf9379ebae8859da3fe3e374e637f4"
 
 image = (
@@ -18,8 +17,9 @@ image = (
     .apt_install("git")
     .run_commands(
         "rm -rf /tmp/spindle-sglang-overlay"
-        f" && git clone --filter=blob:none --single-branch --branch {SGLANG_BRANCH}"
-        f" {SGLANG_REPOSITORY} /tmp/spindle-sglang-overlay"
+        " && git init /tmp/spindle-sglang-overlay"
+        f" && git -C /tmp/spindle-sglang-overlay remote add origin {SGLANG_REPOSITORY}"
+        f" && git -C /tmp/spindle-sglang-overlay fetch --depth=1 origin {SGLANG_REVISION}"
         f" && git -C /tmp/spindle-sglang-overlay checkout --detach {SGLANG_REVISION}",
         "cp -a /tmp/spindle-sglang-overlay/python/. /sgl-workspace/sglang/python/"
         " && rm -rf /tmp/spindle-sglang-overlay",
