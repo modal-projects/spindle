@@ -8,8 +8,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Spindle does not cap the Tinker SDK, so the newest release runs as a
-    # canary: a failure there flags protocol drift without blocking merges.
+    # Run the newest Tinker SDK release as a canary that flags protocol drift
+    # without blocking merges, because Spindle does not cap the SDK version.
     continue-on-error: ${{ matrix.tinker == 'latest' }}
     strategy:
       fail-fast: false

@@ -428,9 +428,9 @@ def create_control_plane_app(
         if body.cache_affinity_key is None:
             request.pop("cache_affinity_key")
         request_id = await control_plane.submit_sample(request)
-        # Tinker SDK >= 0.26 stamps these onto SampledSequence.sequence_id and
-        # requires one per sample. They derive from the idempotent request id,
-        # so a resubmitted sample gets the same ids.
+        # Return one sequence id per sample, derived from the idempotent request
+        # id so a resubmitted sample gets the same ids. Tinker SDK 0.26 and
+        # later require them.
         num_samples = request.get("num_samples", 1)
         if isinstance(num_samples, bool) or not isinstance(num_samples, int):
             num_samples = 1

@@ -139,8 +139,8 @@ def sample_with_replay(
         estimated_bytes = client.holder.estimate_bytes_count_in_model_input(prompt)
         async with client.holder.sample_dispatch_rate_limit(estimated_bytes):
             with client.holder.aclient(ClientConnectionPoolType.SAMPLE) as api:
-                # Post directly: Tinker SDK >= 0.26 dropped extra_body from
-                # the resource methods, and the replay flags are Spindle-only.
+                # Post the sample request directly because Tinker SDK 0.26
+                # removed extra_body, which used to carry the replay flags.
                 future = await api.post(
                     "/api/v1/asample",
                     body={

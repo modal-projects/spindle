@@ -81,7 +81,8 @@ async def sample_task(
         raise ValueError("num_samples must be positive")
     if topk_prompt_logprobs < 0:
         raise ValueError("topk_prompt_logprobs must be non-negative")
-    # Newer Tinker SDKs send these with inert defaults on every request.
+    # Reject sampling options Spindle does not implement. Newer Tinker SDKs
+    # send them on every request, so only non-default values are rejected.
     for key in (
         "topk_sample_logprobs",
         "target_prompt_logprobs",

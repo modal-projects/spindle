@@ -27,8 +27,8 @@ def _create_full_training_client_submit(
             user_metadata=user_metadata,
         )
         with service.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
-            # Post directly: Tinker SDK >= 0.26 dropped extra_body from the
-            # resource methods, and these fields are Spindle extensions.
+            # Post the create request directly because Tinker SDK 0.26 removed
+            # extra_body, which used to carry these Spindle-only fields.
             future = await client.post(
                 "/api/v1/create_model",
                 body={
