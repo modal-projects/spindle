@@ -61,6 +61,7 @@ def builders(monkeypatch):
     [
         ("qwen35-9b-lora-16k", "miles_lora", 6, 1),
         ("qwen35-4b-fft-64k", "megatron_fft", 1, 4),
+        ("qwen35-4b-miles-fft-64k", "miles_full", 1, 1),
     ],
 )
 def test_trainer_declaration_and_executor_configuration(
