@@ -76,7 +76,7 @@ Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/
 
 ### Disk, asset conversion and weight staging
 
-`trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers; models that stream optimizer state or stage weights on local NVMe set them. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Full-parameter samplers stage weight updates in host memory by default; `sglang_cfg` may set `weight_update_staging = "disk"` together with `weight_update_local_checkpoint_dir` to keep the canonical checkpoint on local disk instead, at the cost of a native weight reload per publication.
+`trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers; models that stream optimizer state or stage weights on local NVMe set them. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Full-parameter samplers stage weight updates in host memory by default; `sglang_cfg` may set `weight_update_staging = "disk"` together with `weight_update_local_checkpoint_dir` to keep the canonical checkpoint on local disk instead, at the cost of a native weight reload per publication. See [deepseek_v41_flash_fft_8k.py](../src/spindle/configs/deepseek_v41_flash_fft_8k.py) for a recipe that uses all three.
 
 ## Prepare and launch
 
