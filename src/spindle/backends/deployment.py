@@ -54,7 +54,6 @@ SGLANG_MANAGED = {
     "enable_lora",
     "max_lora_rank",
     "lora_target_modules",
-    "weight_update_staging",
     "weight_version",
     "api_key",
     "pp_size",
@@ -100,18 +99,23 @@ def backend_config(spec, asset_path="/assets/pending"):
         return {"megatron": asdict(config), "checkpoint_dir": "/checkpoints"}
     if spec.backend != "miles":
         raise ValueError(f"unknown backend: {spec.backend}")
-    if spec.parameterization != "lora":
-        raise ValueError("Miles requires lora parameterization")
     settings = spec.miles_cfg
     reject_managed_options(
         settings,
-        {"hf_checkpoint", "actor_num_gpus_per_node", "actor_num_nodes", "extra_args"},
+        {
+            "hf_checkpoint",
+            "actor_num_gpus_per_node",
+            "actor_num_nodes",
+            "extra_args",
+            "parameterization",
+        },
     )
     reject_managed_options(settings.get("cli_options", {}), MILES_MANAGED)
     config = MilesBackendConfig(
         hf_checkpoint=asset_path,
         actor_num_gpus_per_node=spec.trainer_gpus_per_node,
         actor_num_nodes=spec.trainer_nodes,
+        parameterization=spec.parameterization,
         extra_args=("--seq-length", str(spec.max_context_length)),
         **settings,
     )
@@ -120,7 +124,14 @@ def backend_config(spec, asset_path="/assets/pending"):
         config.expert_model_parallel_size * config.expert_tensor_parallel_size
     ):
         raise ValueError("expert parallel sizes must divide the trainer GPU allocation")
-    if spec.trainer_max_clients_per_instance > config.max_lora_slots:
+    if config.full:
+        if spec.trainer_max_clients_per_instance != 1:
+            raise ValueError("FFT trainers admit one client per instance")
+        if spec.sampler_persistence_concurrency != 1:
+            raise ValueError(
+                "full parameterization requires sampler_persistence_concurrency: 1"
+            )
+    elif spec.trainer_max_clients_per_instance > config.max_lora_slots:
         raise ValueError("max_clients_per_instance exceeds max_lora_slots")
     return {"miles": asdict(config), "checkpoint_dir": "/checkpoints"}
 
@@ -131,6 +142,17 @@ def serving_options(spec):
     tp = options.get("tp_size", spec.inference_gpus_per_node)
     if tp != spec.inference_gpus_per_node:
         raise ValueError("sglang.tp_size must equal the replica GPU allocation")
+    staging = {key for key in options if key.startswith("weight_update_")}
+    if spec.parameterization == "lora" and staging:
+        raise ValueError("weight update staging applies to full parameterization only")
+    mode = options.get("weight_update_staging", "cpu")
+    if mode not in ("cpu", "disk"):
+        raise ValueError("sglang.weight_update_staging must be cpu or disk")
+    if mode == "disk" and not options.get("weight_update_local_checkpoint_dir"):
+        raise ValueError(
+            "sglang.weight_update_staging: disk requires "
+            "sglang.weight_update_local_checkpoint_dir"
+        )
     return options
 
 
@@ -154,5 +176,6 @@ def resolve_backend_settings(spec, asset_path):
         inference.setdefault("max_loaded_loras", 64)
         inference.setdefault("max_loras_per_batch", 8)
     else:
-        inference.update(weight_update_staging="cpu", weight_version="0")
+        inference.setdefault("weight_update_staging", "cpu")
+        inference["weight_version"] = "0"
     return trainer, inference

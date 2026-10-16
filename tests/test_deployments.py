@@ -11,6 +11,7 @@ import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
 from spindle.backends.megatron_config import parse_backend_config
+from spindle.backends.miles_config import MilesBackendConfig
 from spindle.backends.miles_arguments import (
     apply_config_overrides,
     defer_config_overrides,
@@ -87,7 +88,20 @@ def test_no_model_catalog_required():
         ),
         ({"sglang_cfg": {"model_path": "other"}}, "managed"),
         ({"sglang_cfg": {"tp_size": 2}}, "replica GPU"),
+        ({"sglang_cfg": {"weight_update_staging": "disk"}}, "full parameterization"),
         ({"trainer_max_clients_per_instance": 7}, "max_lora_slots"),
+        (
+            {"parameterization": "full", "miles_cfg__parameterization": "full"},
+            "managed",
+        ),
+        (
+            {"parameterization": "full", "trainer_max_clients_per_instance": 2},
+            "one client",
+        ),
+        (
+            {"parameterization": "full", "trainer_max_clients_per_instance": 1},
+            "sampler_persistence_concurrency",
+        ),
     ],
 )
 def test_invalid_integrations_fail_when_building_backend_settings(changes, match):
@@ -95,6 +109,31 @@ def test_invalid_integrations_fail_when_building_backend_settings(changes, match
     with pytest.raises(ValueError, match=match):
         backend_config(spec)
         serving_options(spec)
+
+
+def test_full_parameterization_on_miles_drops_lora_options():
+    row = resolved(preset="qwen35-4b-miles-fft-64k")
+    miles = row.trainer_settings["miles"]
+    assert miles["parameterization"] == "full"
+    arguments = MilesBackendConfig(**miles).miles_arguments()
+    assert "--multi-lora-n-adapters" not in arguments
+    assert row.inference_settings["weight_update_staging"] == "cpu"
+    assert "enable_lora" not in row.inference_settings
+
+
+def test_full_sampler_can_stage_weights_on_disk():
+    base = vars(load(config_path("qwen35-4b-miles-fft-64k")))
+    base["sglang_cfg"] = {**base["sglang_cfg"], "weight_update_staging": "disk"}
+    with pytest.raises(ValueError, match="local_checkpoint_dir"):
+        resolved(BaseConfig(**base))
+    base["sglang_cfg"]["weight_update_local_checkpoint_dir"] = "/scratch/canonical"
+    base["sglang_cfg"].pop("weight_update_max_compile_group_gb")
+    settings = resolved(BaseConfig(**base)).inference_settings
+    assert settings["weight_update_staging"] == "disk"
+    assert settings["weight_update_local_checkpoint_dir"] == "/scratch/canonical"
+    base["sglang_cfg"]["weight_update_staging"] = "nvme"
+    with pytest.raises(ValueError, match="cpu or disk"):
+        resolved(BaseConfig(**base))
 
 
 def test_asset_paths_follow_the_model():

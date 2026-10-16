@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import struct
 import time
 from collections import deque
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import modal
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -19,14 +18,15 @@ import xxhash
 import zstandard
 from safetensors import safe_open
 from safetensors.numpy import save
-from stitch.publish import publish_version as stitch_publish_version
 from stitch.types import VersionKind, VersionManifest, VersionRef
 
-from spindle.inference.fft_bulletin import (
-    FFTSnapshotBulletin,
-    FFTSnapshotStore,
+from spindle.backends.fft_publication import (
+    bulletin_board,
+    discard_staged,
+    publish_staged,
+    write_staged_index,
 )
-from spindle.providers.modal.scoped_pool import publication_pool
+from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 _INDEX = "model.safetensors.index.json"
 _MAX_SHARD_BYTES = 512 << 20
@@ -55,21 +55,29 @@ class _PrefetchedChunk:
     current: Any
     previous: Any
     snapshot: Any
+    staging: Any
     ready: Any
 
 
 class FFTDeltaWriter:
-    """Encode bridge-exported weights against the last published snapshot.
+    """Encode exported weights against the last published snapshot.
 
-    Rank zero keeps the previous Hugging Face weights in pinned CPU memory.
-    Each capture moves those bytes to the GPU, finds changed bytes there, and
-    copies only the sparse delta back for compression and persistence.
+    A writer rank keeps the previous Hugging Face weights of the tensors it
+    exports in CPU memory, materializing each one from the base checkpoint and
+    the published deltas the first time it is seen. Each capture moves those
+    bytes to the GPU, finds changed bytes there, and copies only the sparse
+    delta back for compression and persistence. ``writer`` selects the ranks
+    that encode; by default only rank zero does. ``shard_prefix`` keeps the
+    files of several writers apart in one staging directory.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, writer: bool | None = None, shard_prefix: str = "") -> None:
         self._parent: VersionRef | None = None
         self._snapshot: dict[str, Any] = {}
+        self._source: _ParentSource | None = None
         self._encoder = None
+        self._writer = writer
+        self._shard_prefix = shard_prefix
 
     def is_aligned_with(self, ref: VersionRef) -> bool:
         return self._parent == ref
@@ -77,33 +85,30 @@ class FFTDeltaWriter:
     def capture(
         self,
         *,
-        bridge,
-        model,
+        weights: Iterable[tuple[str, Any]],
         model_id: str,
         publish_version: int,
         optimizer_step: int,
         base_model: str,
         hf_checkpoint: str,
         bulletin_root: str,
+        definition_revision: str | None = None,
     ) -> FFTCapturedDelta:
+        """Encode ``weights``, a collective stream of Hugging Face named
+        tensors that every rank drives in lockstep and only writers read."""
         ref = VersionRef(model_id, publish_version)
         parent = VersionRef(model_id, publish_version - 1)
         board = FFTSnapshotBulletin(bulletin_root)
-        writer = dist.get_rank() == 0
+        writer = self._writer if self._writer is not None else dist.get_rank() == 0
         setup_error: Exception | None = None
-        # All ranks must agree that the parent loaded before the bridge export,
+        # All ranks must agree that the parent resolved before the export,
         # which may itself use collectives.
         if writer:
             try:
                 if self._parent != parent:
-                    if parent.version == 0:
-                        self._load_base(Path(hf_checkpoint), parent)
-                    else:
-                        self._load_parent(
-                            board,
-                            parent,
-                            base_checkpoint=Path(hf_checkpoint),
-                        )
+                    self._source = _ParentSource(Path(hf_checkpoint), board, parent)
+                    self._snapshot = {}
+                    self._parent = parent
             except Exception as exc:  # noqa: BLE001 - broadcast setup errors
                 setup_error = exc
         failed = torch.tensor(
@@ -111,11 +116,11 @@ class FFTDeltaWriter:
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
-        dist.broadcast(failed, src=0)
+        dist.all_reduce(failed, op=dist.ReduceOp.MAX)
         if failed.item():
             if setup_error is not None:
                 raise setup_error
-            raise RuntimeError("delta writer setup failed on rank 0")
+            raise RuntimeError("delta writer setup failed on a writer rank")
 
         seen: set[str] = set()
         encoded: list[tuple[str, np.ndarray, str] | None] = []
@@ -142,18 +147,12 @@ class FFTDeltaWriter:
 
         pool = ThreadPoolExecutor(max_workers=workers)
         try:
-            for exported in bridge.export_hf_weights(
-                model,
-                cpu=False,
-                show_progress=False,
-                merge_adapter_weights=True,
-            ):
-                name, tensor = exported.param_name, exported.weight
+            for name, tensor in weights:
                 if not writer:
                     continue
                 seen.add(name)
                 tensor = tensor.detach().contiguous()
-                previous = self._snapshot[name]
+                previous = self._previous(name)
                 copied_bytes += int(previous.numel() * previous.element_size())
 
                 next_prefetched = encoder.prefetch(name, tensor, previous)
@@ -180,15 +179,17 @@ class FFTDeltaWriter:
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
 
+        if self._source is not None:
+            self._source.close()
+            self._source = None
         missing = self._snapshot.keys() - seen
-        extra = seen - self._snapshot.keys()
-        if missing or extra:
+        if missing:
             raise ValueError(
                 "HF tensor set changed while writing delta: "
-                f"missing={sorted(missing)[:20]} extra={sorted(extra)[:20]}"
+                f"missing={sorted(missing)[:20]}"
             )
 
-        shards, weight_map = _pack_shards(encoded)
+        shards, weight_map = _pack_shards(encoded, prefix=self._shard_prefix)
 
         metadata = {
             "version": ref.version,
@@ -199,7 +200,7 @@ class FFTDeltaWriter:
             "base_model": base_model,
             "optimizer_step": optimizer_step,
             "parameterization": "full",
-            "definition_revision": os.environ.get("SPINDLE_DEFINITION_REVISION"),
+            "definition_revision": definition_revision,
         }
         self._parent = ref
         elapsed = time.perf_counter() - started
@@ -228,83 +229,71 @@ class FFTDeltaWriter:
     ) -> None:
         if dist.get_rank() != 0:
             return
-        board = FFTSnapshotBulletin(
-            bulletin_root,
-            commit=modal.Volume.from_name(
-                bulletin_volume,
-                version=2,
-            ).commit,
-        )
-        staging = board.staging_dir(snapshot.ref)
+        board = bulletin_board(bulletin_root, bulletin_volume)
         try:
-            staging.mkdir(parents=True, exist_ok=True)
-            for shard in snapshot.shards:
-                blob = save(shard.tensors, metadata=shard.checksums)
-                (staging / shard.filename).write_bytes(blob)
-            (staging / _INDEX).write_text(
-                json.dumps(
-                    {
-                        "metadata": snapshot.metadata,
-                        "weight_map": snapshot.weight_map,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
-            board.prepare(snapshot.ref, staging, metadata=snapshot.metadata)
-            pool = publication_pool(
-                os.environ["SPINDLE_DEFINITION_ID"],
-                snapshot.ref.run_id,
-            )
-            stitch_publish_version(
-                FFTSnapshotStore(board, snapshot.ref.run_id),
-                pool,
-                str(staging),
-                run_id=snapshot.ref.run_id,
-            )
+            self.stage(snapshot, board)
+            publish_staged(board, ref=snapshot.ref, metadata=snapshot.metadata)
         except BaseException:
-            current = board.read_latest(snapshot.ref.run_id)
-            if current is None or current == snapshot.parent:
-                shutil.rmtree(board.snapshot_dir(snapshot.ref), ignore_errors=True)
-            shutil.rmtree(board.staging_dir(snapshot.ref), ignore_errors=True)
+            discard_staged(board, ref=snapshot.ref, parent=snapshot.parent)
             raise
 
-    def _load_base(self, source: Path, parent: VersionRef) -> None:
+    def stage(self, snapshot: FFTCapturedDelta, board: FFTSnapshotBulletin) -> Path:
+        """Write the delta's files and index into the bulletin's staging
+        directory."""
+        staging = self.stage_shards(snapshot, board)
+        write_staged_index(
+            board,
+            ref=snapshot.ref,
+            metadata=snapshot.metadata,
+            weight_map=snapshot.weight_map,
+        )
+        return staging
+
+    def stage_shards(
+        self, snapshot: FFTCapturedDelta, board: FFTSnapshotBulletin
+    ) -> Path:
+        """Write the delta's shard files into the bulletin's staging directory;
+        the index is written once the shards of every writer are there."""
+        staging = board.staging_dir(snapshot.ref)
+        staging.mkdir(parents=True, exist_ok=True)
+        for shard in snapshot.shards:
+            blob = save(shard.tensors, metadata=shard.checksums)
+            (staging / shard.filename).write_bytes(blob)
+        return staging
+
+    def _previous(self, name: str):
+        previous = self._snapshot.get(name)
+        if previous is not None:
+            return previous
+        if self._source is None:
+            raise ValueError(
+                f"HF tensor set changed while writing delta: unexpected {name!r}"
+            )
+        return self._source.read(name)
+
+
+class _ParentSource:
+    """Tensors of a published version, read one name at a time from the base
+    checkpoint and the deltas published since."""
+
+    def __init__(
+        self, base_checkpoint: Path, board: FFTSnapshotBulletin, parent: VersionRef
+    ) -> None:
+        self._files: dict[str, Path] = {}
+        self._handles: dict[Path, Any] = {}
         try:
-            index = json.loads((source / _INDEX).read_text(encoding="utf-8"))
+            index = json.loads((base_checkpoint / _INDEX).read_text(encoding="utf-8"))
             weight_map = index["weight_map"]
         except (FileNotFoundError, KeyError, json.JSONDecodeError) as exc:
             raise ValueError(
-                f"base checkpoint has no valid weight index: {source / _INDEX}"
+                f"base checkpoint has no valid weight index: {base_checkpoint / _INDEX}"
             ) from exc
-        by_file: dict[str, list[str]] = {}
         for name, filename in weight_map.items():
-            name = str(name)
-            if not name.startswith("mtp."):
-                by_file.setdefault(str(filename), []).append(name)
-        snapshot = {}
-        for filename, names in by_file.items():
-            snapshot.update(
-                _read_tensors(
-                    source / filename,
-                    names,
-                )
-            )
-        if not snapshot:
-            raise ValueError(f"base checkpoint {source} contains no tensors")
-        self._snapshot = snapshot
-        self._parent = parent
-
-    def _load_parent(
-        self,
-        board: FFTSnapshotBulletin,
-        parent: VersionRef,
-        *,
-        base_checkpoint: Path,
-    ) -> None:
-        base = VersionRef(parent.run_id, 0)
-        self._load_base(base_checkpoint, base)
+            if not str(name).startswith("mtp."):
+                self._files[str(name)] = base_checkpoint / str(filename)
+        if not self._files:
+            raise ValueError(f"base checkpoint {base_checkpoint} contains no tensors")
+        self._deltas: list[tuple[VersionRef, Path, dict[str, str]]] = []
         for version in range(1, parent.version + 1):
             ref = VersionRef(parent.run_id, version)
             source = board.resolve(ref)
@@ -314,67 +303,72 @@ class FFTDeltaWriter:
                     f"FFT snapshot identity mismatch: expected {ref.identity}, "
                     f"got {manifest.ref.identity}"
                 )
+            index = json.loads((source / _INDEX).read_text(encoding="utf-8"))
+            weight_map = {
+                str(name): str(filename)
+                for name, filename in (index.get("weight_map") or {}).items()
+            }
             if manifest.kind is VersionKind.FULL:
-                self._load_full(source, ref)
+                if not weight_map:
+                    raise ValueError(f"FFT snapshot {ref.identity} contains no tensors")
+                self._files = {
+                    name: source / filename
+                    for name, filename in weight_map.items()
+                    if not name.startswith("mtp.")
+                }
+                self._deltas = []
             else:
-                self._apply_delta(source, ref)
+                _validate_delta_metadata(index.get("metadata") or {}, ref)
+                self._deltas.append((ref, source, weight_map))
 
-    def _load_full(self, source: Path, ref: VersionRef) -> None:
-        index = json.loads((source / _INDEX).read_text(encoding="utf-8"))
-        by_file: dict[str, list[str]] = {}
-        for name, filename in (index.get("weight_map") or {}).items():
-            name = str(name)
-            if not name.startswith("mtp."):
-                by_file.setdefault(str(filename), []).append(name)
-        snapshot = {}
-        for filename, names in by_file.items():
-            snapshot.update(
-                _read_tensors(
-                    source / filename,
-                    names,
-                )
+    def read(self, name: str):
+        base = self._files.get(name)
+        if base is None:
+            raise ValueError(
+                f"HF tensor set changed while writing delta: {name!r} is not in "
+                "the base checkpoint"
             )
-        if not snapshot:
-            raise ValueError(f"FFT snapshot {ref.identity} contains no tensors")
-        self._snapshot = snapshot
-        self._parent = ref
+        tensor = _read_tensor(base, name)
+        for ref, source, weight_map in self._deltas:
+            filename = weight_map.get(name)
+            if filename is None:
+                continue
+            delta = self._open(source / filename)
+            checksum = (delta.metadata() or {}).get(name)
+            if checksum is None:
+                raise ValueError(
+                    f"FFT delta {ref.identity} has no checksum for {name!r}"
+                )
+            _apply_sparse_overwrite(
+                tensor,
+                delta.get_tensor(name),
+                checksum=checksum,
+                identity=f"{ref.identity}:{name}",
+            )
+        return tensor
 
-    def _apply_delta(self, source: Path, ref: VersionRef) -> None:
-        index = json.loads((source / _INDEX).read_text(encoding="utf-8"))
-        metadata = index.get("metadata") or {}
-        if (
-            int(metadata.get("version", -1)) != ref.version
-            or int(metadata.get("base_version", -1)) != ref.version - 1
-            or metadata.get("delta_encoding") != "overwrite"
-            or metadata.get("compression_format") != "zstd"
-            or metadata.get("checksum_format") != "xxh3-128"
-        ):
-            raise ValueError(f"unsupported FFT delta metadata: {ref.identity}")
+    def close(self) -> None:
+        for handle in self._handles.values():
+            handle.__exit__(None, None, None)
+        self._handles.clear()
 
-        by_file: dict[str, list[str]] = {}
-        for name, filename in (index.get("weight_map") or {}).items():
-            by_file.setdefault(str(filename), []).append(str(name))
-        for filename, names in by_file.items():
-            with safe_open(source / filename, framework="numpy") as delta:
-                checksums = delta.metadata() or {}
-                for name in names:
-                    target = self._snapshot.get(name)
-                    if target is None:
-                        raise ValueError(
-                            f"FFT delta {ref.identity} contains unknown tensor {name!r}"
-                        )
-                    checksum = checksums.get(name)
-                    if checksum is None:
-                        raise ValueError(
-                            f"FFT delta {ref.identity} has no checksum for {name!r}"
-                        )
-                    _apply_sparse_overwrite(
-                        target,
-                        delta.get_tensor(name),
-                        checksum=checksum,
-                        identity=f"{ref.identity}:{name}",
-                    )
-        self._parent = ref
+    def _open(self, path: Path):
+        handle = self._handles.get(path)
+        if handle is None:
+            handle = safe_open(path, framework="numpy").__enter__()
+            self._handles[path] = handle
+        return handle
+
+
+def _validate_delta_metadata(metadata: dict[str, Any], ref: VersionRef) -> None:
+    if (
+        int(metadata.get("version", -1)) != ref.version
+        or int(metadata.get("base_version", -1)) != ref.version - 1
+        or metadata.get("delta_encoding") != "overwrite"
+        or metadata.get("compression_format") != "zstd"
+        or metadata.get("checksum_format") != "xxh3-128"
+    ):
+        raise ValueError(f"unsupported FFT delta metadata: {ref.identity}")
 
 
 class DeltaEncoder:
@@ -391,23 +385,19 @@ class DeltaEncoder:
         current,
         snapshot,
     ) -> _PrefetchedChunk:
-        if not snapshot.is_pinned():
-            pinned = self.torch.empty_like(
-                snapshot,
-                device="cpu",
-                pin_memory=True,
-            )
-            pinned.copy_(snapshot)
-            snapshot = pinned
+        # Snapshots stay pageable; a pinned staging buffer carries each tensor
+        # to and from the GPU and returns to the caching host allocator.
+        staging = self.torch.empty_like(snapshot, device="cpu", pin_memory=True)
+        staging.copy_(snapshot)
         current = current.to(dtype=snapshot.dtype).view(self.torch.uint8).reshape(-1)
-        snapshot_bytes = snapshot.view(self.torch.uint8).reshape(-1)
+        staging_bytes = staging.view(self.torch.uint8).reshape(-1)
         with self.torch.cuda.stream(self.snapshot_to_gpu_stream):
-            previous = snapshot_bytes.to(
+            previous = staging_bytes.to(
                 device=current.device,
                 non_blocking=True,
             )
             ready = self.snapshot_to_gpu_stream.record_event()
-        return _PrefetchedChunk(name, current, previous, snapshot, ready)
+        return _PrefetchedChunk(name, current, previous, snapshot, staging, ready)
 
     def encode_async(
         self,
@@ -440,8 +430,8 @@ class DeltaEncoder:
             self.result_to_cpu_stream.wait_event(compute_done)
             positions_cpu.copy_(positions, non_blocking=True)
             values_cpu.copy_(values, non_blocking=True)
-            snapshot_bytes = chunk.snapshot.view(torch.uint8).reshape(-1)
-            snapshot_bytes.copy_(chunk.current, non_blocking=True)
+            staging_bytes = chunk.staging.view(torch.uint8).reshape(-1)
+            staging_bytes.copy_(chunk.current, non_blocking=True)
             done = self.result_to_cpu_stream.record_event()
 
         positions.record_stream(self.result_to_cpu_stream)
@@ -452,7 +442,8 @@ class DeltaEncoder:
             done,
             positions_cpu,
             values_cpu,
-            snapshot_bytes,
+            staging_bytes,
+            chunk.snapshot.view(torch.uint8).reshape(-1),
         )
 
 
@@ -460,18 +451,19 @@ def _finish_sparse_overwrite(
     done,
     positions_cpu,
     values_cpu,
+    staging,
     snapshot,
 ) -> tuple[np.ndarray | None, str | None]:
     done.synchronize()
     positions = positions_cpu.numpy()
     if not positions.size:
         return None, None
-    current = snapshot.numpy()
+    snapshot.copy_(staging)
     compressed = _compress_overwrite(
         positions,
         values_cpu.numpy(),
     )
-    return compressed, xxhash.xxh3_128(current).hexdigest()
+    return compressed, xxhash.xxh3_128(snapshot.numpy()).hexdigest()
 
 
 def _apply_sparse_overwrite(
@@ -536,6 +528,8 @@ def _compress_overwrite(
 
 def _pack_shards(
     encoded: list[tuple[str, np.ndarray, str] | None],
+    *,
+    prefix: str = "",
 ) -> tuple[tuple[CapturedDeltaShard, ...], dict[str, str]]:
     shards = []
     weight_map = {}
@@ -547,7 +541,7 @@ def _pack_shards(
         nonlocal tensors, checksums, shard_bytes
         if not tensors:
             return
-        filename = f"delta-{len(shards) + 1:05d}.safetensors"
+        filename = f"{prefix}delta-{len(shards) + 1:05d}.safetensors"
         shards.append(CapturedDeltaShard(filename, tensors, checksums))
         weight_map.update({name: filename for name in tensors})
         tensors = {}
@@ -567,9 +561,6 @@ def _pack_shards(
     return tuple(shards), weight_map
 
 
-def _read_tensors(
-    path: Path,
-    names: list[str],
-) -> dict[str, Any]:
+def _read_tensor(path: Path, name: str) -> Any:
     with safe_open(path, framework="pt", device="cpu") as shard:
-        return {name: shard.get_tensor(name).clone() for name in names}
+        return shard.get_tensor(name).clone()

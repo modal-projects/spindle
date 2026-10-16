@@ -232,15 +232,21 @@ class FFTMegatronBackend(Backend):
 
         if self._delta_writer is None:
             self._delta_writer = FFTDeltaWriter()
+        exported = self.bridge.export_hf_weights(
+            self.model,
+            cpu=False,
+            show_progress=False,
+            merge_adapter_weights=True,
+        )
         snapshot = self._delta_writer.capture(
-            bridge=self.bridge,
-            model=self.model,
+            weights=((item.param_name, item.weight) for item in exported),
             model_id=model_id,
             publish_version=publish_version,
             optimizer_step=self.optimizer_step,
             base_model=base_model,
             hf_checkpoint=self.config.hf_checkpoint,
             bulletin_root=bulletin_root,
+            definition_revision=os.environ.get("SPINDLE_DEFINITION_REVISION"),
         )
         self._sampler_captures[capture_id] = snapshot
         return SamplerPublication(

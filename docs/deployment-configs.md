@@ -70,6 +70,14 @@ Modal and backend libraries validate their own options. Spindle checks integrati
 
 Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/miles_arguments.py). SGLang receives `ServerArgs(**settings)` in its [worker entrypoint](../src/spindle/inference/sglang.py). Backend libraries validate native options when workers start; frontend config imports remain CPU-only.
 
+### Full-parameter training on Miles
+
+`backend = "miles"` with `parameterization = "full"` trains the whole model through Miles' Megatron actor; see [qwen35_4b_miles_fft_64k.py](../src/spindle/configs/qwen35_4b_miles_fft_64k.py). The recipe follows the FFT rules of the Megatron backend: one client per trainer and `sampler_persistence_concurrency = 1`. `miles_cfg` accepts `pipeline_model_parallel_size`, `megatron_to_hf_mode` (`bridge` or `raw`, the converter Miles uses to export sampler weights) and `dynamic_batch_size` (set it to `false` for attention layouts such as `bshd` that take one sequence per micro-batch) in addition to the LoRA recipes' options, and ignores the LoRA settings. Checkpoints are Miles torch_dist directories with optimizer state; sampler publications are the same sparse deltas the Megatron backend writes, so the FFT sampler pools serve either trainer. Full-parameter Miles recipes use a separate trainer image, [miles_full_image.py](../src/spindle/providers/modal/miles_full_image.py), which tracks a newer Miles release than the multi-LoRA image.
+
+### Disk, asset conversion and weight staging
+
+`trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers; models that stream optimizer state or stage weights on local NVMe set them. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Full-parameter samplers stage weight updates in host memory by default; `sglang_cfg` may set `weight_update_staging = "disk"` together with `weight_update_local_checkpoint_dir` to keep the canonical checkpoint on local disk instead, at the cost of a native weight reload per publication. See [deepseek_v41_flash_fft_8k.py](../src/spindle/configs/deepseek_v41_flash_fft_8k.py) for a recipe that uses all three.
+
 ## Prepare and launch
 
 ~~~text

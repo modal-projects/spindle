@@ -104,8 +104,24 @@ def _configure_cluster_env(topology: ClusterTopology) -> None:
     os.environ["no_proxy"] = ",".join(no_proxy)
     os.environ["NO_PROXY"] = os.environ["no_proxy"]
     os.environ.setdefault("MASTER_ADDR", topology.head_addr)
-    os.environ.setdefault("GLOO_SOCKET_IFNAME", "eth0")
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", cluster_interface(topology.node_ip))
     os.environ.update(_GCS_HEALTH_CHECK_ENV)
+
+
+def cluster_interface(node_ip: str, default: str = "eth0") -> str:
+    """The interface that carries the cluster address; Modal clusters use an
+    overlay network whose name differs between GPU generations."""
+    try:
+        import psutil
+    except ModuleNotFoundError:
+        return default
+    for name, addresses in psutil.net_if_addrs().items():
+        if any(
+            entry.family == socket.AF_INET and entry.address == node_ip
+            for entry in addresses
+        ):
+            return name
+    return default
 
 
 def _start_head(topology: ClusterTopology, *, join_timeout: float) -> None:

@@ -1,4 +1,5 @@
 import json
+import shutil
 import struct
 from types import SimpleNamespace
 from typing import NamedTuple
@@ -14,6 +15,7 @@ from stitch.types import VersionKind, VersionManifest, VersionRef
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 with backend_runtime_imports():
+    from spindle.backends import fft_publication
     from spindle.backends.megatron_runtime.fft import delta as delta_module
     from spindle.backends.megatron_runtime.fft.delta import FFTDeltaWriter
 
@@ -84,15 +86,22 @@ class FakeDeltaEncoder:
         )
 
 
+def _weights(bridge):
+    exported = bridge.export_hf_weights(
+        "model", cpu=False, show_progress=False, merge_adapter_weights=True
+    )
+    return ((item.param_name, item.weight) for item in exported)
+
+
 def use_fake_runtime(monkeypatch) -> None:
-    def read_tensors(path, names):
+    def read_tensor(path, name):
         with safe_open(path, framework="numpy") as shard:
-            return {name: Tensor(shard.get_tensor(name)) for name in names}
+            return Tensor(shard.get_tensor(name))
 
     monkeypatch.setattr(delta_module, "DeltaEncoder", FakeDeltaEncoder)
-    monkeypatch.setattr(delta_module, "_read_tensors", read_tensors)
+    monkeypatch.setattr(delta_module, "_read_tensor", read_tensor)
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "modal",
         SimpleNamespace(
             Volume=SimpleNamespace(
@@ -108,11 +117,11 @@ def use_fake_runtime(monkeypatch) -> None:
 def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> None:
     pool = object()
     published_pools = []
-    publish_version = delta_module.stitch_publish_version
+    publish_version = fft_publication.stitch_publish_version
     monkeypatch.setenv("SPINDLE_DEFINITION_ID", "full-test")
-    monkeypatch.setattr(delta_module, "publication_pool", lambda *_: pool)
+    monkeypatch.setattr(fft_publication, "publication_pool", lambda *_: pool)
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "stitch_publish_version",
         lambda store, selected, path, **kwargs: (
             published_pools.append(selected),
@@ -121,7 +130,8 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
     )
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -180,8 +190,7 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
 
     writer = FFTDeltaWriter()
     snapshot = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=1,
@@ -236,7 +245,8 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
 def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> None:
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -280,8 +290,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
 
     writer = FFTDeltaWriter()
     first = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=1,
@@ -297,8 +306,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
 
     current[:] = [4.0, 3.0]
     second = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=2,
         optimizer_step=2,
@@ -306,7 +314,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         hf_checkpoint=str(base_dir),
         bulletin_root=str(root),
     )
-    publish_version = delta_module.stitch_publish_version
+    publish_version = fft_publication.stitch_publish_version
 
     def fail_after_store(store, _pool, path, *, run_id):
         manifest = VersionManifest.from_hf_index(path, run_id=run_id)
@@ -314,7 +322,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         raise RuntimeError("publish failed")
 
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "stitch_publish_version",
         fail_after_store,
     )
@@ -327,10 +335,9 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
     assert board.read_latest("run-a") == VersionRef("run-a", 1)
     assert not board.snapshot_dir(VersionRef("run-a", 2)).exists()
 
-    monkeypatch.setattr(delta_module, "stitch_publish_version", publish_version)
+    monkeypatch.setattr(fft_publication, "stitch_publish_version", publish_version)
     retry = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=2,
         optimizer_step=2,
@@ -344,13 +351,8 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         bulletin_volume="test-bulletin",
     )
 
-    restored = FFTDeltaWriter()
-    restored._load_parent(
-        board,
-        VersionRef("run-a", 2),
-        base_checkpoint=base_dir,
-    )
-    assert restored._snapshot["model.weight"].value.tolist() == [4.0, 3.0]
+    restored = delta_module._ParentSource(base_dir, board, VersionRef("run-a", 2))
+    assert restored.read("model.weight").value.tolist() == [4.0, 3.0]
 
 
 def test_delta_writer_publishes_unchanged_base_as_version_one(
@@ -358,7 +360,8 @@ def test_delta_writer_publishes_unchanged_base_as_version_one(
 ) -> None:
     distributed = SimpleNamespace(
         get_rank=lambda: 0,
-        broadcast=lambda tensor, src: None,
+        all_reduce=lambda tensor, op: None,
+        ReduceOp=SimpleNamespace(MAX=0),
     )
     monkeypatch.setattr(
         delta_module,
@@ -398,8 +401,7 @@ def test_delta_writer_publishes_unchanged_base_as_version_one(
 
     writer = FFTDeltaWriter()
     snapshot = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=0,
@@ -455,14 +457,15 @@ def test_delta_writer_loads_bfloat16_parent_as_raw_bytes(tmp_path, monkeypatch) 
         ),
         encoding="utf-8",
     )
+    base = tmp_path / "base"
+    shutil.copytree(source, base)
     board.publish(ref, source, metadata={"optimizer_step": 1})
     monkeypatch.setattr(
         delta_module,
-        "_read_tensors",
-        lambda _path, _names: {"model.weight": Tensor(np.frombuffer(data, np.uint8))},
+        "_read_tensor",
+        lambda _path, _name: Tensor(np.frombuffer(data, np.uint8)),
     )
 
-    writer = FFTDeltaWriter()
-    writer._load_full(board.resolve(ref), ref)
+    parent = delta_module._ParentSource(base, board, ref)
 
-    assert writer._snapshot["model.weight"].value.tobytes() == data
+    assert parent.read("model.weight").value.tobytes() == data

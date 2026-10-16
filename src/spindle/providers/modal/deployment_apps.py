@@ -40,18 +40,25 @@ from .kv import shared_kv
 from .lora_pool import LoraPoolSpec
 from .lora_pool import deploy_pool as deploy_lora
 from .megatron_image import image as megatron_image
+from .miles_full_image import image as miles_full_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
+TRAINER_EXECUTORS = {
+    ("miles", "lora"): "spindle.backends.miles_lora:build_executor",
+    ("miles", "full"): "spindle.backends.miles_full:build_executor",
+    ("megatron", "full"): "spindle.backends.megatron_fft:build_executor",
+}
 
-def image_for(backend):
+
+def image_for(backend, parameterization="lora"):
     if not modal.is_local():
         return modal.Image.debian_slim()
-    return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
-        backend
-    ]
+    if backend == "miles":
+        return miles_full_image if parameterization == "full" else miles_image
+    return {"megatron": megatron_image, "sglang": rollout_image}[backend]
 
 
 def volumes_for(platform):
@@ -121,11 +128,16 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer = app.function(
         name="trainer",
         serialized=True,
-        image=image if image is not None else image_for(recipe.backend),
+        image=(
+            image
+            if image is not None
+            else image_for(recipe.backend, recipe.parameterization)
+        ),
         gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
+        ephemeral_disk=recipe.trainer_disk_mib or None,
         timeout=recipe.trainer_timeout_s,
         max_containers=None,
         min_containers=0,
@@ -172,11 +184,7 @@ def run_trainer(deployment, instance_id, platform=None):
     }
     if ray_address is not None:
         env["SPINDLE_RAY_ADDRESS"] = ray_address
-    executor = (
-        "spindle.backends.miles_lora:build_executor"
-        if recipe.backend == "miles"
-        else "spindle.backends.megatron_fft:build_executor"
-    )
+    executor = TRAINER_EXECUTORS[(recipe.backend, recipe.parameterization)]
 
     async def failed(error):
         await shared_kv().put(
@@ -233,6 +241,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
+        ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),
@@ -280,6 +289,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                         **kwargs,
                         run_id=pool.model_id,
                         pinned_version=None if pool.latest else pool.version,
+                        staging_mode=options["weight_update_staging"],
+                        local_checkpoint_dir=options.get(
+                            "weight_update_local_checkpoint_dir"
+                        ),
                     )
                 )
                 self.supervisor = supervise_children(self.sglang, self.sidecar)
