@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from pydantic import BaseModel, ConfigDict, Field
 from tinker import (
     AdamParams,
     Datum,
@@ -22,6 +23,24 @@ LossFn = Literal[
 ]
 
 
+OptimizerFamily = Literal["adamw", "dimuon"]
+OPTIMIZER_FAMILIES: tuple[OptimizerFamily, ...] = ("adamw", "dimuon")
+
+
+class DimuonParams(BaseModel):
+    """Per-step hyperparameters of the Dimuon optimizer, as Tinker sends them in optimizer_params."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    type: Literal["dimuon"] = "dimuon"
+    learning_rate: float = Field(ge=0)
+    grad_clip_norm: float = 0.0
+    beta1: float = Field(default=0.9, ge=0, lt=1)
+
+
+OptimizerParams = AdamParams | DimuonParams
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """base model x parameterization x (optional lora config)
@@ -32,12 +51,17 @@ class ModelSpec:
     base_model: str
     parameterization: Literal["lora", "full"]
     lora_config: LoraConfig | None = None
+    optimizer: OptimizerFamily = "adamw"
 
     def __post_init__(self) -> None:
         if self.parameterization == "lora" and self.lora_config is None:
             raise ValueError("lora_config is required for lora parameterization")
         if self.parameterization == "full" and self.lora_config is not None:
             raise ValueError("lora_config must be absent for full parameterization")
+        if self.optimizer not in OPTIMIZER_FAMILIES:
+            raise ValueError(f"optimizer family {self.optimizer} is not supported")
+        if self.optimizer == "dimuon" and self.parameterization != "lora":
+            raise ValueError("dimuon requires lora parameterization")
 
 
 @dataclass(frozen=True)
@@ -82,7 +106,7 @@ class Backend(Protocol):
     def optim_step(
         self,
         model_ids: tuple[str, ...],
-        adam: AdamParams,
+        params: OptimizerParams,
     ) -> tuple[OptimStepResponse, ...]:
         """Apply one optimizer update per model.
 

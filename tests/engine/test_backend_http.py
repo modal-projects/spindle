@@ -13,7 +13,11 @@ import pytest
 from spindle.engine import Engine, FutureStatus, backend_http
 from spindle.engine.api import Command, OperationKind
 from spindle.engine.backend_http import HttpBackendClient, create_backend_app
-from spindle.engine.operations import parse_operation_payload
+from spindle.backends import DimuonParams
+from spindle.engine.operations import (
+    parse_operation_payload,
+    serialize_operation_payload,
+)
 from tests.support import EchoExecutor
 
 MODEL_SPEC = {"base_model": "test/model", "parameterization": "full"}
@@ -127,15 +131,15 @@ def test_backend_read_timeout_fences_engine() -> None:
     ("payload", "message"),
     (
         (
-            {"optimizer_params": {"type": "dimuon", "learning_rate": 1e-3}},
-            "optimizer family dimuon is not supported",
+            {"optimizer_params": {"type": "lion", "learning_rate": 1e-3}},
+            "optimizer family lion is not supported",
         ),
         (
             {
                 "adam_params": {},
                 "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
             },
-            "optimizer family dimuon is not supported",
+            "optim_step accepts exactly one of adam_params or optimizer_params",
         ),
         (
             {"dimuon_params": {"learning_rate": 1e-3}},
@@ -143,9 +147,37 @@ def test_backend_read_timeout_fences_engine() -> None:
         ),
     ),
 )
-def test_optim_step_rejects_non_adam_params(payload, message) -> None:
+def test_optim_step_rejects_unsupported_params(payload, message) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         parse_operation_payload(OperationKind.OPTIM_STEP, payload)
+
+
+def test_optim_step_parses_dimuon_optimizer_params() -> None:
+    payload = parse_operation_payload(
+        OperationKind.OPTIM_STEP,
+        {"optimizer_params": {"type": "dimuon", "learning_rate": 1e-2, "beta1": 0.8}},
+    )
+    assert payload == DimuonParams(learning_rate=1e-2, beta1=0.8)
+
+
+def test_dimuon_params_survive_serialization() -> None:
+    params = DimuonParams(learning_rate=1e-2, beta1=0.8, grad_clip_norm=1.0)
+    serialized = serialize_operation_payload(params)
+    assert parse_operation_payload(OperationKind.OPTIM_STEP, serialized) == params
+
+
+def test_dimuon_params_reject_beta1_of_one() -> None:
+    with pytest.raises(ValueError):
+        parse_operation_payload(
+            OperationKind.OPTIM_STEP,
+            {
+                "optimizer_params": {
+                    "type": "dimuon",
+                    "learning_rate": 1e-2,
+                    "beta1": 1.0,
+                }
+            },
+        )
 
 
 def test_backend_batches_cross_http() -> None:
