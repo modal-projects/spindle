@@ -17,11 +17,13 @@ from spindle.replay import capture_replay
 
 RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 5.0
+# Detect a dead connection in about one minute without imposing a one-minute
+# generation timeout: healthy peers acknowledge TCP probes during long decodes.
 TCP_KEEPALIVE_OPTIONS = (
     (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 60),
-    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
 )
 GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 

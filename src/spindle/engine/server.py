@@ -757,6 +757,13 @@ class Engine:
         if not ready:
             return None
 
+        # Finish already-trained batches and capture their immutable snapshots
+        # before starting another long forward/backward. Per-model sequence
+        # ordering still determines which operations are eligible above.
+        ready.sort(key=lambda op: {
+            OperationKind.OPTIM_STEP: 0,
+            OperationKind.SAVE_WEIGHTS_FOR_SAMPLER: 1,
+        }.get(op.kind, 2))
         selected = [ready[0]]
         if ready[0].kind == OperationKind.FORWARD_BACKWARD:
             limit = self.max_forward_backward_batch

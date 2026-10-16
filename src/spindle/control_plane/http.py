@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
@@ -12,6 +14,7 @@ import zstandard
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from spindle.engine.api import JSON_OPERATIONS, OperationKind, submit_json_operation
@@ -182,6 +185,10 @@ def create_control_plane_app(
     app = FastAPI(dependencies=[Depends(authorize)])
 
     app.add_middleware(CommandMiddleware)
+    app.add_middleware(GZipMiddleware, minimum_size=4096, compresslevel=1)
+    mark("cp.telemetry.config", traces=bool(os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+         metrics=bool(os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")),
+         disabled=os.getenv("OTEL_SDK_DISABLED", "").lower() == "true")
 
     async def skip_rejected_operation(request: Request, exc: Exception) -> None:
         path = request.url.path
@@ -285,7 +292,8 @@ def create_control_plane_app(
             "pjwt_auth_enabled": False,
             "credential_default_source": "api_key",
             "parallel_fwdbwd_chunks": True,
-            "proto_write_fwdbwd": False,
+            "proto_write_fwdbwd": True,
+            "proto_compress_fwdbwd": True,
             "use_pyqwest_transport": False,
             "create_model_via_load_weights": True,
         }
@@ -534,9 +542,12 @@ def create_control_plane_app(
 
     @app.post("/api/v1/forward_backward")
     async def forward_backward(request: Request) -> dict[str, str]:
+        timing_id = uuid.uuid4().hex if request_timing_enabled() else None
+        mark("cp.forward_backward.body_start", timing_id=timing_id)
         body = await request.body()
         mark(
             "cp.forward_backward.received",
+            timing_id=timing_id,
             bytes=len(body),
             encoding=request.headers.get("content-encoding", "identity"),
         )
@@ -548,9 +559,14 @@ def create_control_plane_app(
             message = tinker_public_pb2.ForwardBackwardRequest()
             message.ParseFromString(body)
             model_id = message.model_id
+            seq_id = message.seq_id
         else:
-            model_id = json.loads(body)["model_id"]
+            envelope = json.loads(body)
+            model_id = envelope["model_id"]
+            seq_id = envelope["seq_id"]
+        mark("cp.forward_backward.parsed", timing_id=timing_id, request_id=f"{model_id}:{seq_id}")
         engine = await control_plane.engine_for(model_id)
+        mark("cp.forward_backward.routed", timing_id=timing_id, request_id=f"{model_id}:{seq_id}")
         request_id = await engine.forward_backward(body, content_type)
         mark("cp.forward_backward.forwarded", request_id=request_id, model_id=model_id)
         return {"request_id": request_id, "model_id": model_id}
@@ -573,11 +589,6 @@ def create_control_plane_app(
         )
         if sampled:
             fields: dict[str, object] = {"status": resolution.status.value}
-            if (
-                request_timing_enabled()
-                and resolution.status == FutureResolutionStatus.COMPLETE
-            ):
-                fields["bytes"] = len(json.dumps(resolution.result))
             mark("cp.retrieve.end", request_id=body.request_id, **fields)
         if resolution.status == FutureResolutionStatus.PENDING:
             return JSONResponse(
@@ -589,7 +600,12 @@ def create_control_plane_app(
                 },
             )
         if resolution.status == FutureResolutionStatus.COMPLETE:
-            return JSONResponse(resolution.result)
+            started = time.perf_counter()
+            response = JSONResponse(resolution.result)
+            if sampled:
+                mark("cp.retrieve.encoded", request_id=body.request_id,
+                     bytes=len(response.body), encode_s=time.perf_counter()-started)
+            return response
         if resolution.status == FutureResolutionStatus.RETRYABLE:
             return JSONResponse(
                 status_code=410,

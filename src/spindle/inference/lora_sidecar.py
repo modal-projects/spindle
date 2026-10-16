@@ -28,6 +28,10 @@ def create_app(
         app.state.client = httpx.AsyncClient(
             base_url=upstream_url.rstrip("/"),
             timeout=3000,
+            # SGLang owns admission and queue limits. A second 100-connection
+            # queue here also blocks adapter loading and health checks behind
+            # long generations, even when SGLang has spare capacity.
+            limits=httpx.Limits(max_connections=None, max_keepalive_connections=100),
             trust_env=False,
             transport=transport,
         )

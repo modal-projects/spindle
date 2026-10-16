@@ -41,7 +41,7 @@ per-model seeds. Initial adapter tensors are not guaranteed to match.
   explicit common Tinker sampling settings, not Qwen's separate OpenAI-server
   recommendations with presence penalties. No backend-specific penalties are used.
 - Rank 32; attention and MLP LoRA enabled, unembedding LoRA disabled.
-- Eight retained mixed-reward groups of eight samples per optimizer update.
+- Eight fixed groups of eight samples per optimizer update, with no filtering or replacement.
 - Group-centered/sample-standard-deviation-normalized advantages, token-mean PPO
   with clip bounds 0.8/1.28, learning rate 1e-5, Adam 0.9/0.95, epsilon 1e-12,
   gradient clipping 1, no weight decay or reference KL penalty.
@@ -57,8 +57,10 @@ The fixture is the original 320-row numeric-answer DAPO subset, not the entire
 17k dataset. Each row retains its source index from
 [open-r1/DAPO-Math-17k-Processed](https://huggingface.co/datasets/open-r1/DAPO-Math-17k-Processed).
 The grader conservatively compares the last boxed numeric answer. Constant-reward
-groups are replaced, up to 256 candidate groups per update; exhausted budgets
-fail the experiment rather than silently changing the batch size.
+groups stay in the batch with zero group-centered advantages and still pass through
+forward/backward. `dynamic_group_filtering=false` fixes the workload at 64
+responses per update. Variable response lengths still mean token counts and FLOPs
+can differ across backends. The historical filtered run used this flag set to true.
 
 This is a DAPO-style systems workload, not a reproduction of every component of
 the original DAPO paper. It differs from the historical sweep's Base model,
@@ -134,3 +136,61 @@ run and complete lifetime coverage are prerequisites for a final cost conclusion
 
 API references: [sampling parameters](https://tinker-docs.thinkingmachines.ai/tinker/api-reference/types/samplingparams/),
 [PPO clipping](https://tinker-docs.thinkingmachines.ai/tinker/losses/ppo/).
+
+### Trainer activity timeline
+
+Collect the trainer app's logs from before the run started, then render the
+backend activity and each client's outstanding training requests:
+
+```bash
+python -m modal app logs spindle-trainer-dapo-instruct-tp1-dp8-20260930 \
+  --env lilo-deploy --since 12h > trainer.log
+python examples/dapo-cost-comparison/trainer_activity.py RUN_DIRECTORY \
+  --trainer-log trainer.log --through "$(date +%s)"
+```
+
+The plotting script needs `matplotlib` and `numpy`; these are analysis-only
+requirements. It writes `activity/trainer-activity.{png,pdf,json}`. Rerun with a
+fresh log snapshot to refresh the chart. `--through` is the end of log collection;
+log coverage must include the entire measurement window.
+
+Solid bars show completed backend forward/backward, optimizer, and snapshot
+capture calls. The black line is centered 60-second call occupancy, counting the
+union of intervals. Hatched backend bars show an unfinished rank-zero call and
+are excluded from the completed-call percentage. Host call time includes backend
+synchronization and compilation; it is not hardware GPU utilization. Client lanes
+show submission-to-response time **including queueing**, not attributed GPU time.
+Current backend logs identify only the first model in a shared batch, so they do
+not support exact execution attribution to every participating client. The chart
+starts at the first client's readiness and includes stagger and rollout waits.
+This analysis does not change the portable training client or deployment.
+
+The current Spindle response format requires SDK 0.24.1; Tinker currently requires
+a newer SDK (0.30.4 used in the comparison). This version difference must be
+reported until Spindle supports the new protobuf sampling responses.
+
+
+## Infrastructure optimization trials
+
+`deployment_optimized.py` and `experiment_optimized.py` run short infrastructure
+trials with the same `config.json` workload. `--updates 3` changes only the trial
+length; the eventual full run uses `--updates 30 --stagger-seconds 150`.
+Short trials use a 20-second stagger to exercise concurrent load within three
+updates, so their startup/queueing behavior is not directly comparable with the
+150-second full-run stagger. Each new trial records its client, recipe, and Git
+diff alongside its configuration.
+
+The candidate recipe controls frontend/sampling-worker CPU, inference tensor
+parallelism and replica count, and trainer compilation through flat settings.
+Training hyperparameters, prompts, rewards, group counts, sampling parameters,
+and the one-update policy-lag limit remain unchanged. The portable client queues
+its immutable snapshot request immediately after the optimizer request, before
+waiting for their results; server sequence ordering still places capture after
+the optimizer. `publish` measures the remaining wait plus sampling-client
+creation, and `publish_enqueued` records when the snapshot was queued.
+
+Server transport supports zstd-compressed protobuf training requests and gzip
+responses. These are negotiated with the standard SDK and do not change the
+training payload. Report pilot startup/compilation separately from steady-state
+step latency, but include both in resource cost. Keep pilot costs separate from
+full-run cost and label GPU-rate projections as estimates, not invoices.

@@ -1105,3 +1105,38 @@ def test_serial_persistence_failure_releases_reservation(kind, failure_phase):
             await server.close()
 
     asyncio.run(run())
+
+
+def test_ready_optimizer_precedes_other_clients_forward_backward():
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        class Executor(EchoExecutor):
+            async def execute_forward_backward_batch(self, commands):
+                calls.append(("forward_backward", commands[0].model_id))
+                if commands[0].model_id == "b":
+                    entered.set()
+                    await release.wait()
+                return await super().execute_forward_backward_batch(commands)
+
+            async def execute(self, model_id, kind, payload):
+                if kind != OperationKind.FORWARD_BACKWARD:
+                    calls.append((kind.value, model_id))
+                return await super().execute(model_id, kind, payload)
+
+        server = Engine(Executor())
+        await server.accept_model("a", {})
+        await server.accept_model("b", {})
+        first = await forward_backward(server, 1, model_id="b")
+        await asyncio.wait_for(entered.wait(), 1)
+        other = await forward_backward(server, 1, model_id="a")
+        opt = await server.optim_step({"model_id": "b", "seq_id": 2, "adam_params": {}})
+        release.set()
+        for request in [first, opt, other]:
+            assert (await server.retrieve_future(request, timeout=1)).status == FutureStatus.COMPLETE
+        assert calls[:3] == [("forward_backward", "b"), ("optim_step", "b"), ("forward_backward", "a")]
+        await server.close()
+
+    asyncio.run(run())

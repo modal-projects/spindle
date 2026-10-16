@@ -3,6 +3,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import zstandard
+from tinker import types
+from tinker.proto.request_conv import forward_backward_request_to_proto
+from tinker.types.forward_backward_input import ForwardBackwardInput
+from tinker.types.forward_backward_request import ForwardBackwardRequest
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.proto import tinker_public_pb2
@@ -531,4 +536,33 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
             assert record.base_model == BASE_MODEL
             assert record.engine_definition_id == "isolated"
 
+    asyncio.run(run())
+
+
+def test_compressed_sdk_protobuf_preserves_ppo_batch():
+    async def run():
+        client = http_client()
+        _, model_id = await created_model(client)
+        request = ForwardBackwardRequest(
+            model_id=model_id, seq_id=1,
+            forward_backward_input=ForwardBackwardInput(
+                data=[types.Datum(model_input=types.ModelInput.from_ints([1, 2, 3]),
+                    loss_fn_inputs={"target_tokens": [2, 3, 4],
+                        "logprobs": [-1., -2., -3.], "advantages": [0., .5, -.5]})],
+                loss_fn="ppo", loss_fn_config={"clip_low_threshold": .8, "clip_high_threshold": 1.28},
+            ),
+        )
+        raw = forward_backward_request_to_proto(request).SerializeToString()
+        submitted = await client.post('/api/v1/forward_backward',
+            content=zstandard.ZstdCompressor().compress(raw),
+            headers={"Content-Type": "application/x-protobuf", "Content-Encoding": "zstd"})
+        assert submitted.status_code == 200, submitted.text
+        result = await client.post('/api/v1/retrieve_future', json={"request_id": submitted.json()["request_id"]})
+        assert result.status_code == 200, result.text
+        payload = result.json()["payload"]
+        assert payload["loss_fn"] == "ppo"
+        assert payload["loss_fn_config"] == {"clip_low_threshold": .8, "clip_high_threshold": 1.28}
+        assert payload["data"][0]["loss_fn_inputs"]["logprobs"]["data"] == [-1., -2., -3.]
+        assert payload["data"][0]["loss_fn_inputs"]["advantages"]["data"] == [0., .5, -.5]
+        await client.aclose()
     asyncio.run(run())

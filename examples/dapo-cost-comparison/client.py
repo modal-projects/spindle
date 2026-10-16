@@ -52,8 +52,8 @@ def create_trainer(service, model, rank):
 
 def read_config(path):
     cfg = json.loads(path.read_text())
-    if cfg['model'] != 'Qwen/Qwen3.5-9B':
-        raise ValueError('This experiment requires the non-Base Qwen3.5-9B model')
+    if cfg['model'] not in {'Qwen/Qwen3.5-9B', 'Qwen/Qwen3.8-27B'}:
+        raise ValueError('This benchmark supports Qwen3.5-9B and Qwen3.8-27B')
     if cfg['updates'] < 1 or cfg['max_tokens'] >= cfg['context_tokens']:
         raise ValueError('Invalid update count or context budget')
     return cfg
@@ -89,11 +89,16 @@ class Client:
         with (self.root/'events.jsonl').open('a') as f:f.write(json.dumps(row,allow_nan=False)+'\n')
         print(json.dumps(row,allow_nan=False),flush=True)
 
-    def publish(self, update):
+    def publish(self, update, future=None):
         start=time.time()
-        path=self.trainer.save_weights_for_sampler(f'policy-{update:03d}').result(timeout=1800).path
+        if future is None:
+            future=self.trainer.save_weights_for_sampler(f'policy-{update:03d}')
+        path=future.result(timeout=1800).path
+        saved=time.time()
+        self.event('publish_weights_received',update=update,seconds=saved-start)
         sampler=self.service.create_sampling_client(model_path=path)
-        self.event('publish',update=update,seconds=time.time()-start)
+        self.event('publish',update=update,seconds=time.time()-start,weights_seconds=saved-start,
+                   sampling_client_seconds=time.time()-saved)
         return sampler,update
 
     def group(self, index, snapshot):
@@ -122,7 +127,9 @@ class Client:
         return saved
 
     def rollout(self, snapshot, update):
+        cfg=self.cfg
         start=time.time();kept=[];all_groups=[]
+        self.event('rollout_start', update=update, policy_version=snapshot[1])
         with ThreadPoolExecutor(self.cfg['groups_per_update']) as pool:
             while len(kept)<self.cfg['groups_per_update']:
                 count=min(self.cfg['groups_per_update']-len(kept),self.cfg['max_candidate_groups']-len(all_groups))
@@ -130,7 +137,8 @@ class Client:
                 indices=list(range(self.next_group,self.next_group+count));self.next_group+=count
                 groups=list(pool.map(lambda i:self.group(i,snapshot),indices))
                 all_groups.extend(groups)
-                kept.extend(g for g in groups if len({s['reward'] for s in g['sequences']})>1)
+                kept.extend(g for g in groups if not cfg.get('dynamic_group_filtering', True)
+                            or len({s['reward'] for s in g['sequences']})>1)
         lengths=[len(s['tokens']) for g in all_groups for s in g['sequences']]
         generated=sum(lengths);trained=sum(len(s['tokens']) for g in kept for s in g['sequences'])
         data=[]
@@ -174,12 +182,17 @@ class Client:
                     'clip_low_threshold':cfg['clip_low'],'clip_high_threshold':cfg['clip_high']})
                 optimizer=self.trainer.optim_step(types.AdamParams(learning_rate=cfg['learning_rate'],
                     beta1=cfg['beta1'],beta2=cfg['beta2'],eps=cfg['eps'],weight_decay=0.,grad_clip_norm=cfg['grad_clip_norm']))
+                # Queue the snapshot behind the optimizer before awaiting HTTP
+                # results. Server sequence ordering preserves the exact policy.
+                publication=(self.trainer.save_weights_for_sampler(f'policy-{update:03d}')
+                             if update<cfg['updates'] else None)
+                if publication is not None:self.event('publish_enqueued',update=update)
                 result=forward.result(timeout=1800);opt=optimizer.result(timeout=1800)
                 if not all(math.isfinite(float(v)) for v in result.metrics.values()):
                     raise RuntimeError('Nonfinite training metrics')
                 self.event('train_done',update=update,seconds=time.time()-train_start,
                            metrics=result.metrics,optimizer_metrics=opt.metrics)
-                if update<cfg['updates']:snapshot=self.publish(update)
+                if update<cfg['updates']:snapshot=self.publish(update,publication)
                 self.event('update_done',update=update,seconds=time.time()-begin,
                            elapsed_seconds=time.time()-started,policy_lag=lag)
         self.event('completed',updates=cfg['updates'],seconds=time.time()-started)

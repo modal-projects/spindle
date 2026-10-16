@@ -21,5 +21,6 @@
   "clip_low": 0.8,
   "clip_high": 1.28,
   "warmup_samples": 8,
-  "warmup_max_tokens": 128
+  "warmup_max_tokens": 128,
+  "dynamic_group_filtering": false
 }

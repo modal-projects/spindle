@@ -60,6 +60,12 @@ class BaseConfig:
     miles_cfg = {}
     megatron_cfg = {}
     sglang_cfg = {}
+    frontend_cpu = 0.125
+    frontend_memory_mib = 128
+    sampling_cpu = 0.125
+    sampling_memory_mib = 128
+    sampling_min_containers = 0
+    sampling_max_inputs = 128
     session_idle_timeout_s = 300
     pool_idle_timeout_s = 300
     sweep_interval_s = 300

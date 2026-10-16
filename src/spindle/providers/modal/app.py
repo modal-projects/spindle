@@ -262,12 +262,14 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
 
 @app.function(
     image=image,
-    min_containers=0,
+    cpu=SETTINGS.recipe.sampling_cpu,
+    memory=SETTINGS.recipe.sampling_memory_mib,
+    min_containers=SETTINGS.recipe.sampling_min_containers,
     timeout=60 * 60,
     retries=2,
     secrets=[proxy_secret, modal.Secret.from_name(API_SECRET_NAME)],
 )
-@modal.concurrent(max_inputs=128)
+@modal.concurrent(max_inputs=SETTINGS.recipe.sampling_max_inputs)
 async def execute_sample(task: dict) -> dict:
     stats: dict = {}
     with sample_trace(task, stats):
@@ -541,6 +543,8 @@ def _plane():
     image=image,
     env=TRAINER_DEPLOYMENT_ENV,
     name="server",
+    cpu=SETTINGS.recipe.frontend_cpu,
+    memory=SETTINGS.recipe.frontend_memory_mib,
     routing_region=ROUTING_REGION,
     timeout=20 * 60,
     volumes={CHECKPOINT_ROOT: checkpoint_volume},

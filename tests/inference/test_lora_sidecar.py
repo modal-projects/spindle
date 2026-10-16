@@ -533,3 +533,45 @@ def test_exact_version_refreshes_only_when_snapshot_is_missing(tmp_path):
             assert response.status_code == 200
             assert response.json()["meta_info"]["weight_version_start"] == 21
     assert refreshes == [True]
+
+
+def test_sidecar_pool_does_not_hide_requests_or_health_behind_100_generations(tmp_path):
+    async def run():
+        release = asyncio.Event()
+        admitted = asyncio.Event()
+        count = 0
+
+        async def upstream(reader, writer):
+            nonlocal count
+            try:
+                head = await reader.readuntil(b"\r\n\r\n")
+                length = next((int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
+                               if line.lower().startswith(b"content-length:")), 0)
+                if length:await reader.readexactly(length)
+                if head.startswith(b"POST /generate "):
+                    count += 1
+                    if count == 101:admitted.set()
+                    await release.wait()
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(upstream, "127.0.0.1", 0, backlog=256)
+        port = server.sockets[0].getsockname()[1]
+        app = create_app(SnapshotBulletin(tmp_path/'bulletin'), f"http://127.0.0.1:{port}")
+        async with server, app.router.lifespan_context(app):
+            client = app.state.client
+            pending = [asyncio.create_task(client.post('/generate', json={'input_ids':[1]}))
+                       for _ in range(101)]
+            try:
+                await asyncio.wait_for(admitted.wait(), 10)
+                health = await asyncio.wait_for(client.get('/health'), 2)
+                assert health.status_code == 200
+                assert not any(task.done() for task in pending)
+            finally:
+                release.set()
+                responses = await asyncio.gather(*pending)
+            assert all(r.status_code == 200 for r in responses)
+    asyncio.run(run())

@@ -1,3 +1,5 @@
+import asyncio
+from types import SimpleNamespace
 import importlib.util
 from pathlib import Path
 import numpy as np
@@ -51,18 +53,22 @@ def test_async_loop_has_exactly_30_updates_and_at_most_one_policy_lag():
         def result(self,timeout):return self.value
     class Sampler:
         def sample(self,*args,**kwargs):return Future(SimpleNamespace(sequences=[SimpleNamespace(tokens=[1])]))
-    trained=[];published=[];sampled=[];logged=[]
+    trained=[];published=[];sampled=[];logged=[];queued=[]
     class Trainer:
         def forward_backward(self,data,loss_fn,loss_fn_config):
             trained.append(data)
             assert loss_fn=='ppo'
             return Future(SimpleNamespace(metrics={'loss:sum':0.1}))
         def optim_step(self,params):return Future(SimpleNamespace(metrics={'update_successful:mean':1.}))
+        def save_weights_for_sampler(self,name):
+            queued.append(name)
+            return Future(SimpleNamespace(path=name))
     c=client.Client.__new__(client.Client)
     c.cfg=client.read_config(PATH.with_name('config.json'))
     c.trainer=Trainer();c.prompts=[[1,2]];c.stops=[3]
     c.event=lambda event,**kwargs:logged.append(dict(event=event,**kwargs))
-    def publish(update):
+    def publish(update,future=None):
+        assert (future is not None)==(update>0)
         published.append(update)
         return Sampler(),update
     def rollout(snapshot,update):
@@ -73,6 +79,7 @@ def test_async_loop_has_exactly_30_updates_and_at_most_one_policy_lag():
     assert len(trained)==30
     assert sampled==list(range(1,31))
     assert published==list(range(30))
+    assert queued==[f"policy-{i:03d}" for i in range(1,30)]
     assert all(r['policy_lag'] in (0,1) for r in logged if r['event']=='update_done')
     assert logged[-1]['event']=='completed'
 
@@ -86,3 +93,42 @@ def test_shared_model_creation_omits_unsupported_seed():
             return 'trainer'
     assert client.create_trainer(Service(),'Qwen/Qwen3.5-9B',32)=='trainer'
     assert calls==[('Qwen/Qwen3.5-9B',dict(rank=32,train_attn=True,train_mlp=True,train_unembed=False))]
+
+
+def test_fixed_groups_keep_uniform_rewards_without_replacements():
+    c=client.Client.__new__(client.Client)
+    c.cfg=dict(groups_per_update=8,max_candidate_groups=256,max_tokens=4,
+               dynamic_group_filtering=False)
+    c.next_group=0
+    c.event=lambda *args,**kwargs:None
+    def group(i,snapshot):
+        return dict(prompt=[1,2],sequences=[dict(tokens=[3,4],logprobs=[-.1,-.2],
+                    reward=float(i%2)) for _ in range(8)])
+    c.group=group
+    data,stats=c.rollout((None,0),1)
+    assert c.next_group==8
+    assert len(data)==64
+    assert stats['groups_sampled']==8
+    assert stats['groups_filtered']==0
+    assert stats['output_tokens']==stats['used_output_tokens']==128
+    assert all(not any(d.loss_fn_inputs['advantages'].data) for d in data)
+
+
+def test_resource_accounting_excludes_previous_experiment(monkeypatch):
+    spec=importlib.util.spec_from_file_location('dapo_supervise',PATH.with_name('supervise.py'))
+    supervise=importlib.util.module_from_spec(spec);spec.loader.exec_module(supervise)
+    infos={name:SimpleNamespace(started_at=start,finished_at=end,gpu_type='H200',
+                               gpu_config=SimpleNamespace(count=2))
+           for name,start,end in [('old',90.,99.),('new',101.,0.),('pending',0.,0.)]}
+    class Stub:
+        async def TaskList(self,request):
+            return SimpleNamespace(tasks=[SimpleNamespace(task_id=name,app_description='owned') for name in infos]
+                                   +[SimpleNamespace(task_id='unrelated',app_description='other')])
+        async def TaskGetInfo(self,request):
+            return SimpleNamespace(info=infos[request.task_id])
+    async def from_env():return SimpleNamespace(stub=Stub())
+    monkeypatch.setattr(supervise,'_Client',SimpleNamespace(from_env=from_env))
+    known={'old':{'task_id':'old'}}
+    result=asyncio.run(supervise.resources('env',['owned'],known,since=100.))
+    assert set(result)=={'new','pending'}
+    assert result['new']['started_at']==101.

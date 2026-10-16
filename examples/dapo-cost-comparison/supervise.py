@@ -28,13 +28,16 @@ def events(path):
     return values
 
 
-async def resources(environment,owned,known):
+async def resources(environment,owned,known,since=0.):
     client=await _Client.from_env()
     listed=await client.stub.TaskList(api_pb2.TaskListRequest(environment_name=environment))
     ids=set(known)
     ids.update(t.task_id for t in listed.tasks if t.app_description in owned)
     for task_id in ids:
         info=(await client.stub.TaskGetInfo(api_pb2.TaskGetInfoRequest(task_id=task_id))).info
+        if info.started_at and info.started_at < since:
+            known.pop(task_id,None)
+            continue
         known[task_id]=dict(task_id=task_id,started_at=info.started_at,
             finished_at=info.finished_at,gpu_type=info.gpu_type,gpu_count=info.gpu_config.count)
     return known
@@ -50,6 +53,8 @@ def main():
     p.add_argument('--hours',type=float,default=12.)
     p.add_argument('--environment',default='lilo-deploy')
     p.add_argument('--owned-apps',nargs='+',required=True)
+    p.add_argument('--resource-since',type=float,default=0.,
+                   help='Exclude containers started before this experiment timestamp')
     args=p.parse_args()
     args.root.mkdir(parents=True,exist_ok=False)
     config=json.loads(args.config.read_text());write(args.root/'config.json',config)
@@ -88,7 +93,7 @@ def main():
             if now-last_collect>30:
                 last_collect=now
                 try:
-                    known=asyncio.run(resources(args.environment,args.owned_apps,known))
+                    known=asyncio.run(asyncio.wait_for(resources(args.environment,args.owned_apps,known,args.resource_since), timeout=20))
                     write(args.root/'gpu-lifetimes.json',list(known.values()))
                 except Exception as exc:state['resource_error']=str(exc)
             if len(processes)==args.clients and all(c.poll()==0 for c in processes):break
@@ -108,8 +113,14 @@ def main():
                 state['cleanup'][app]=dict(returncode=r.returncode,output=(r.stdout+r.stderr)[-500:])
             except Exception as exc:state['cleanup'][app]=dict(error=str(exc))
         try:
-            known=asyncio.run(resources(args.environment,args.owned_apps,known))
-            write(args.root/'gpu-lifetimes.json',list(known.values()))
+            drain_deadline=time.monotonic()+180
+            while True:
+                known=asyncio.run(asyncio.wait_for(resources(args.environment,args.owned_apps,known,args.resource_since), timeout=20))
+                write(args.root/'gpu-lifetimes.json',list(known.values()))
+                running=[r for r in known.values() if r['gpu_count'] and r['started_at'] and not r['finished_at']]
+                if not running or time.monotonic()>=drain_deadline:
+                    break
+                time.sleep(5)
         except Exception as exc:state['resource_error']=str(exc)
         state.update(state='failed' if error else 'completed',error=error,finished=time.time())
         write(args.root/'status.json',state)
