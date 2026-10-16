@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 import httpx
 from fastapi.testclient import TestClient
@@ -7,6 +8,7 @@ from stitch.types import VersionRef
 
 from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
+from spindle.inference.lora_routing import prefix_key
 
 
 def test_generation_concurrency_does_not_block_health_requests(tmp_path):
@@ -73,6 +75,130 @@ def _publish(tmp_path, version):
     bulletin = SnapshotBulletin(tmp_path / "bulletin")
     bulletin.publish(VersionRef("model-a", version), source)
     return bulletin
+
+
+def test_admission_rejects_before_registration_and_releases_after_completion(tmp_path):
+    async def run():
+        entered, finish = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def engine(request):
+            calls.append(request.url.path)
+            if request.url.path == "/generate":
+                entered.set()
+                await finish.wait()
+            return httpx.Response(200, json={"meta_info": {}})
+
+        app = create_app(
+            _publish(tmp_path, 3),
+            "http://sglang",
+            transport=httpx.MockTransport(engine),
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+            ) as client:
+                first = asyncio.create_task(
+                    client.post(
+                        "/generate",
+                        json={"rid": "accepted", "input_ids": [1]},
+                        headers={"X-Spindle-Routing-Limit": "1"},
+                    )
+                )
+                await entered.wait()
+                rejected = await client.post(
+                    "/generate",
+                    json={
+                        "rid": "rejected",
+                        "input_ids": [1],
+                        "weight_run_id": "model-a",
+                        "weight_version": {"exact_version": 3},
+                    },
+                    headers={"X-Spindle-Routing-Limit": "1"},
+                )
+                assert rejected.status_code == 429
+                assert rejected.headers["x-spindle-routing-rejected"] == "1"
+                assert rejected.json()["request_ids"] == ["accepted"]
+                assert calls == ["/generate"]
+                assert app.state.active == 1
+                assert not app.state.registered_adapters
+                finish.set()
+                accepted = await first
+                assert accepted.headers["x-spindle-routing-admitted"] == "1"
+                assert app.state.active == 0 and not app.state.routing_requests
+                invalid = await client.post(
+                    "/generate",
+                    json={"input_ids": [1]},
+                    headers={"X-Spindle-Routing-Limit": "0"},
+                )
+                assert invalid.status_code == 400
+                assert calls == ["/generate"]
+
+    asyncio.run(run())
+
+
+def test_decode_maxima_merge_engine_progress_with_unobserved_ingress(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SGLANG_SPINDLE_ROUTING_OBSERVATIONS", "1")
+    app = create_app(_publish(tmp_path, 3), "http://sglang")
+
+    def row(rid, adapter, decode):
+        return dict(rid=rid, adapter=adapter, prefill_tokens=0, decode_tokens=decode)
+
+    with TestClient(app) as client:
+        app.state.routing_read_at = time.monotonic()
+        app.state.routing_requests = {
+            r["rid"]: r
+            for r in [
+                row("running", "m/v1", 100),
+                row("new", "m/v1", 80),
+                row("version2", "m/v2", 90),
+            ]
+        }
+        app.state.routing_snapshot = dict(
+            timestamp=time.time(),
+            incarnation=1,
+            sequence=1,
+            prefixes=[],
+            cpu_adapters=["m/v1", "m/v2"],
+            gpu_adapters=["m/v1"],
+            requests=[row("running", "m/v1", 20), row("completed", "m/v3", 1000)],
+            snapshot_seconds=0.001,
+            cache_kind="RadixCache",
+        )
+        work = client.get("/routing-state").json()["work"]
+        assert work["decode_tokens"] == 190
+        assert work["adapter_decode_maxima"] == {"m/v1": 80, "m/v2": 90}
+        assert set(work["request_ids"]) == {"running", "new", "version2"}
+
+
+def test_prefix_hints_are_scoped_to_the_resolved_adapter_version(tmp_path):
+    bulletin = _publish(tmp_path, 3)
+    _publish(tmp_path, 4)
+
+    def upstream(request):
+        return httpx.Response(200, json={"meta_info": {}})
+
+    app = create_app(bulletin, "http://sglang", transport=httpx.MockTransport(upstream))
+    with TestClient(app) as client:
+        for version in (3, 4):
+            response = client.post(
+                "/generate",
+                json={
+                    "input_ids": [1, 2],
+                    "session_id": "same-prefix",
+                    "weight_run_id": "model-a",
+                    "weight_version": {"exact_version": version},
+                },
+            )
+            assert response.status_code == 200
+        state = client.get("/routing-state").json()
+        assert set(state["prefixes"]) == {
+            prefix_key(VersionRef("model-a", version).identity, "same-prefix")
+            for version in (3, 4)
+        }
+        assert state["active"] == 0 and state["adapters"] == {}
 
 
 def test_sidecar_resolves_exact_adapter_and_stamps_response(tmp_path) -> None:
@@ -586,3 +712,74 @@ def test_exact_version_refreshes_only_when_snapshot_is_missing(tmp_path):
             assert response.status_code == 200
             assert response.json()["meta_info"]["weight_version_start"] == 21
     assert refreshes == [True]
+
+
+def test_concurrent_models_with_same_version_keep_distinct_adapters_and_load_counts(
+    tmp_path,
+):
+    bulletin = SnapshotBulletin(tmp_path / "bulletin")
+    refs = [VersionRef("model-a", 1), VersionRef("model-b", 1)]
+    for ref in refs:
+        source = tmp_path / ref.run_id
+        source.mkdir()
+        (source / "adapter_model.safetensors").write_bytes(ref.run_id.encode())
+        (source / "adapter_config.json").write_text('{"r":8}')
+        bulletin.publish(ref, source)
+
+    async def run():
+        loaded = []
+        release, started = asyncio.Event(), asyncio.Event()
+        requests = 0
+
+        async def upstream(request):
+            nonlocal requests
+            payload = json.loads(request.content)
+            if request.url.path == "/load_lora_adapter":
+                loaded.append(payload["lora_name"])
+                return httpx.Response(200, json={"success": True})
+            requests += 1
+            if requests == 2:
+                started.set()
+            await release.wait()
+            return httpx.Response(
+                200, json={"adapter": payload["lora_path"], "meta_info": {}}
+            )
+
+        app = create_app(
+            bulletin, "http://sglang", transport=httpx.MockTransport(upstream)
+        )
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://sidecar"
+            ) as client,
+        ):
+            pending = [
+                asyncio.create_task(
+                    client.post(
+                        "/generate",
+                        json={
+                            "input_ids": [1],
+                            "weight_run_id": ref.run_id,
+                            "weight_version": {"exact_version": 1},
+                        },
+                    )
+                )
+                for ref in refs
+            ]
+            await asyncio.wait_for(started.wait(), 2)
+            state = (await client.get("/routing-state")).json()
+            assert state["active"] == 2
+            assert state["adapters"] == {ref.identity: 1 for ref in refs}
+            release.set()
+            results = await asyncio.gather(*pending)
+            assert [r.json()["adapter"] for r in results] == [
+                ref.identity for ref in refs
+            ]
+            state = (await client.get("/routing-state")).json()
+            assert state["active"] == 0 and state["adapters"] == {}
+            assert state["adapter_loads"] == 2
+            assert len(loaded) == len(set(loaded)) == 2
+            assert all(r.headers["x-spindle-replica"] == "local" for r in results)
+
+    asyncio.run(run())

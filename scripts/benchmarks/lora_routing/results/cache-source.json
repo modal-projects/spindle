@@ -1,0 +1,19 @@
+{
+  "base_commit": "e541502c6c58f4d0f0403acc8ea97fed027fe139",
+  "sha256": {
+    "src/spindle/inference/lora_routing.py": "15679ad1b76bf203f8d6022b55c948257ec6097664b1e8b48f3f6ac91ee8020e",
+    "src/spindle/inference/sampling.py": "b81591b5f7ca3a7386474e490e97ca280d81eb337bd29e21ecbabd82186395b5",
+    "scripts/benchmarks/lora_routing/cache_instrumentation.py": "4b37d5a10b567397ae0d6c9392671cc8fb0c9b5e13f0b7cdff724f8c735c86cd",
+    "scripts/benchmarks/lora_routing/cache_deployment.py": "94b75757dec4d7b2eca26997d9a1164fa5b6454b51a1f4d57782f2a88d932a8c",
+    "scripts/benchmarks/lora_routing/cache_replay.py": "fc2461b9ec98363cbf54d91cc69d3c8f06e4c6d287ac356bf6ae112fe03bf676",
+    "scripts/benchmarks/lora_routing/cache_monitor.py": "903eb8832b48b8eef876950ccff9048c1598962517a4be7c95ff893f94cf526a",
+    "scripts/benchmarks/lora_routing/cache_report.py": "2b1157a002599864f81cf5637ef71b0cc1ea79bcdadd436d91fa23a59a8f40cf",
+    "scripts/benchmarks/lora_routing/CACHE_BENCHMARK.md": "1e0597da9d30f55d9c39e8e8002b4c70fb87e36335ae49bb4f7e259b2eb008b0",
+    "scripts/benchmarks/lora_routing/supervise.py": "0375a1c28c1f717da15e850b6657e0b9710b2e9bb1273dc841a64016b03a3f89",
+    "tests/inference/test_cache_benchmark.py": "c30621cac4be9c55ef7f7baa3ff1fe3f47e162c1bbfbbb1c640d13c8310bad3b",
+    "src/spindle/providers/modal/rollout_image.py": "a8c7e393a8226a9bc15b14f5ec2a4e20d5750fd7b179bb961da2f1b5b9dea501",
+    "src/spindle/providers/modal/lora_routing.py": "b6a0df8367f61a5d32524fe978cc7295c46830a610850f1049eff44d9e4ecb66",
+    "src/spindle/inference/lora_sidecar.py": "967d03979e68a583e305ea76991c7776c6b982b63d065e2a6e7b175661c84e92"
+  },
+  "purpose": "Final reproducible harness and report source; measured-source.json records hashes frozen before the primary measurement. Routing and request-generation code are unchanged."
+}

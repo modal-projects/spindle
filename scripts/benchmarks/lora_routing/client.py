@@ -1,0 +1,454 @@
+"""Identical Tinker SDK training loop for either endpoint; no Modal dependency."""
+
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, InvalidOperation
+import gzip
+import hashlib
+import importlib.metadata
+import json
+import math
+import os
+from pathlib import Path
+import re
+import time
+
+import httpx
+import numpy as np
+import tinker
+from tinker import types
+from transformers import AutoTokenizer
+from sdk_affinity import PromptAffinityTransport
+
+ROOT = Path(__file__).resolve().parent
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def answer(text):
+    matches = re.findall(r"\\boxed\{([^{}]+)\}", text)
+    text = matches[-1] if matches else text.strip()
+    try:
+        result = Decimal(text.replace(",", "").strip())
+        return result if result.is_finite() else None
+    except InvalidOperation:
+        return None
+
+
+def datum(prompt, tokens, logprobs, advantage, denominator):
+    if (
+        not tokens
+        or len(tokens) != len(logprobs)
+        or not all(map(math.isfinite, logprobs))
+    ):
+        raise ValueError("Missing or invalid behavior tokens/logprobs")
+    prefix = len(prompt) - 1
+    return types.Datum(
+        model_input=types.ModelInput.from_ints((prompt + tokens)[:-1]),
+        loss_fn_inputs={
+            "target_tokens": (prompt + tokens)[1:],
+            "logprobs": [0.0] * prefix + logprobs,
+            "advantages": [0.0] * prefix + [advantage / denominator] * len(tokens),
+        },
+    )
+
+
+def create_trainer(service, model, rank):
+    # Miles rejects per-adapter seeds. Use this same call on both endpoints.
+    return service.create_lora_training_client(
+        model, rank=rank, train_attn=True, train_mlp=True, train_unembed=False
+    )
+
+
+def read_config(path):
+    cfg = json.loads(path.read_text())
+    if cfg["model"] not in {"Qwen/Qwen3.5-9B", "Qwen/Qwen3.8-27B"}:
+        raise ValueError("This benchmark supports Qwen3.5-9B and Qwen3.8-27B")
+    if cfg["updates"] < 1 or cfg["max_tokens"] >= cfg["context_tokens"]:
+        raise ValueError("Invalid update count or context budget")
+    return cfg
+
+
+class Client:
+    def __init__(self, cfg, root, base_url, client_index=0):
+        self.cfg, self.root = cfg, root
+        self.client_index = client_index
+        self.base_url = base_url
+        root.mkdir(parents=True, exist_ok=False)
+        options = {"base_url": base_url} if base_url else {}
+        if cfg.get("prompt_affinity", False):
+            if not base_url:
+                raise ValueError("Prompt affinity is a Spindle API extension")
+            options["http_client"] = httpx.AsyncClient(
+                transport=PromptAffinityTransport(), timeout=300, trust_env=False
+            )
+        self.service = tinker.ServiceClient(**options)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            cfg["model"], revision=cfg["tokenizer_revision"]
+        )
+        self.rows = [
+            json.loads(line) for line in (ROOT / "dapo.jsonl").read_text().splitlines()
+        ]
+        self.prompts = [
+            list(
+                self.tokenizer.apply_chat_template(
+                    [
+                        {
+                            "role": "user",
+                            "content": row["prompt"]
+                            + cfg.get(
+                                "prompt_suffix", "\nGive the final answer in \\boxed{}."
+                            ),
+                        }
+                    ],
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    enable_thinking=cfg["thinking"],
+                    return_dict=False,
+                )
+            )
+            for row in self.rows
+        ]
+        if any(
+            len(p) + cfg["max_tokens"] >= cfg["context_tokens"] for p in self.prompts
+        ):
+            raise ValueError("A prompt exceeds the configured context budget")
+        self.stops = [
+            self.tokenizer.convert_tokens_to_ids("<|im_end|>"),
+            self.tokenizer.eos_token_id,
+        ]
+        self.stops = list(dict.fromkeys(self.stops))
+        metadata = dict(
+            config=cfg,
+            config_sha256=digest(cfg),
+            prompts_sha256=digest(self.prompts),
+            dataset_sha256=hashlib.sha256(
+                (ROOT / "dapo.jsonl").read_bytes()
+            ).hexdigest(),
+            initialization_seed=None,
+            client_index=client_index,
+            problem_offset=client_index * cfg.get("client_problem_stride", 0),
+            stop_token_ids=self.stops,
+            base_url=base_url or "Tinker SDK default",
+            packages={
+                n: importlib.metadata.version(n)
+                for n in ["tinker", "transformers", "numpy"]
+            },
+        )
+        metadata["source_sha256"] = {}
+        for name in ("client.py", "sdk_affinity.py"):
+            content = (ROOT / name).read_bytes()
+            metadata["source_sha256"][name] = hashlib.sha256(content).hexdigest()
+            target = root / "source" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        (root / "manifest.json").write_text(json.dumps(metadata, indent=2))
+        self.event("client_create_start")
+        self.trainer = create_trainer(self.service, cfg["model"], cfg["rank"])
+        self.event("client_created", model_id=self.trainer.model_id)
+        if cfg.get("initial_state_paths"):
+            source = cfg["initial_state_paths"][client_index]
+            began = time.time()
+            self.trainer.load_state(source).result(timeout=1800)
+            self.event("initial_state_loaded", path=source, seconds=time.time() - began)
+        if cfg.get("save_initial_state", False):
+            began = time.time()
+            checkpoint = self.trainer.save_state("routing-initial").result(timeout=1800)
+            self.initial_state_path = checkpoint.path
+            self.event(
+                "initial_state_saved", path=checkpoint.path, seconds=time.time() - began
+            )
+        self.next_group = 0
+
+    def event(self, event, **fields):
+        row = dict(event=event, time=time.time(), **fields)
+        with (self.root / "events.jsonl").open("a") as f:
+            f.write(json.dumps(row, allow_nan=False) + "\n")
+        print(json.dumps(row, allow_nan=False), flush=True)
+
+    def publish(self, update, future=None):
+        start = time.time()
+        if future is None:
+            future = self.trainer.save_weights_for_sampler(f"policy-{update:03d}")
+        path = future.result(timeout=1800).path
+        saved = time.time()
+        self.event("publish_weights_received", update=update, seconds=saved - start)
+        sampler = self.service.create_sampling_client(model_path=path)
+        self.event(
+            "publish",
+            update=update,
+            model_path=path,
+            seconds=time.time() - start,
+            weights_seconds=saved - start,
+            sampling_client_seconds=time.time() - saved,
+        )
+        return sampler, update
+
+    def group(self, index, snapshot):
+        sampler, version = snapshot
+        cfg = self.cfg
+        # The optional offset gives independent jobs different problem streams;
+        # client indices and offsets are identical across paired routing arms.
+        row_index = (
+            index + self.client_index * cfg.get("client_problem_stride", 0)
+        ) % len(self.rows)
+        row = self.rows[row_index]
+        prompt = self.prompts[row_index]
+        start = time.time()
+        result = sampler.sample(
+            types.ModelInput.from_ints(prompt),
+            cfg["samples_per_group"],
+            types.SamplingParams(
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
+                top_p=cfg["top_p"],
+                top_k=cfg["top_k"],
+                stop=self.stops,
+                seed=cfg["seed"] + index,
+            ),
+        ).result(timeout=1800)
+        if len(result.sequences) != cfg["samples_per_group"]:
+            raise ValueError("Incomplete sample group")
+        sequences = []
+        for seq in result.sequences:
+            tokens = list(seq.tokens)
+            logprobs = list(seq.logprobs or [])
+            if (
+                not tokens
+                or len(tokens) != len(logprobs)
+                or not all(map(math.isfinite, logprobs))
+            ):
+                raise ValueError("Invalid sampled token/logprob alignment")
+            text = self.tokenizer.decode(tokens)
+            sequences.append(
+                dict(
+                    tokens=tokens,
+                    logprobs=logprobs,
+                    text=text,
+                    reward=float(answer(text) == answer(str(row["answer"]))),
+                    stop_reason=str(seq.stop_reason),
+                )
+            )
+        saved = dict(
+            group=index,
+            row=row_index,
+            policy_version=version,
+            prompt=prompt,
+            start=start,
+            end=time.time(),
+            first_sequence_cached_tokens=result.prompt_cache_hit_tokens,
+            sequences=sequences,
+        )
+        with gzip.open(self.root / f"group-{index:06d}.json.gz", "wt") as f:
+            json.dump(saved, f)
+        return saved
+
+    def rollout(self, snapshot, update):
+        cfg = self.cfg
+        start = time.time()
+        kept = []
+        all_groups = []
+        filtered = unused = 0
+        self.event("rollout_start", update=update, policy_version=snapshot[1])
+        with ThreadPoolExecutor(self.cfg["groups_per_update"]) as pool:
+            while len(kept) < self.cfg["groups_per_update"]:
+                count = min(
+                    max(
+                        self.cfg["groups_per_update"] - len(kept),
+                        cfg.get("minimum_refill_groups", 1),
+                    ),
+                    self.cfg["max_candidate_groups"] - len(all_groups),
+                )
+                if count <= 0:
+                    raise RuntimeError(
+                        "Too few mixed-reward groups within candidate budget"
+                    )
+                indices = list(range(self.next_group, self.next_group + count))
+                self.next_group += count
+                groups = list(pool.map(lambda i: self.group(i, snapshot), indices))
+                all_groups.extend(groups)
+                eligible = [
+                    g
+                    for g in groups
+                    if not cfg.get("dynamic_group_filtering", True)
+                    or len({s["reward"] for s in g["sequences"]}) > 1
+                ]
+                needed = cfg["groups_per_update"] - len(kept)
+                kept.extend(eligible[:needed])
+                filtered += len(groups) - len(eligible)
+                unused += max(0, len(eligible) - needed)
+        lengths = [len(s["tokens"]) for g in all_groups for s in g["sequences"]]
+        generated = sum(lengths)
+        trained = sum(len(s["tokens"]) for g in kept for s in g["sequences"])
+        data = []
+        for group in kept:
+            rewards = np.array([s["reward"] for s in group["sequences"]])
+            advantages = (rewards - rewards.mean()) / (rewards.std(ddof=1) + 1e-6)
+            data.extend(
+                datum(group["prompt"], s["tokens"], s["logprobs"], float(a), trained)
+                for s, a in zip(group["sequences"], advantages, strict=True)
+            )
+        stats = dict(
+            update=update,
+            policy_version=snapshot[1],
+            started_at=start,
+            seconds=time.time() - start,
+            groups_sampled=len(all_groups),
+            groups_filtered=filtered,
+            groups_unused=unused,
+            groups_retained=len(kept),
+            mixed_reward_groups=sum(
+                len({s["reward"] for s in g["sequences"]}) > 1 for g in kept
+            ),
+            output_tokens=generated,
+            used_output_tokens=trained,
+            sampling_input_tokens=sum(
+                len(g["prompt"]) * len(g["sequences"]) for g in all_groups
+            ),
+            training_input_tokens=sum(len(d.model_input.to_ints()) for d in data),
+            output_lengths=lengths,
+            truncated=sum(n >= self.cfg["max_tokens"] for n in lengths),
+            reward=float(
+                np.mean([s["reward"] for g in all_groups for s in g["sequences"]])
+            ),
+        )
+        self.event("rollout_done", **stats)
+        return data, stats
+
+    def run(self):
+        cfg = self.cfg
+        snapshot = self.publish(0)
+        # Finish a real sampling request before starting the stagger clock so
+        # the initial shared inference cold start does not synchronize clients.
+        warm = (
+            snapshot[0]
+            .sample(
+                types.ModelInput.from_ints(self.prompts[0]),
+                cfg["warmup_samples"],
+                types.SamplingParams(
+                    max_tokens=cfg["warmup_max_tokens"],
+                    temperature=cfg["temperature"],
+                    top_p=cfg["top_p"],
+                    top_k=cfg["top_k"],
+                    stop=self.stops,
+                    seed=cfg["seed"],
+                ),
+            )
+            .result(timeout=1800)
+        )
+        self.event(
+            "sampling_warmup",
+            output_tokens=sum(len(s.tokens) for s in warm.sequences),
+            sampling_input_tokens=len(self.prompts[0]) * len(warm.sequences),
+        )
+        self.event("ready")
+        started = time.time()
+        with ThreadPoolExecutor(1) as prefetch:
+            pending = prefetch.submit(self.rollout, snapshot, 1)
+            for update in range(1, cfg["updates"] + 1):
+                begin = time.time()
+                data, stats = pending.result()
+                lag = update - 1 - stats["policy_version"]
+                if not 0 <= lag <= 1:
+                    raise RuntimeError(f"Unexpected policy lag {lag}")
+                if update < cfg["updates"]:
+                    pending = prefetch.submit(self.rollout, snapshot, update + 1)
+                train_start = time.time()
+                self.event("train_start", update=update, policy_lag=lag)
+                forward = self.trainer.forward_backward(
+                    data,
+                    "ppo",
+                    loss_fn_config={
+                        "clip_low_threshold": cfg["clip_low"],
+                        "clip_high_threshold": cfg["clip_high"],
+                    },
+                )
+                optimizer = self.trainer.optim_step(
+                    types.AdamParams(
+                        learning_rate=cfg["learning_rate"],
+                        beta1=cfg["beta1"],
+                        beta2=cfg["beta2"],
+                        eps=cfg["eps"],
+                        weight_decay=0.0,
+                        grad_clip_norm=cfg["grad_clip_norm"],
+                    )
+                )
+                # Queue the snapshot behind the optimizer before awaiting HTTP
+                # results. Server sequence ordering preserves the exact policy.
+                publication = self.trainer.save_weights_for_sampler(
+                    f"policy-{update:03d}"
+                )
+                if publication is not None:
+                    self.event("publish_enqueued", update=update)
+                result = forward.result(timeout=1800)
+                opt = optimizer.result(timeout=1800)
+                if not all(
+                    math.isfinite(float(v))
+                    for metrics in (result.metrics, opt.metrics)
+                    for v in metrics.values()
+                ):
+                    raise RuntimeError("Nonfinite training or optimizer metrics")
+                if opt.metrics.get("update_successful:mean", 1) != 1:
+                    raise RuntimeError("Optimizer update was skipped")
+                self.event(
+                    "train_done",
+                    update=update,
+                    seconds=time.time() - train_start,
+                    metrics=result.metrics,
+                    optimizer_metrics=opt.metrics,
+                )
+                snapshot = self.publish(update, publication)
+                self.event(
+                    "update_done",
+                    update=update,
+                    seconds=time.time() - stats["started_at"],
+                    wait_and_train_seconds=time.time() - begin,
+                    elapsed_seconds=time.time() - started,
+                    policy_lag=lag,
+                )
+        self.event("completed", updates=cfg["updates"], seconds=time.time() - started)
+        self.unload()
+
+    def unload(self):
+        if self.base_url:
+            # The supervisor owns final deployment cleanup. A timed-out unload
+            # may still finish on the engine; it must not abort other clients'
+            # valid training after this client has completed all its updates.
+            try:
+                response = httpx.post(
+                    self.base_url + "/api/v1/unload_model",
+                    headers={"x-api-key": os.environ["TINKER_API_KEY"]},
+                    json={"model_id": self.trainer.model_id},
+                    timeout=120,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                self.event("cleanup_warning", error=str(exc))
+                return False
+            else:
+                self.event("unloaded")
+                return True
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=ROOT / "config.json")
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--base-url", default=os.environ.get("TINKER_BASE_URL"))
+    parser.add_argument("--client-index", type=int, default=0)
+    args = parser.parse_args()
+    client = Client(
+        read_config(args.config), args.output, args.base_url, args.client_index
+    )
+    try:
+        client.run()
+    except Exception as exc:
+        client.event("failed", error=f"{type(exc).__name__}: {exc}")
+        raise
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,13 @@
+{
+  "targeted_tests": 43,
+  "command": ".venv/bin/pytest -q tests/inference/test_cache_benchmark.py tests/inference/test_lora_routing.py tests/inference/test_sampling.py tests/providers/test_lora_routing.py",
+  "ruff": "passed",
+  "broader_provider_app_tests": "Interrupted while blocked after 12 completed tests; not counted as passed.",
+  "primary_report": "passed; validates trace, requests, versions, physical attempts, GPU residency conservation and complete engine drain",
+  "all_five_runs": {
+    "requests": 10240,
+    "trace_sha256": "750625cf748fd3c67d19a9ede13efa5920fb64b87c3b67431d5ad22cb9cd2f1c",
+    "same_eight_replicas": true,
+    "report_validation": "passed for all arms including repeat"
+  }
+}

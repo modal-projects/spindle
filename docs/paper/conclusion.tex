@@ -1,0 +1,18 @@
+Conversation-level KV affinity can distribute an adapter's requests across many
+engines even when no single affinity destination is overloaded. In the evaluated
+64-version pool, reducing that replication improves throughput by
+59.1--62.8\% and reduces p95 latency by 52.3--52.7\% over KV affinity, while
+accepting more uncached prefill. The accompanying decrease in active adapter
+working sets and increase in running batch sizes explain why adapter-load time
+alone is an incomplete measure of the routing opportunity.
+
+Demand-sized domains provide a practical way to constrain placement without
+adding an unmeasured eviction coefficient to the cost model. Their benefit is
+conditional: warmed-prefix and dependent-dialogue workloads expose different
+tradeoffs, and the 1,024-token control loses 16.8\% of completion-window
+throughput while increasing mean rollout latency by 9.1\%. Local observations
+do not provide distributed admission or
+fairness guarantees. The implementation, exact workload definitions, per-trial
+metrics, and retained failures support these measured conclusions. They also
+identify concrete next evaluations: correlated same-adapter arrivals, shared
+system prefixes, long publication histories, and changing pool membership.

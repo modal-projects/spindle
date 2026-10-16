@@ -1,4 +1,5 @@
 import modal
+from pathlib import Path
 
 from .image_dependencies import (
     CORE_PACKAGES,
@@ -11,7 +12,7 @@ SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
 SGLANG_BRANCH = "spindle-sglang-v0.5.21"
 
-image = (
+base_image = (
     modal.Image.from_registry(SGLANG_IMAGE)
     .entrypoint([])
     .apt_install("git")
@@ -25,6 +26,12 @@ image = (
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")
+    .add_local_file(
+        Path(__file__).resolve().parents[2] / "inference/sglang_routing_observer.py",
+        "/opt/spindle-routing-observer.py",
+        copy=True,
+    )
+    .run_commands("python /opt/spindle-routing-observer.py")
     .env(
         {
             "HF_XET_HIGH_PERFORMANCE": "1",
@@ -34,5 +41,6 @@ image = (
             "SGLANG_DISABLE_CUDNN_CHECK": "1",
         }
     )
-    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+
+image = base_image.add_local_python_source("spindle", ignore=ignore_config_source)

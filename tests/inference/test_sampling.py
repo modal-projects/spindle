@@ -508,8 +508,10 @@ def test_exact_sampling_rejects_wrong_response_version() -> None:
     assert result["sequences"][0]["tokens"] == [5]
 
 
-def test_default_transport_enables_tcp_keepalive() -> None:
-    transport = sampling.keepalive_transport()
+@pytest.mark.parametrize("http2", [False, True])
+def test_default_transport_enables_tcp_keepalive(http2) -> None:
+    transport = sampling.keepalive_transport(http2=http2)
+    assert transport._pool._http2 is http2
     assert transport._pool._socket_options == list(sampling.TCP_KEEPALIVE_OPTIONS)
     assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in sampling.TCP_KEEPALIVE_OPTIONS
 

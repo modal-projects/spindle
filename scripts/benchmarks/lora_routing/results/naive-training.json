@@ -1,0 +1,1092 @@
+{
+  "clients": 16,
+  "updates": 64,
+  "output_tokens": 11972813,
+  "elapsed_seconds": 1361.4163959026337,
+  "measured_start": 1791703247.1806617,
+  "measured_end": 1791704608.5970576,
+  "output_tokens_per_second_including_training": 8794.379909066613,
+  "step_mean_seconds": 332.5096997655928,
+  "step_p50_seconds": 322.4610552787781,
+  "step_p95_seconds": 541.693639755249,
+  "rollout_mean_seconds": 274.85873113945127,
+  "rollout_p50_seconds": 274.7279305458069,
+  "rollout_p95_seconds": 462.8229389190674,
+  "cross_client_progress": true,
+  "mixed_reward_groups": 81,
+  "nonzero_gradient_updates": 44,
+  "clients_with_nonzero_gradients": 16,
+  "clients_sampling_updated_policies": 16,
+  "group_p50_seconds": 156.92213416099548,
+  "group_p95_seconds": 323.63663506507874,
+  "config": {
+    "model": "Qwen/Qwen3.8-27B",
+    "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "updates": 4,
+    "rank": 32,
+    "seed": 4242,
+    "thinking": false,
+    "context_tokens": 8192,
+    "max_tokens": 1536,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "groups_per_update": 16,
+    "samples_per_group": 8,
+    "max_candidate_groups": 256,
+    "learning_rate": 1e-05,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "eps": 1e-12,
+    "grad_clip_norm": 1.0,
+    "clip_low": 0.8,
+    "clip_high": 1.28,
+    "warmup_samples": 8,
+    "warmup_max_tokens": 128,
+    "dynamic_group_filtering": false,
+    "prompt_suffix": "\nKeep the solution concise: at most 350 words. End with the final numerical answer in \\boxed{}."
+  },
+  "workload_hashes": [
+    "4816d6020f7fff051c66c1b398d77ef28b04ff743ffc57ef26cb67ca123e00ec",
+    "cb14820b8322a29addc6d1357497c4f79cbc3e93e5d110f21ba50152e35e16bf",
+    "57c1b3bbaf38abb049eb1474805d7f7427b93392ef99279161b2a41988e26d42"
+  ],
+  "per_client": [
+    {
+      "client": "client-00",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        188.0129532814026,
+        357.10205721855164,
+        360.97524547576904,
+        407.0382306575775
+      ],
+      "rollout_seconds": [
+        94.79357719421387,
+        322.97745847702026,
+        295.9161720275879,
+        379.98784852027893
+      ],
+      "train_seconds": [
+        87.80537676811218,
+        32.916929721832275,
+        43.79511260986328,
+        20.387888193130493
+      ],
+      "publication_seconds": [
+        5.55228590965271,
+        5.4063239097595215,
+        1.1961619853973389,
+        21.255003929138184,
+        6.651205062866211
+      ],
+      "reward": [
+        0.046875,
+        0.0078125,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003912550862878561
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002357492921873927
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.00388296227902174
+        }
+      ],
+      "first_rollout_at": 1791703247.1806617,
+      "completed_at": 1791704367.9351492,
+      "training_run_seconds": 1120.7544875144958
+    },
+    {
+      "client": "client-01",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        214.55809688568115,
+        366.573194026947,
+        328.56748509407043,
+        354.4216220378876
+      ],
+      "rollout_seconds": [
+        103.47107934951782,
+        332.2774088382721,
+        294.38775634765625,
+        317.5899016857147
+      ],
+      "train_seconds": [
+        100.79466128349304,
+        32.622599601745605,
+        22.18461275100708,
+        29.790730953216553
+      ],
+      "publication_seconds": [
+        4.666104316711426,
+        10.28472638130188,
+        1.6636428833007812,
+        11.984920263290405,
+        7.03220272064209
+      ],
+      "reward": [
+        0.0390625,
+        0.0,
+        0.0078125,
+        0.03125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003589406842365861
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.001923357485793531
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.006207724567502737
+        }
+      ],
+      "first_rollout_at": 1791703283.3470037,
+      "completed_at": 1791704367.931541,
+      "training_run_seconds": 1084.584537267685
+    },
+    {
+      "client": "client-02",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        222.4963617324829,
+        320.09022426605225,
+        303.71481943130493,
+        283.24530601501465
+      ],
+      "rollout_seconds": [
+        101.63200092315674,
+        255.11691045761108,
+        269.22864294052124,
+        243.81140637397766
+      ],
+      "train_seconds": [
+        119.62165665626526,
+        63.61662006378174,
+        21.79526424407959,
+        33.440078020095825
+      ],
+      "publication_seconds": [
+        4.994788646697998,
+        1.2360105514526367,
+        1.3454525470733643,
+        12.679993391036987,
+        5.985208511352539
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003437984036281705
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0044883550144732
+        }
+      ],
+      "first_rollout_at": 1791703283.2737324,
+      "completed_at": 1791704192.5238354,
+      "training_run_seconds": 909.2501029968262
+    },
+    {
+      "client": "client-03",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        230.91569471359253,
+        300.2546410560608,
+        370.67859721183777,
+        305.0915331840515
+      ],
+      "rollout_seconds": [
+        132.73963284492493,
+        265.9084560871124,
+        274.47847747802734,
+        280.49063634872437
+      ],
+      "train_seconds": [
+        96.9836757183075,
+        17.214139699935913,
+        94.8349757194519,
+        16.225890636444092
+      ],
+      "publication_seconds": [
+        4.608509540557861,
+        1.185701847076416,
+        17.10739302635193,
+        1.3558557033538818,
+        8.366420030593872
+      ],
+      "reward": [
+        0.0546875,
+        0.0,
+        0.0078125,
+        0.0390625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.005161386448889971
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0020922755356878042
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004124375060200691
+        }
+      ],
+      "first_rollout_at": 1791703287.1948755,
+      "completed_at": 1791704265.4531984,
+      "training_run_seconds": 978.2583229541779
+    },
+    {
+      "client": "client-04",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        224.94602942466736,
+        541.693639755249,
+        349.52651834487915,
+        309.9750642776489
+      ],
+      "rollout_seconds": [
+        127.12831950187683,
+        473.4872965812683,
+        315.0972354412079,
+        272.76182746887207
+      ],
+      "train_seconds": [
+        63.96021389961243,
+        63.40904688835144,
+        18.228703498840332,
+        29.75323247909546
+      ],
+      "publication_seconds": [
+        4.737087965011597,
+        33.850748777389526,
+        4.786642074584961,
+        16.19130039215088,
+        7.4513328075408936
+      ],
+      "reward": [
+        0.0390625,
+        0.0,
+        0.0234375,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0024096358101814985
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0035849257837980986
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002148882718756795
+        }
+      ],
+      "first_rollout_at": 1791703296.5363128,
+      "completed_at": 1791704522.250011,
+      "training_run_seconds": 1225.7136981487274
+    },
+    {
+      "client": "client-05",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        289.0452661514282,
+        314.6620144844055,
+        385.0850074291229,
+        371.22280979156494
+      ],
+      "rollout_seconds": [
+        254.3828980922699,
+        249.58674836158752,
+        351.1200566291809,
+        346.20266008377075
+      ],
+      "train_seconds": [
+        17.27754807472229,
+        42.96378183364868,
+        16.55763816833496,
+        21.026768922805786
+      ],
+      "publication_seconds": [
+        4.624498605728149,
+        17.376448392868042,
+        22.102275848388672,
+        17.398615837097168,
+        3.984649181365967
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0078125,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0032869961578398943
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0023656522389501333
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003376147011294961
+        }
+      ],
+      "first_rollout_at": 1791703341.5353203,
+      "completed_at": 1791704567.8746457,
+      "training_run_seconds": 1226.339325428009
+    },
+    {
+      "client": "client-06",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        488.43020701408386,
+        411.2280535697937,
+        367.6218218803406,
+        168.8994963169098
+      ],
+      "rollout_seconds": [
+        423.37114930152893,
+        315.33072543144226,
+        319.99227571487427,
+        137.91590547561646
+      ],
+      "train_seconds": [
+        62.9584424495697,
+        94.70706057548523,
+        34.32892060279846,
+        26.40249276161194
+      ],
+      "publication_seconds": [
+        4.448294401168823,
+        2.0940675735473633,
+        1.1805763244628906,
+        13.291445255279541,
+        4.572392702102661
+      ],
+      "reward": [
+        0.03125,
+        0.015625,
+        0.0,
+        0.03125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003378752153366804
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0027229569386690855
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004123431630432606
+        }
+      ],
+      "first_rollout_at": 1791703367.3946493,
+      "completed_at": 1791704595.0129755,
+      "training_run_seconds": 1227.6183261871338
+    },
+    {
+      "client": "client-07",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        194.63968300819397,
+        329.83205485343933,
+        317.35654401779175,
+        422.5510084629059
+      ],
+      "rollout_seconds": [
+        129.21165704727173,
+        295.6351170539856,
+        282.95639300346375,
+        369.6638607978821
+      ],
+      "train_seconds": [
+        38.20160388946533,
+        28.82976460456848,
+        17.16811227798462,
+        48.115955114364624
+      ],
+      "publication_seconds": [
+        4.742111682891846,
+        27.21970009803772,
+        5.358235597610474,
+        17.222569942474365,
+        4.7623631954193115
+      ],
+      "reward": [
+        0.0234375,
+        0.0,
+        0.0078125,
+        0.0078125
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0034826884511858225
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0019415492424741387
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0030160839669406414
+        }
+      ],
+      "first_rollout_at": 1791703335.1788704,
+      "completed_at": 1791704465.5574782,
+      "training_run_seconds": 1130.378607749939
+    },
+    {
+      "client": "client-08",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 4,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        368.0382339954376,
+        336.06792068481445,
+        400.4281623363495,
+        214.15767621994019
+      ],
+      "rollout_seconds": [
+        297.02845191955566,
+        301.6194303035736,
+        366.2863564491272,
+        177.028795003891
+      ],
+      "train_seconds": [
+        69.695561170578,
+        17.31455969810486,
+        17.44992685317993,
+        31.419951677322388
+      ],
+      "publication_seconds": [
+        4.432295560836792,
+        1.3071489334106445,
+        17.12487483024597,
+        16.682848691940308,
+        5.699807643890381
+      ],
+      "reward": [
+        0.046875,
+        0.0078125,
+        0.015625,
+        0.0546875
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002978426404297352
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0019288817420601845
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003344265976920724
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.006603021640330553
+        }
+      ],
+      "first_rollout_at": 1791703341.9571345,
+      "completed_at": 1791704521.0738378,
+      "training_run_seconds": 1179.1167032718658
+    },
+    {
+      "client": "client-09",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        206.21001315116882,
+        306.20110416412354,
+        316.13736033439636,
+        298.32121777534485
+      ],
+      "rollout_seconds": [
+        172.20981097221375,
+        241.3029067516327,
+        247.16087079048157,
+        274.9773836135864
+      ],
+      "train_seconds": [
+        17.524123430252075,
+        32.7338981628418,
+        32.793848752975464,
+        19.133350610733032
+      ],
+      "publication_seconds": [
+        4.60826849937439,
+        16.469270944595337,
+        32.154433250427246,
+        36.17305850982666,
+        4.201103925704956
+      ],
+      "reward": [
+        0.0390625,
+        0.0,
+        0.0,
+        0.0390625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002746926387771964
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.005439611617475748
+        }
+      ],
+      "first_rollout_at": 1791703340.7805889,
+      "completed_at": 1791704299.801258,
+      "training_run_seconds": 959.020669221878
+    },
+    {
+      "client": "client-10",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        548.5816504955292,
+        309.25003457069397,
+        324.2851176261902,
+        158.59101843833923
+      ],
+      "rollout_seconds": [
+        511.6555132865906,
+        233.69491147994995,
+        289.9717812538147,
+        138.11593651771545
+      ],
+      "train_seconds": [
+        31.81403374671936,
+        65.06810069084167,
+        17.12460446357727,
+        15.906992197036743
+      ],
+      "publication_seconds": [
+        4.57408332824707,
+        5.104478597640991,
+        10.474053621292114,
+        17.179651737213135,
+        4.559514284133911
+      ],
+      "reward": [
+        0.0234375,
+        0.0,
+        0.0,
+        0.015625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004440842196345329
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0026530432514846325
+        }
+      ],
+      "first_rollout_at": 1791703344.9298623,
+      "completed_at": 1791704538.8742244,
+      "training_run_seconds": 1193.9443621635437
+    },
+    {
+      "client": "client-11",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        230.97367358207703,
+        322.4737868309021,
+        428.7704391479492,
+        313.4114646911621
+      ],
+      "rollout_seconds": [
+        196.725163936615,
+        257.2754981517792,
+        361.5564455986023,
+        255.23122096061707
+      ],
+      "train_seconds": [
+        17.210535049438477,
+        38.04026007652283,
+        66.05932331085205,
+        53.158103942871094
+      ],
+      "publication_seconds": [
+        4.897493839263916,
+        17.031140565872192,
+        27.148306608200073,
+        1.145315170288086,
+        5.013471841812134
+      ],
+      "reward": [
+        0.0234375,
+        0.0,
+        0.0078125,
+        0.0
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004231961909681559
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.001859061187133193
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        }
+      ],
+      "first_rollout_at": 1791703336.4309137,
+      "completed_at": 1791704465.4250517,
+      "training_run_seconds": 1128.9941380023956
+    },
+    {
+      "client": "client-12",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        292.0166392326355,
+        250.5766248703003,
+        350.4597818851471,
+        421.460914850235
+      ],
+      "rollout_seconds": [
+        258.19390177726746,
+        215.44072341918945,
+        285.4545090198517,
+        335.4380033016205
+      ],
+      "train_seconds": [
+        28.00061011314392,
+        28.15644907951355,
+        63.63010311126709,
+        78.93873929977417
+      ],
+      "publication_seconds": [
+        4.935503244400024,
+        5.812637090682983,
+        6.970137357711792,
+        1.3653533458709717,
+        7.075725078582764
+      ],
+      "reward": [
+        0.03125,
+        0.0078125,
+        0.0,
+        0.0390625
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002625812776386738
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0023927546571940184
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.005759852938354015
+        }
+      ],
+      "first_rollout_at": 1791703341.5589502,
+      "completed_at": 1791704522.1427093,
+      "training_run_seconds": 1180.5837590694427
+    },
+    {
+      "client": "client-13",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        511.8507311344147,
+        281.2723252773285,
+        337.9394178390503,
+        302.20006108283997
+      ],
+      "rollout_seconds": [
+        430.084272146225,
+        185.35981273651123,
+        303.6666293144226,
+        257.05438804626465
+      ],
+      "train_seconds": [
+        66.28715467453003,
+        94.53329825401306,
+        32.57764530181885,
+        39.86994957923889
+      ],
+      "publication_seconds": [
+        4.480084419250488,
+        15.471895217895508,
+        1.3703334331512451,
+        1.686079502105713,
+        5.266641139984131
+      ],
+      "reward": [
+        0.046875,
+        0.0078125,
+        0.0078125,
+        0.0
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004139918368309736
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.00208682450465858
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.002254385966807604
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        }
+      ],
+      "first_rollout_at": 1791703346.4049723,
+      "completed_at": 1791704567.7404692,
+      "training_run_seconds": 1221.3354969024658
+    },
+    {
+      "client": "client-14",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 3,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        567.6580028533936,
+        322.44832372665405,
+        437.63640093803406,
+        214.30030035972595
+      ],
+      "rollout_seconds": [
+        471.77874422073364,
+        226.26873755455017,
+        309.6672508716583,
+        186.30588006973267
+      ],
+      "train_seconds": [
+        94.01889395713806,
+        64.80421543121338,
+        126.04826211929321,
+        23.669801712036133
+      ],
+      "publication_seconds": [
+        6.2318994998931885,
+        1.8471524715423584,
+        31.366005420684814,
+        1.9120984077453613,
+        4.316122055053711
+      ],
+      "reward": [
+        0.03125,
+        0.0,
+        0.0234375,
+        0.0234375
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.003360991133376956
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004362496547400951
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.004615250043570995
+        }
+      ],
+      "first_rollout_at": 1791703386.55315,
+      "completed_at": 1791704608.592871,
+      "training_run_seconds": 1222.0397210121155
+    },
+    {
+      "client": "client-15",
+      "updates": 4,
+      "independent_prefetch": true,
+      "nonzero_gradient_updates": 2,
+      "sampled_policy_versions": [
+        0,
+        0,
+        1,
+        2
+      ],
+      "step_seconds": [
+        558.4964611530304,
+        367.0335190296173,
+        415.47968912124634,
+        167.44143652915955
+      ],
+      "rollout_seconds": [
+        462.8229389190674,
+        270.8039903640747,
+        326.3692328929901,
+        115.75780940055847
+      ],
+      "train_seconds": [
+        94.34425806999207,
+        87.1020278930664,
+        79.40313363075256,
+        46.98101615905762
+      ],
+      "publication_seconds": [
+        4.977821588516235,
+        1.3225164413452148,
+        9.117476463317871,
+        9.69818115234375,
+        4.694204092025757
+      ],
+      "reward": [
+        0.0234375,
+        0.0,
+        0.0078125,
+        0.0
+      ],
+      "optimizer_metrics": [
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0027271213475614786
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0018164659850299358
+        },
+        {
+          "update_successful:mean": 1.0,
+          "grad_norm:mean": 0.0
+        }
+      ],
+      "first_rollout_at": 1791703381.1336074,
+      "completed_at": 1791704608.5970576,
+      "training_run_seconds": 1227.4634501934052
+    }
+  ],
+  "replica_observations": {
+    "adapter_registrations": 362,
+    "peak_observed_active_requests": 1778,
+    "peak_active_adapters_on_one_replica": 12,
+    "mean_active_adapters_on_busy_replicas": 6.369806295259042,
+    "fraction_busy_replica_time_over_adapter_slots": 0.17564397581316324,
+    "measurement": "Active includes queued requests. Registrations are CPU loads, not GPU transfer counts."
+  },
+  "run": "naive-full-v4",
+  "throughput_measurement": "First client rollout to last client completion; includes later clients' initialization and startup staggering. Not steady-state throughput.",
+  "first_rollout_spread_seconds": 139.37248826026917,
+  "client_training_run_mean_seconds": 1138.4622317552567
+}

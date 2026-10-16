@@ -1,0 +1,10 @@
+{
+  "at": 1791950968.8840537,
+  "pytest": "126 passed, 1 warning in 1.93s",
+  "scope": [
+    "All tests in the router, sampling, cohort, Modal router provider, deployment app, and Modal app modules"
+  ],
+  "ruff": "All checks passed",
+  "broader_modal_app_attempt": "The executor-shutdown stall reproduced inside the process sandbox. The isolated test and then all affected modules passed outside it; deployment operations remained mocked.",
+  "revision": "d4b2c41"
+}
