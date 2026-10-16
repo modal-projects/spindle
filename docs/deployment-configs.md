@@ -84,6 +84,10 @@ Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, 
 
 `trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Converted assets are kept, so preparing them again skips the conversion.
 
+### DeepSeek-V4.1-Flash LoRA
+
+[deepseek_v41_flash_lora_8k.py](../src/spindle/configs/deepseek_v41_flash_lora_8k.py) trains DeepSeek-V4.1-Flash LoRA on two B300 nodes and serves the adapters on one. It converts the release to BF16 with `asset_transform = "dequantize_bf16"`, trains on Miles v0.1.2 with `megatron_to_hf_mode = "raw"` in the `miles-dsv41-lora` image, and serves from the `sglang-dsv41-lora` image. Its adapters cover the attention projections `wq_a`, `wkv`, `wq_b`, `wo_b` and the shared expert; routed experts, the router, the Engram tables and `wo_a` stay frozen, as does the unembedding.
+
 ## Prepare and launch
 
 ~~~text

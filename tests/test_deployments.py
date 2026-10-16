@@ -11,6 +11,7 @@ import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
 from spindle.backends.megatron_config import parse_backend_config
+from spindle.backends.miles_config import MilesBackendConfig, lora_target_flags
 from spindle.backends.miles_arguments import (
     apply_config_overrides,
     defer_config_overrides,
@@ -49,6 +50,8 @@ def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
     assert "capture_dir" not in backend_config(recipe())
     multi_node = backend_config(recipe("qwen38-27b-lora-256k"))
     assert multi_node["capture_dir"] == "/checkpoints/.spindle-captures"
+    dsv41 = backend_config(recipe("deepseek-v41-flash-lora-8k"))
+    assert dsv41["capture_dir"] == "/checkpoints/.spindle-captures"
 
 
 def test_presets_context_topology_and_backend_options():
@@ -101,6 +104,46 @@ def test_invalid_integrations_fail_when_building_backend_settings(changes, match
     with pytest.raises(ValueError, match=match):
         backend_config(spec)
         serving_options(spec)
+
+
+def test_deepseek_v41_lora_recipe():
+    row = resolved(recipe("deepseek-v41-flash-lora-8k"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert (
+        miles.world_size,
+        miles.tensor_model_parallel_size,
+        miles.pipeline_model_parallel_size,
+        miles.context_parallel_size,
+        miles.expert_model_parallel_size,
+        miles.expert_tensor_parallel_size,
+    ) == (16, 4, 1, 1, 16, 1)
+    arguments = miles.miles_arguments()
+    assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert "--use-dynamic-batch-size" not in arguments
+    assert miles.cli_options["qkv_format"] == "bshd"
+    assert miles.cli_options["moe_router_freeze_gate"] is True
+    assert lora_target_flags(miles.target_modules) == (True, True, False)
+
+    serving = row.inference_settings
+    assert serving["enable_lora"] is True
+    assert serving["max_lora_rank"] == 32
+    assert serving["lora_target_modules"] == [
+        "attn.wq_a",
+        "attn.wkv",
+        "attn.wq_b",
+        "attn.wo_b",
+        "ffn.shared_experts.w1",
+        "ffn.shared_experts.w2",
+        "ffn.shared_experts.w3",
+    ]
+    assert serving["disable_shared_experts_fusion"] is True
+    assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert serving["weight_loader_disable_mmap"] is False
+    assert (row.recipe.trainer_image, row.recipe.inference_image) == (
+        "miles-dsv41-lora",
+        "sglang-dsv41-lora",
+    )
 
 
 def test_asset_paths_follow_the_model():
