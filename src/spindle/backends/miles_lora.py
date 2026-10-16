@@ -21,6 +21,9 @@ from spindle.errors import BackendFailed
 from spindle.inference.bulletin import SnapshotBulletin
 
 from .contract import (
+    DimuonParams,
+    OptimizerFamily,
+    OptimizerParams,
     Backend,
     ForwardBatch,
     ModelSpec,
@@ -44,6 +47,7 @@ class MilesJobState:
     train_attn: bool
     train_mlp: bool
     train_unembed: bool
+    optimizer: OptimizerFamily = "adamw"
     accumulating: bool = False
     optimizer_step: int = 0
 
@@ -115,6 +119,7 @@ class MilesCommandBackend(Backend):
             train_attn=bool(lora.train_attn),
             train_mlp=bool(lora.train_mlp),
             train_unembed=bool(lora.train_unembed),
+            optimizer=spec.optimizer,
         )
         self._validate_job(state)
         if model_id in self.jobs:
@@ -126,6 +131,7 @@ class MilesCommandBackend(Backend):
                 current.train_attn,
                 current.train_mlp,
                 current.train_unembed,
+                current.optimizer,
             ) != (
                 state.rank,
                 state.alpha,
@@ -133,6 +139,7 @@ class MilesCommandBackend(Backend):
                 state.train_attn,
                 state.train_mlp,
                 state.train_unembed,
+                state.optimizer,
             ):
                 raise ValueError(
                     f"model {model_id} already has a different specification"
@@ -147,7 +154,10 @@ class MilesCommandBackend(Backend):
         self.job_to_slot[model_id] = slot
         self.slot_to_job[slot] = model_id
         try:
-            self.runtime.load_slot(slot, state.rank, state.alpha)
+            if state.optimizer == "dimuon":
+                self.runtime.load_dimuon_slot(slot, state.rank, state.alpha)
+            else:
+                self.runtime.load_slot(slot, state.rank, state.alpha)
         except BaseException:
             self._release(model_id, slot)
             self.jobs.pop(model_id, None)
@@ -222,17 +232,27 @@ class MilesCommandBackend(Backend):
     def optim_step(
         self,
         model_ids: tuple[str, ...],
-        adam: AdamParams,
+        params: OptimizerParams,
     ) -> tuple[OptimStepResponse, ...]:
         if not model_ids:
             return ()
         if len(set(model_ids)) != len(model_ids):
             raise ValueError("optim_step contains duplicate model ids")
         self._require_jobs(model_ids)
+        family = "dimuon" if isinstance(params, DimuonParams) else "adamw"
         for model_id in model_ids:
-            if not self.jobs[model_id].accumulating:
+            job = self.jobs[model_id]
+            if not job.accumulating:
                 raise ValueError(f"model {model_id} has no accumulated gradients")
-        parameters = _adam_parameters(adam)
+            if job.optimizer != family:
+                raise ValueError(
+                    f"model {model_id} uses the {job.optimizer} optimizer "
+                    f"and cannot take {family} parameters"
+                )
+        if isinstance(params, DimuonParams):
+            parameters = _dimuon_parameters(params)
+        else:
+            parameters = _adam_parameters(params)
         by_slot = {
             self.job_to_slot[model_id]: parameters.copy() for model_id in model_ids
         }
@@ -311,6 +331,7 @@ class MilesCommandBackend(Backend):
                 "train_mlp": state.train_mlp,
                 "train_unembed": state.train_unembed,
             },
+            "optimizer": state.optimizer,
             "optimizer_step": state.optimizer_step,
             "has_optimizer": include_optimizer,
             "topology": {
@@ -389,7 +410,12 @@ class MilesCommandBackend(Backend):
                 raise ValueError(f"invalid Miles checkpoint: {uri}") from exc
             state = self.jobs[model_id]
             self._validate_checkpoint(metadata, state, restore_optimizer)
-            self.runtime.load_slot(
+            load_slot = (
+                self.runtime.load_dimuon_slot
+                if state.optimizer == "dimuon"
+                else self.runtime.load_slot
+            )
+            load_slot(
                 self.job_to_slot[model_id],
                 state.rank,
                 state.alpha,
@@ -638,6 +664,13 @@ class MilesCommandBackend(Backend):
             raise ValueError("checkpoint topology does not match deployment")
         if restore_optimizer and not metadata.get("has_optimizer"):
             raise ValueError("checkpoint does not include optimizer state")
+        # Checkpoints written before optimizer families existed hold AdamW state.
+        stored_optimizer = metadata.get("optimizer", "adamw")
+        if restore_optimizer and stored_optimizer != state.optimizer:
+            raise ValueError(
+                f"checkpoint optimizer family {stored_optimizer} does not match "
+                f"the model's {state.optimizer}"
+            )
 
 
 def _adam_parameters(adam: AdamParams) -> dict[str, float]:
@@ -660,6 +693,21 @@ def _adam_parameters(adam: AdamParams) -> dict[str, float]:
     if values["weight_decay"] < 0 or values["grad_clip_norm"] < 0:
         raise ValueError("weight_decay and grad_clip_norm must be non-negative")
     return values
+
+
+def _dimuon_parameters(params: DimuonParams) -> dict[str, float | str]:
+    values = {
+        "learning_rate": float(params.learning_rate),
+        "beta1": float(params.beta1),
+        "grad_clip_norm": float(params.grad_clip_norm),
+    }
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("Dimuon parameters must be finite")
+    if values["learning_rate"] < 0 or values["grad_clip_norm"] < 0:
+        raise ValueError("learning_rate and grad_clip_norm must be non-negative")
+    if not 0 <= values["beta1"] < 1:
+        raise ValueError("dimuon beta1 must be in [0, 1)")
+    return {"type": "dimuon", **values}
 
 
 def _install_capture(

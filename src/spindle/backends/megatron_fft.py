@@ -19,6 +19,7 @@ from .contract import (
     Backend,
     ForwardBatch,
     ModelSpec,
+    OptimizerParams,
     SamplerPublication,
 )
 from .megatron_config import parse_backend_config
@@ -159,9 +160,11 @@ class FFTMegatronBackend(Backend):
     def optim_step(
         self,
         model_ids: tuple[str, ...],
-        adam: AdamParams,
+        params: OptimizerParams,
     ) -> tuple[OptimStepResponse, ...]:
-        return (self._optim_step(model_ids[0], adam),)
+        if not isinstance(params, AdamParams):
+            raise ValueError("FFT backend supports only AdamW parameters")
+        return (self._optim_step(model_ids[0], params),)
 
     def _optim_step(
         self,

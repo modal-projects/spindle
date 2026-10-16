@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from importlib.metadata import distribution
@@ -147,3 +148,25 @@ image = (
     .run_commands(DSA_KERNEL_INSTALL)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+
+# Local Miles checkout mounted over the image's Miles package, for testing unreleased Miles changes.
+MILES_TREE_ENV = "SPINDLE_MILES_TREE"
+
+
+def mount_local_miles_tree(base: modal.Image, tree: str) -> modal.Image:
+    """Returns ``base`` with ``<tree>/miles`` mounted over the installed Miles package.
+
+    Raises ValueError when ``tree`` is not a Miles checkout.
+    """
+    package = Path(tree, "miles")
+    if not (package / "__init__.py").is_file():
+        raise ValueError(f"{MILES_TREE_ENV}={tree} is not a Miles checkout")
+    print(
+        f"spindle: mounting local Miles tree {package} over {MILES_PATH}/miles",
+        flush=True,
+    )
+    return base.add_local_dir(package, f"{MILES_PATH}/miles")
+
+
+if os.environ.get(MILES_TREE_ENV):
+    image = mount_local_miles_tree(image, os.environ[MILES_TREE_ENV])

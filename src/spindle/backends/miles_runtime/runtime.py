@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import shlex
 import subprocess
@@ -99,6 +100,34 @@ class MilesRuntime:
                 alpha,
                 ckpt_path=checkpoint,
                 load_optimizer=restore_optimizer,
+            )
+        )
+
+    def load_dimuon_slot(
+        self,
+        slot: int,
+        rank: int,
+        alpha: float,
+        *,
+        checkpoint: str | None = None,
+        restore_optimizer: bool = True,
+    ) -> None:
+        """Loads a slot whose per-slot Miles optimizer is Dimuon.
+
+        Raises BackendFailed when the deployed Miles revision has no per-slot optimizer families.
+        """
+        if "optimizer" not in inspect.signature(self._bridge.load_slot).parameters:
+            raise BackendFailed(
+                f"Miles revision {self.revision} does not support the dimuon optimizer"
+            )
+        self._run(
+            self._bridge.load_slot(
+                slot,
+                rank,
+                alpha,
+                ckpt_path=checkpoint,
+                load_optimizer=restore_optimizer,
+                optimizer="dimuon",
             )
         )
 
