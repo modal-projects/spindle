@@ -1,4 +1,4 @@
-"""Persistent Triton/TorchInductor/TileLang kernel cache shared across trainer containers.
+"""Persistent Triton/TorchInductor kernel cache shared across trainer containers.
 
 Trainers run in single-use containers, so without this every instance compiles
 its kernels from scratch. Mounting one v2 Volume at ``KERNEL_CACHE_ROOT`` and
@@ -21,5 +21,4 @@ kernel_cache_volume = modal.Volume.from_name(
 KERNEL_CACHE_ENV = {
     "TRITON_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/triton",
     "TORCHINDUCTOR_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/inductor",
-    "TILELANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/tilelang",
 }

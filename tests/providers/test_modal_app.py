@@ -237,34 +237,6 @@ def test_prepare_model_leaves_lora_pool_to_trainer_boot(
     assert spawned == ([pool] if spawns_pool else [])
 
 
-def test_prepare_model_downloads_assets_once_per_definition(monkeypatch) -> None:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    registry = InMemoryKeyValueStore()
-    prepared = []
-
-    async def prepare(definition_id: str) -> None:
-        prepared.append(definition_id)
-
-    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
-    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
-    monkeypatch.setattr(
-        modal_app,
-        "prepare_model_assets",
-        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
-    )
-
-    async def run() -> None:
-        model = SimpleNamespace(
-            engine_definition_id=LORA_DEFINITION, model_id="session:train:0", spec={}
-        )
-        await modal_app._plane().prepare_model(model)
-        await modal_app._plane().prepare_model(model)
-        assert await registry.get(f"model_assets_ready:{LORA_DEFINITION}") is not None
-
-    asyncio.run(run())
-    assert prepared == [LORA_DEFINITION]
-
-
 def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     events = []

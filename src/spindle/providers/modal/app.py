@@ -236,15 +236,6 @@ async def ensure_lora_pool(spec: dict) -> str:
     return gateway
 
 
-async def _ensure_model_assets(definition_id: str) -> None:
-    """Download the base weights once per definition; later calls skip the container start."""
-    key = f"model_assets_ready:{definition_id}"
-    if await shared_kv().get(key) is not None:
-        return
-    await prepare_model_assets.remote.aio(definition_id)
-    await shared_kv().put(key, time.time())
-
-
 async def _trainer_booted(registry, definition_id: str) -> bool:
     return any(
         record.definition_id == definition_id
@@ -490,7 +481,7 @@ def _plane():
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
-        await _ensure_model_assets(model.engine_definition_id)
+        await prepare_model_assets.remote.aio(model.engine_definition_id)
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         elif await _trainer_booted(kv, model.engine_definition_id):
@@ -504,7 +495,7 @@ def _plane():
         parameterization = parameterization_for(definition_id)
         if parameterization == "lora":
             if session.model_id is None:
-                await _ensure_model_assets(definition_id)
+                await prepare_model_assets.remote.aio(definition_id)
             await _ready_lora_pool(LoraPoolSpec(definition_id))
             return
         if parameterization != "full":
@@ -525,7 +516,7 @@ def _plane():
         record = await registry.get(key)
         if record is None:
             if session.model_id is None:
-                await _ensure_model_assets(definition_id)
+                await prepare_model_assets.remote.aio(definition_id)
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
             await ensure_fft_pool.remote.aio(pool.as_dict())

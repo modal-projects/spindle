@@ -134,10 +134,10 @@ download prints `assets_ready` (`model-assets`).
 The control plane also keeps `spawned_at`, `started_at`, `ready_at` and the
 phase breakdown on each trainer instance record, next to its state.
 
-To turn the logs into one table per container:
+To list a deployment's marks as a table:
 
 ```bash
-uv run modal app logs spindle-trainer-<config> > trainer.log
-uv run modal app logs spindle-lora-<definition id> > sampler.log
-uv run scripts/cold_start_report.py trainer.log sampler.log
+uv run modal app logs spindle-trainer-<config> \
+  | grep -o '{"event": "spindle_startup_mark".*}' \
+  | jq -r '[.component, .mark, .since_start_s, .phase_s] | @tsv'
 ```
