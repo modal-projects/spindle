@@ -25,7 +25,6 @@ from spindle.inference.serving import (
     terminate,
     wait_http,
 )
-
 from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timeline
 
 from .app_tags import app_tags
