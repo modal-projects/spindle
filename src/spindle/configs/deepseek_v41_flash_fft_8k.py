@@ -83,6 +83,9 @@ class Config(BaseConfig):
         "max_running_requests": 32,
         "max_queued_requests": 8,
         "weight_update_staging": "disk",
+        # Staging the 1.3 TB checkpoint on local disk blocks the scheduler for
+        # longer than SGLang's default watchdog allows.
+        "watchdog_timeout": 3600,
         "weight_update_local_checkpoint_dir": "/tmp/spindle-canonical-checkpoint",
     }
 
