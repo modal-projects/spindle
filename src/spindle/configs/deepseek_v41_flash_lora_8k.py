@@ -71,7 +71,7 @@ class Config(BaseConfig):
     inference_memory_mib = 700_000
     inference_disk_mib = 600_000
     inference_max_replicas = 2
-    inference_startup_timeout_s = 3600
+    inference_startup_timeout_s = 7200
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
         "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
