@@ -73,6 +73,7 @@ def test_trainer_declaration_and_executor_configuration(
     app, trainer = deployment_apps.build_trainer_app(row, platform, image=image)
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
+    assert declaration["ephemeral_disk"] is None
     assert declaration["region"] is None
     assert declaration["max_containers"] is None
     assert declaration["single_use_containers"] is True
@@ -402,15 +403,18 @@ def test_declared_compute_settings_reach_modal(builders):
     spec.trainer_timeout_s = 90
     spec.trainer_cpu = 12
     spec.trainer_memory_mib = 123456
+    spec.trainer_disk_mib = 600_000
     spec.inference_startup_timeout_s = 90
     spec.inference_min_replicas = 1
     spec.inference_max_replicas = 3
     spec.inference_cpu = 6
     spec.inference_memory_mib = 45000
+    spec.inference_disk_mib = 550_000
     row = DeploymentConfig.create(spec)
     trainer_app, _ = deployment_apps.build_trainer_app(row, image="test")
     trainer, _ = trainer_app.functions["trainer"]
     assert (trainer["cpu"], trainer["memory"], trainer["timeout"]) == (12, 123456, 90)
+    assert trainer["ephemeral_disk"] == 600_000
     pool_app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
@@ -421,6 +425,7 @@ def test_declared_compute_settings_reach_modal(builders):
         90,
     )
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
+    assert server["ephemeral_disk"] == 550_000
 
 
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
