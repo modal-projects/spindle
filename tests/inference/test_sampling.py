@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from spindle.inference import sampling
 from spindle.inference.sampling import sample_task
+from spindle.inference.model_placement import ModelPlacement
+from spindle.inference.routing import InferenceRouter, Engine
 
 
 def response(
@@ -42,6 +44,154 @@ def task(*, latest: bool = False) -> dict:
             "sampling_params": {"max_tokens": 1, "seed": 10},
         },
     }
+
+
+def routing_pool():
+    return InferenceRouter(
+        AsyncMock(
+            return_value=[
+                Engine(h, h + ":8000", 0, frozenset(), (), (), 0) for h in ("a", "b")
+            ]
+        ),
+        policy=ModelPlacement(capacity=8),
+    )
+
+
+@pytest.mark.parametrize("failure", [503, "version", "transport"])
+def test_model_routing_retries_elsewhere_and_releases_reservations(
+    monkeypatch, failure
+):
+    monkeypatch.setattr(sampling, "RETRY_INITIAL_DELAY_SECONDS", 0)
+
+    async def scenario():
+        router = routing_pool()
+        attempts = []
+
+        def handle(request):
+            assert "Modal-Session-ID" not in request.headers
+            assert "Modal-Routing-Affinity-Key" not in request.headers
+            assert json.loads(request.content)["weight_version"]["exact_version"] == 7
+            attempts.append(request.headers["Modal-Flash-Upstream"])
+            if len(attempts) == 1:
+                if failure == "transport":
+                    raise httpx.ReadError("closed")
+                if failure == "version":
+                    return response(6)
+                return httpx.Response(failure)
+            return response(7)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            headers={
+                "Modal-Session-ID": "inherited",
+                "Modal-Routing-Affinity-Key": "old",
+            },
+        ) as client:
+            try:
+                result = await sample_task(
+                    task(), "http://rollout", client=client, router=router
+                )
+                assert result["sequences"][0]["tokens"] == [5]
+                assert len(attempts) == 2 and attempts[0] != attempts[1]
+                assert not router.reservations and not router.host_reservations
+            finally:
+                await router.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_saturated_pool_falls_back_to_flash_with_native_retry_affinity(monkeypatch):
+    monkeypatch.setattr(sampling, "RETRY_INITIAL_DELAY_SECONDS", 0)
+
+    async def scenario():
+        router = routing_pool()
+        attempts = []
+
+        def handle(request):
+            destination = request.headers.get("Modal-Flash-Upstream")
+            attempts.append(destination)
+            if destination is not None:
+                return httpx.Response(503)
+            body = json.loads(request.content)
+            assert body["session_id"].startswith("affinity-")
+            assert (
+                request.headers["Modal-Session-ID"] == body["session_id"] + ":retry-2"
+            )
+            assert body["weight_version"]["exact_version"] == 7
+            return response(7)
+
+        request = task()
+        request["payload"]["cache_affinity_key"] = "conversation"
+        try:
+            await sample_task(
+                request,
+                "http://rollout",
+                router=router,
+                transport=httpx.MockTransport(handle),
+            )
+            assert set(attempts[:2]) == {"a:8000", "b:8000"}
+            assert attempts[2:] == [None]
+            assert not router.reservations and not router.host_reservations
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_model_routing_releases_cancelled_generation():
+    async def scenario():
+        router = routing_pool()
+        entered = asyncio.Event()
+
+        async def handle(request):
+            entered.set()
+            await asyncio.Future()
+
+        operation = asyncio.create_task(
+            sample_task(
+                task(),
+                "http://rollout",
+                transport=httpx.MockTransport(handle),
+                router=router,
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            assert len(router.reservations) == 1
+            operation.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await operation
+            assert not router.reservations and not router.host_reservations
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("latest", [False, True])
+def test_model_routing_falls_back_to_affinity_or_bypasses_latest(latest):
+    async def scenario():
+        router = routing_pool()
+        router.discover.return_value = []
+
+        def handle(request):
+            assert request.headers["Modal-Session-ID"] == "request-a"
+            assert "Modal-Flash-Upstream" not in request.headers
+            return response(7)
+
+        try:
+            await sample_task(
+                task(latest=latest),
+                "http://rollout",
+                transport=httpx.MockTransport(handle),
+                router=router,
+            )
+            assert router.discover.await_count == (0 if latest else 1)
+            assert not router.reservations
+        finally:
+            await router.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_exact_sampling_pins_version() -> None:
@@ -510,6 +660,7 @@ def test_exact_sampling_rejects_wrong_response_version() -> None:
 
 def test_default_transport_enables_tcp_keepalive() -> None:
     transport = sampling.keepalive_transport()
+    assert transport._pool._max_connections == 100
     assert transport._pool._socket_options == list(sampling.TCP_KEEPALIVE_OPTIONS)
     assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in sampling.TCP_KEEPALIVE_OPTIONS
 
@@ -655,3 +806,56 @@ def test_tokenizerless_sampler_accepts_stop_token_ids():
         )
     )
     assert seen[0]["stop_token_ids"] == [7, 9]
+
+
+def test_large_http1_group_dispatches_before_any_generation_finishes():
+    async def run():
+        arrived, release = asyncio.Event(), asyncio.Event()
+        count = 0
+        body = response(7).content
+
+        async def engine(reader, writer):
+            nonlocal count
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":", 1)[1])
+                for line in headers.split(b"\r\n")
+                if line.lower().startswith(b"content-length:")
+            )
+            await reader.readexactly(length)
+            count += 1
+            if count == 128:
+                arrived.set()
+            await release.wait()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode()
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(engine, "127.0.0.1", 0, backlog=256)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            request = task()
+            request["payload"]["num_samples"] = 128
+            router = routing_pool()
+            samples = asyncio.create_task(
+                sample_task(
+                    request, f"http://127.0.0.1:{port}", timeout=10, router=router
+                )
+            )
+            try:
+                # The old transport admits only 100 requests and deadlocks on
+                # this barrier until the test releases their responses.
+                await asyncio.wait_for(arrived.wait(), 5)
+            finally:
+                release.set()
+                result = await asyncio.wait_for(samples, 10)
+            await router.aclose()
+            assert len(result["sequences"]) == count == 128
+
+    asyncio.run(run())

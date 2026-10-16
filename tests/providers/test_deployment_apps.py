@@ -108,6 +108,16 @@ def test_trainer_declaration_and_executor_configuration(
     assert reloaded == [True]
 
 
+def test_model_placement_enables_native_catalog_only_for_lora_pool(builders):
+    row = deployment("qwen35-9b-lora-16k")
+    row.recipe.inference_lora_routing = "model-spill"
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test-image"
+    )
+    settings, _ = app.servers["Server"]
+    assert settings["env"]["SGLANG_SPINDLE_MODEL_ROUTING"] == "1"
+
+
 @pytest.mark.parametrize("kind", ["lora", "base", "latest", "pinned"])
 def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, kind):
     row = deployment("qwen35-9b-lora-16k" if kind == "lora" else "qwen35-4b-fft-64k")
@@ -131,6 +141,7 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     assert settings["target_concurrency"] == 16
     assert "compute_region" not in settings
     assert "routing_region" not in settings
+    assert "SGLANG_SPINDLE_MODEL_ROUTING" not in settings["env"]
 
     calls, commands, stops = [], [], []
     process = object()
