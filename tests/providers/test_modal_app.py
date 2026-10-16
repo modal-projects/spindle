@@ -69,8 +69,7 @@ def test_lora_sampling_shares_router_across_models_only_when_enabled(
     asyncio.run(scenario())
     assert factory.call_count == (1 if policy == "joint" else 0)
     assert all(
-        call.kwargs["router"]
-        is (factory.return_value if policy == "joint" else None)
+        call.kwargs["router"] is (factory.return_value if policy == "joint" else None)
         for call in sample.await_args_list
     )
 

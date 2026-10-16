@@ -148,7 +148,9 @@ def create_app(
             decode_tokens=payload.get("sampling_params", {}).get("max_new_tokens", 1),
         )
         app.state.measurements["arrivals"] += 1
-        app.state.measurements["route_" + request.headers.get("x-spindle-benchmark-route", "unknown")] += 1
+        app.state.measurements[
+            "route_" + request.headers.get("x-spindle-benchmark-route", "unknown")
+        ] += 1
         try:
             response = await generate_response(request, payload)
             app.state.measurements["http_" + str(response.status_code)] += 1

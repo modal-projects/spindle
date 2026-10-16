@@ -245,7 +245,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         env=deployment_env(
             recipe.inference_env
             | (
-                {"SGLANG_SPINDLE_MODEL_ROUTING": "1", "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
+                {
+                    "SGLANG_SPINDLE_MODEL_ROUTING": "1",
+                    "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
+                }
                 if lora and recipe.inference_lora_routing in {"joint", "least_load"}
                 else {}
             )

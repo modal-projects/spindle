@@ -15,6 +15,7 @@ from scripts.benchmarks.lora_routing.recovery import atomic_json
 from scripts.benchmarks.lora_routing.supervise import resources
 from scripts.benchmarks.rl_four_arm.guard import inspect
 from scripts.benchmarks.rl_four_arm.prepare_holders import prepare
+from spindle.deployments import DeploymentConfig
 
 REPO = Path(__file__).resolve().parents[3]
 POLICIES = ("default", "joint")
@@ -113,9 +114,9 @@ def main():
                     future.result()
             if runner is None and all(f.done() for f in ready.values()):
                 for p in POLICIES:
-                    app = json.loads((root / p / "deployment.json").read_text())[
-                        "trainer_app_name"
-                    ]
+                    app = DeploymentConfig.model_validate_json(
+                        (root / p / "deployment.json").read_text()
+                    ).trainer_app_name
                     candidates = [
                         r
                         for r in known.values()

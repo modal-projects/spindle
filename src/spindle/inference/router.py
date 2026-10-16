@@ -41,7 +41,8 @@ class Router:
                 try:
                     rows = await asyncio.wait_for(self.discover(), timeout=3)
                     self.scheduler.update_snapshot(json.dumps(rows))
-                except Exception:  # Telemetry/discovery failure must not kill the poller.
+                except Exception:
+                    # A discovery failure must not kill the poller.
                     log.warning(
                         "Routing observations unavailable; waiting for a fresh snapshot"
                     )

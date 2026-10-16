@@ -1,9 +1,12 @@
 """Build the small Python extension once per Rust source revision."""
 
 from pathlib import Path
+import sysconfig
 import modal
 
 SOURCE = Path(__file__).resolve().parents[4] / "rust/router"
+if not SOURCE.is_dir():
+    SOURCE = Path(sysconfig.get_path("data")) / "share/spindle/router"
 
 
 def router_image():
