@@ -60,6 +60,7 @@ class Config(BaseConfig):
             "recompute_num_layers": 1,
             "distributed_timeout_minutes": 120,
             "deterministic_mode": True,
+            "attention_softmax_in_fp32": True,
         },
     }
     trainer_env = {
@@ -83,6 +84,8 @@ class Config(BaseConfig):
         "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
         # A BF16 checkpoint must not be routed to the FP4 expert kernels.
         "SGLANG_DSV4_FP4_EXPERTS": "0",
+        # Keep the wo_a projection in BF16 so sampling matches the trainer.
+        "SGLANG_OPT_FP8_WO_A_GEMM": "0",
     }
     sglang_cfg = {
         "tp_size": 8,
