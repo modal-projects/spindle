@@ -62,7 +62,7 @@ def test_json_and_protobuf_normalize_to_the_same_forward_payload() -> None:
     )
 
 
-def proto_forward_backward(**loss_fn_configs) -> bytes:
+def encode_forward_backward_request(**loss_fn_configs) -> bytes:
     message = tinker_public_pb2.ForwardBackwardRequest(
         model_id="model-a", seq_id=7, loss_fn="ppo", **loss_fn_configs
     )
@@ -71,7 +71,7 @@ def proto_forward_backward(**loss_fn_configs) -> bytes:
 
 
 def test_protobuf_loss_fn_config_v2_numbers_are_used() -> None:
-    body = proto_forward_backward(
+    body = encode_forward_backward_request(
         loss_fn_config={"clip_low_threshold": 0.5},
         loss_fn_config_v2={
             "clip_low_threshold": tinker_public_pb2.LossConfigValue(number=0.8),
@@ -88,7 +88,7 @@ def test_protobuf_loss_fn_config_v2_numbers_are_used() -> None:
 
 
 def test_protobuf_legacy_loss_fn_config_is_used_without_v2() -> None:
-    body = proto_forward_backward(loss_fn_config={"clip_low_threshold": 0.5})
+    body = encode_forward_backward_request(loss_fn_config={"clip_low_threshold": 0.5})
 
     payload = decode_forward_backward(body, "application/x-protobuf")[3]
 
@@ -96,7 +96,7 @@ def test_protobuf_legacy_loss_fn_config_is_used_without_v2() -> None:
 
 
 def test_protobuf_string_loss_fn_config_is_rejected() -> None:
-    body = proto_forward_backward(
+    body = encode_forward_backward_request(
         loss_fn_config={"clip_low_threshold": 0.8},
         loss_fn_config_v2={
             "clip_low_threshold": tinker_public_pb2.LossConfigValue(number=0.8),
