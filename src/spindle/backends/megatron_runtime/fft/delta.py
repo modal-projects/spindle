@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import struct
 import time
 from collections import deque
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import modal
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -19,14 +18,14 @@ import xxhash
 import zstandard
 from safetensors import safe_open
 from safetensors.numpy import save
-from stitch.publish import publish_version as stitch_publish_version
 from stitch.types import VersionKind, VersionManifest, VersionRef
 
-from spindle.inference.fft_bulletin import (
-    FFTSnapshotBulletin,
-    FFTSnapshotStore,
+from spindle.backends.fft_publication import (
+    bulletin_board,
+    discard_staged,
+    publish_staged,
 )
-from spindle.providers.modal.scoped_pool import publication_pool
+from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 _INDEX = "model.safetensors.index.json"
 _MAX_SHARD_BYTES = 512 << 20
@@ -77,15 +76,17 @@ class FFTDeltaWriter:
     def capture(
         self,
         *,
-        bridge,
-        model,
+        weights: Iterable[tuple[str, Any]],
         model_id: str,
         publish_version: int,
         optimizer_step: int,
         base_model: str,
         hf_checkpoint: str,
         bulletin_root: str,
+        definition_revision: str | None = None,
     ) -> FFTCapturedDelta:
+        """Encode ``weights``, a collective stream of Hugging Face named
+        tensors that every rank drives in lockstep and only rank zero reads."""
         ref = VersionRef(model_id, publish_version)
         parent = VersionRef(model_id, publish_version - 1)
         board = FFTSnapshotBulletin(bulletin_root)
@@ -142,13 +143,7 @@ class FFTDeltaWriter:
 
         pool = ThreadPoolExecutor(max_workers=workers)
         try:
-            for exported in bridge.export_hf_weights(
-                model,
-                cpu=False,
-                show_progress=False,
-                merge_adapter_weights=True,
-            ):
-                name, tensor = exported.param_name, exported.weight
+            for name, tensor in weights:
                 if not writer:
                     continue
                 seen.add(name)
@@ -199,7 +194,7 @@ class FFTDeltaWriter:
             "base_model": base_model,
             "optimizer_step": optimizer_step,
             "parameterization": "full",
-            "definition_revision": os.environ.get("SPINDLE_DEFINITION_REVISION"),
+            "definition_revision": definition_revision,
         }
         self._parent = ref
         elapsed = time.perf_counter() - started
@@ -228,47 +223,33 @@ class FFTDeltaWriter:
     ) -> None:
         if dist.get_rank() != 0:
             return
-        board = FFTSnapshotBulletin(
-            bulletin_root,
-            commit=modal.Volume.from_name(
-                bulletin_volume,
-                version=2,
-            ).commit,
-        )
-        staging = board.staging_dir(snapshot.ref)
+        board = bulletin_board(bulletin_root, bulletin_volume)
         try:
-            staging.mkdir(parents=True, exist_ok=True)
-            for shard in snapshot.shards:
-                blob = save(shard.tensors, metadata=shard.checksums)
-                (staging / shard.filename).write_bytes(blob)
-            (staging / _INDEX).write_text(
-                json.dumps(
-                    {
-                        "metadata": snapshot.metadata,
-                        "weight_map": snapshot.weight_map,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                encoding="utf-8",
-            )
-            board.prepare(snapshot.ref, staging, metadata=snapshot.metadata)
-            pool = publication_pool(
-                os.environ["SPINDLE_DEFINITION_ID"],
-                snapshot.ref.run_id,
-            )
-            stitch_publish_version(
-                FFTSnapshotStore(board, snapshot.ref.run_id),
-                pool,
-                str(staging),
-                run_id=snapshot.ref.run_id,
-            )
+            self.stage(snapshot, board)
+            publish_staged(board, ref=snapshot.ref, metadata=snapshot.metadata)
         except BaseException:
-            current = board.read_latest(snapshot.ref.run_id)
-            if current is None or current == snapshot.parent:
-                shutil.rmtree(board.snapshot_dir(snapshot.ref), ignore_errors=True)
-            shutil.rmtree(board.staging_dir(snapshot.ref), ignore_errors=True)
+            discard_staged(board, ref=snapshot.ref, parent=snapshot.parent)
             raise
+
+    def stage(self, snapshot: FFTCapturedDelta, board: FFTSnapshotBulletin) -> Path:
+        """Write the delta's files into the bulletin's staging directory."""
+        staging = board.staging_dir(snapshot.ref)
+        staging.mkdir(parents=True, exist_ok=True)
+        for shard in snapshot.shards:
+            blob = save(shard.tensors, metadata=shard.checksums)
+            (staging / shard.filename).write_bytes(blob)
+        (staging / _INDEX).write_text(
+            json.dumps(
+                {
+                    "metadata": snapshot.metadata,
+                    "weight_map": snapshot.weight_map,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        return staging
 
     def _load_base(self, source: Path, parent: VersionRef) -> None:
         try:
