@@ -14,6 +14,7 @@ from stitch.types import VersionKind, VersionManifest, VersionRef
 from spindle.inference.fft_bulletin import FFTSnapshotBulletin
 
 with backend_runtime_imports():
+    from spindle.backends import fft_publication
     from spindle.backends.megatron_runtime.fft import delta as delta_module
     from spindle.backends.megatron_runtime.fft.delta import FFTDeltaWriter
 
@@ -84,6 +85,13 @@ class FakeDeltaEncoder:
         )
 
 
+def _weights(bridge):
+    exported = bridge.export_hf_weights(
+        "model", cpu=False, show_progress=False, merge_adapter_weights=True
+    )
+    return ((item.param_name, item.weight) for item in exported)
+
+
 def use_fake_runtime(monkeypatch) -> None:
     def read_tensors(path, names):
         with safe_open(path, framework="numpy") as shard:
@@ -92,7 +100,7 @@ def use_fake_runtime(monkeypatch) -> None:
     monkeypatch.setattr(delta_module, "DeltaEncoder", FakeDeltaEncoder)
     monkeypatch.setattr(delta_module, "_read_tensors", read_tensors)
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "modal",
         SimpleNamespace(
             Volume=SimpleNamespace(
@@ -108,11 +116,11 @@ def use_fake_runtime(monkeypatch) -> None:
 def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> None:
     pool = object()
     published_pools = []
-    publish_version = delta_module.stitch_publish_version
+    publish_version = fft_publication.stitch_publish_version
     monkeypatch.setenv("SPINDLE_DEFINITION_ID", "full-test")
-    monkeypatch.setattr(delta_module, "publication_pool", lambda *_: pool)
+    monkeypatch.setattr(fft_publication, "publication_pool", lambda *_: pool)
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "stitch_publish_version",
         lambda store, selected, path, **kwargs: (
             published_pools.append(selected),
@@ -180,8 +188,7 @@ def test_delta_writer_publishes_first_delta_from_base(tmp_path, monkeypatch) -> 
 
     writer = FFTDeltaWriter()
     snapshot = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=1,
@@ -280,8 +287,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
 
     writer = FFTDeltaWriter()
     first = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=1,
@@ -297,8 +303,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
 
     current[:] = [4.0, 3.0]
     second = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=2,
         optimizer_step=2,
@@ -306,7 +311,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         hf_checkpoint=str(base_dir),
         bulletin_root=str(root),
     )
-    publish_version = delta_module.stitch_publish_version
+    publish_version = fft_publication.stitch_publish_version
 
     def fail_after_store(store, _pool, path, *, run_id):
         manifest = VersionManifest.from_hf_index(path, run_id=run_id)
@@ -314,7 +319,7 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
         raise RuntimeError("publish failed")
 
     monkeypatch.setattr(
-        delta_module,
+        fft_publication,
         "stitch_publish_version",
         fail_after_store,
     )
@@ -327,10 +332,9 @@ def test_delta_writer_recovers_after_failed_publish(tmp_path, monkeypatch) -> No
     assert board.read_latest("run-a") == VersionRef("run-a", 1)
     assert not board.snapshot_dir(VersionRef("run-a", 2)).exists()
 
-    monkeypatch.setattr(delta_module, "stitch_publish_version", publish_version)
+    monkeypatch.setattr(fft_publication, "stitch_publish_version", publish_version)
     retry = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=2,
         optimizer_step=2,
@@ -398,8 +402,7 @@ def test_delta_writer_publishes_unchanged_base_as_version_one(
 
     writer = FFTDeltaWriter()
     snapshot = writer.capture(
-        bridge=Bridge(),
-        model="model",
+        weights=_weights(Bridge()),
         model_id="run-a",
         publish_version=1,
         optimizer_step=0,
