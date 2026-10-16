@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import importlib
 import itertools
 import json
@@ -196,6 +197,26 @@ def test_real_sdk_sampling_loop(base_url: str) -> None:
         [1, 2, 3],
     ]
     assert sampling.get_base_model() == BASE_MODEL
+
+
+def test_real_sdk_sequences_carry_distinct_sequence_ids(base_url: str) -> None:
+    sequence_fields = {
+        field.name for field in dataclasses.fields(types.SampledSequence)
+    }
+    if "sequence_id" not in sequence_fields:
+        pytest.skip("Tinker SDK before 0.26 has no SampledSequence.sequence_id")
+    service = tinker.ServiceClient(base_url=base_url, api_key=API_KEY)
+    sampling = service.create_sampling_client(base_model=BASE_MODEL)
+
+    result = sampling.sample(
+        prompt=types.ModelInput.from_ints([1, 2, 3]),
+        num_samples=2,
+        sampling_params=types.SamplingParams(max_tokens=3, seed=42),
+    ).result(timeout=30)
+
+    sequence_ids = [sequence.sequence_id for sequence in result.sequences]
+    assert all(sequence_ids)
+    assert len(set(sequence_ids)) == len(sequence_ids)
 
 
 def test_real_sdk_named_sampler_export_and_reload(base_url: str) -> None:
