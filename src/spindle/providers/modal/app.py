@@ -65,6 +65,7 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
+from .model_routing import create_model_router
 from .trainer_reconciler import (
     complete_reconcile,
     pending_reconciliations,
@@ -89,6 +90,7 @@ CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
 _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
+_model_routers = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
@@ -299,6 +301,19 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
+        policy = definition.recipe.inference_lora_routing
+        if policy not in {"affinity", "model-spill"}:
+            raise ValueError(f"unknown LoRA routing policy: {policy}")
+        router = None
+        if policy == "model-spill" and task.get("model_id") is not None:
+            if spec.app_name not in _model_routers:
+                _model_routers[spec.app_name] = create_model_router(
+                    spec.app_name,
+                    gateway,
+                    capacity=definition.inference_settings.get("max_running_requests")
+                    or definition.recipe.inference_target_concurrency,
+                )
+            router = _model_routers[spec.app_name]
 
         async def keep_pool_ready() -> None:
             # Retries can outlive the cached readiness check. The pool's URL
@@ -312,6 +327,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             headers=proxy_auth_headers(),
             context_length=definition.max_context_length,
             stop_token_ids_only=stop_token_ids_only,
+            model_router=router,
             on_wait=keep_pool_ready,
             stats=stats,
         )
