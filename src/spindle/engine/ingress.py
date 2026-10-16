@@ -60,8 +60,6 @@ def decode_forward_backward(
 def _proto_loss_fn_config(
     message: tinker_public_pb2.ForwardBackwardRequest,
 ) -> dict[str, float] | None:
-    # Tinker SDK 0.26 and later also write loss_fn_config_v2, and put string
-    # values only there. Prefer it when present, as the SDK expects servers to.
     if not message.loss_fn_config_v2:
         return dict(message.loss_fn_config) or None
     config = {}
