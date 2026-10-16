@@ -58,6 +58,10 @@ results = await asyncio.gather(*(
 
 ## Adapter publication via the Bulletin
 
+For pools with many competing adapters, set `inference_lora_routing = "model-spill"`
+in the deployment recipe to enable model placement with load-based overflow.
+The default is Flash affinity routing. See [inference scheduling](inference-scheduling.md) for the policy and extension interface.
+
 Unlike the FFT case, sampler publication is done with full-weights adapters, such that using the same rollout pool for both monotonic min-weight versioning and exact versioning is cheap. The entire rollout pool supports arbitrary weight-version sampling, using SGLang's LRU-based eviction mechanism per container. The amount of concurrent LoRAs cached in-container CPU and on GPU can be tuned via `ROLLOUT_MAX_LOADED_LORAS` (which corresponds to sglang's `--max-loaded-loras`) and `ROLLOUT_MAX_LORAS_PER_BATCH` (which corresponds to sglang's `--max-loras-per-batch`) respectively. 
 
 When prefetching rollouts, set a maximum policy lag in your controller and retain
@@ -151,4 +155,3 @@ results tabluated:
 The deterministic path aims to give each client the same training results regardless of which other clients share its batches (think of it as batch-invariance for training). It uses deterministic attention kernels, fixed reduction layouts, and ordered per-client gradient accumulation, alongside batch-invariant inference.
 
 To enable it, build the patched FA3 artifacts, set SPINDLE_MILES_FA3_ARTIFACTS to their directory before deployment, and use the qwen3_5_9b_base_miles_lora_deterministic definition. The Tinker training code stays the same. We've validated on small math experiments (see  [LoRA validation](lora_validation.md) deterministic training section) but still need to do larger validation. Our changes to fa3 to make it deterministic also come at a throughput cost, and so this path remains experimental for now. 
-
