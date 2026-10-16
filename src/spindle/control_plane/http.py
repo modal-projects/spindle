@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from spindle.backends.contract import OPTIMIZER_FAMILIES
 from spindle.engine.api import JSON_OPERATIONS, OperationKind, submit_json_operation
 from spindle.errors import (
     EngineSaturated,
@@ -337,13 +338,12 @@ def create_control_plane_app(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
             )
-        if body.optimizer_config is not None:
-            family = body.optimizer_config.get("type")
-            if family != "adamw":
-                logging.getLogger(__name__).warning(
-                    "rejected unsupported optimizer: %s", family
-                )
-                raise ValueError(f"optimizer family {family} is not supported")
+        optimizer_family = (body.optimizer_config or {}).get("type", "adamw")
+        if optimizer_family not in OPTIMIZER_FAMILIES:
+            logging.getLogger(__name__).warning(
+                "rejected unsupported optimizer: %s", optimizer_family
+            )
+            raise ValueError(f"optimizer family {optimizer_family} is not supported")
         if body.parameterization is None:
             parameterization: Parameterization | None = (
                 "lora" if body.lora_config is not None else None
@@ -365,6 +365,8 @@ def create_control_plane_app(
             raise ValueError("lora parameterization is configured through lora_config")
         if body.rollout is not None and parameterization != "full":
             raise ValueError("rollout is only configurable for full parameterization")
+        if optimizer_family == "dimuon" and parameterization != "lora":
+            raise ValueError("dimuon requires lora parameterization")
         definition_id = definition_for(body.base_model, parameterization)
         if definition_id is None:
             raise HTTPException(
@@ -383,6 +385,7 @@ def create_control_plane_app(
                     d.model for d in definitions if d.definition_id == definition_id
                 ),
                 "lora_config": body.lora_config,
+                "optimizer_config": body.optimizer_config,
                 "parameterization": {"type": parameterization},
                 "rollout": body.rollout and body.rollout.model_dump(exclude_none=True),
                 "user_metadata": body.user_metadata,
@@ -477,6 +480,7 @@ def create_control_plane_app(
             "is_lora": parameterization["type"] == "lora",
             "lora_rank": lora_config.get("rank"),
             "parameterization": parameterization,
+            "optimizer_config": spec.get("optimizer_config") or {"type": "adamw"},
         }
 
     def operation_route(kind: OperationKind) -> None:

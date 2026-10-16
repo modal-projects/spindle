@@ -10,7 +10,13 @@ import pytest
 from stitch.types import VersionRef
 from tinker import AdamParams, Datum, LoraConfig, ModelInput, TensorData
 
-from spindle.backends import ForwardBatch, ForwardItem, ModelSpec, miles_lora
+from spindle.backends import (
+    DimuonParams,
+    ForwardBatch,
+    ForwardItem,
+    ModelSpec,
+    miles_lora,
+)
 from spindle.backends.miles_config import (
     MilesBackendConfig,
     lora_target_flags,
@@ -46,6 +52,19 @@ class FakeMilesRuntime:
     ):
         self.calls.append(
             ("load_slot", slot, rank, alpha, checkpoint, restore_optimizer)
+        )
+
+    def load_dimuon_slot(
+        self,
+        slot,
+        rank,
+        alpha,
+        *,
+        checkpoint=None,
+        restore_optimizer=True,
+    ):
+        self.calls.append(
+            ("load_dimuon_slot", slot, rank, alpha, checkpoint, restore_optimizer)
         )
 
     def unload_slot(self, slot):
@@ -125,6 +144,15 @@ def _spec(rank=8) -> ModelSpec:
         base_model="Qwen/Qwen3-4B",
         parameterization="lora",
         lora_config=LoraConfig(rank=rank),
+    )
+
+
+def _dimuon_spec(rank=8) -> ModelSpec:
+    return ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=rank),
+        optimizer="dimuon",
     )
 
 
@@ -875,3 +903,116 @@ def test_a_capture_short_of_a_nodes_shards_is_refused(monkeypatch, tmp_path):
 )
 def test_hf_targets_match_tinker_training_flags(targets, expected):
     assert lora_target_flags(targets) == expected
+
+
+def test_dimuon_model_loads_a_dimuon_slot(tmp_path):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _dimuon_spec())
+    assert runtime.calls[-1] == ("load_dimuon_slot", 0, 8, 32.0, None, True)
+
+
+def test_dimuon_optim_step_sends_dimuon_params_to_the_slot(tmp_path):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _dimuon_spec())
+    backend.jobs["model-a"].accumulating = True
+    backend.optim_step(("model-a",), DimuonParams(learning_rate=1e-2, beta1=0.8))
+    assert runtime.calls[-1] == (
+        "optim_step",
+        {
+            0: {
+                "type": "dimuon",
+                "learning_rate": 1e-2,
+                "beta1": 0.8,
+                "grad_clip_norm": 0.0,
+            }
+        },
+    )
+
+
+def test_adam_params_are_rejected_for_a_dimuon_model(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _dimuon_spec())
+    backend.jobs["model-a"].accumulating = True
+    with pytest.raises(ValueError, match="uses the dimuon optimizer"):
+        backend.optim_step(("model-a",), AdamParams(learning_rate=1e-4))
+
+
+def test_dimuon_params_are_rejected_for_an_adamw_model(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    backend.jobs["model-a"].accumulating = True
+    with pytest.raises(ValueError, match="uses the adamw optimizer"):
+        backend.optim_step(("model-a",), DimuonParams(learning_rate=1e-2))
+
+
+def test_model_cannot_be_respecified_with_another_optimizer(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    with pytest.raises(ValueError, match="different specification"):
+        backend.accept_model("model-a", _dimuon_spec())
+
+
+def test_checkpoint_records_the_optimizer_family(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _dimuon_spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=True
+    )
+    uri = Path(backend.persist_checkpoint("capture-a", "step-1"))
+    assert json.loads((uri / "metadata.json").read_text())["optimizer"] == "dimuon"
+
+
+def test_dimuon_checkpoint_restore_reloads_a_dimuon_slot(tmp_path):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _dimuon_spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=True
+    )
+    uri = backend.persist_checkpoint("capture-a", "step-1")
+    backend.load_checkpoint("model-a", uri, restore_optimizer=True)
+    assert runtime.calls[-1][0] == "load_dimuon_slot"
+
+
+def test_optimizer_restore_rejects_a_different_optimizer_family(tmp_path):
+    backend = _backend(tmp_path)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=True
+    )
+    uri = backend.persist_checkpoint("capture-a", "step-1")
+    backend.accept_model("model-b", _dimuon_spec())
+    with pytest.raises(ValueError, match="optimizer family"):
+        backend.load_checkpoint("model-b", uri, restore_optimizer=True)
+
+
+def test_weights_only_restore_accepts_a_different_optimizer_family(tmp_path):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _spec())
+    backend.capture_checkpoint(
+        "model-a", "capture-a", destination="step-1", include_optimizer=False
+    )
+    uri = backend.persist_checkpoint("capture-a", "step-1")
+    backend.accept_model("model-b", _dimuon_spec())
+    backend.load_checkpoint("model-b", uri, restore_optimizer=False)
+    assert runtime.calls[-1][0] == "load_dimuon_slot"
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), (("learning_rate", -1.0), ("grad_clip_norm", float("inf")))
+)
+def test_invalid_dimuon_parameters_rejected_before_runtime(tmp_path, name, value):
+    runtime = FakeMilesRuntime()
+    backend = _backend(tmp_path, runtime)
+    backend.accept_model("model-a", _dimuon_spec())
+    backend.jobs["model-a"].accumulating = True
+    values = {"learning_rate": 1e-2, "beta1": 0.9, "grad_clip_norm": 0.0}
+    values[name] = value
+    params = DimuonParams.model_construct(type="dimuon", **values)
+    calls = list(runtime.calls)
+    with pytest.raises(ValueError):
+        backend.optim_step(("model-a",), params)
+    assert runtime.calls == calls
