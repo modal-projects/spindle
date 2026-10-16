@@ -63,6 +63,8 @@ class Config(BaseConfig):
         },
     }
     trainer_env = {
+        # Lazily loaded kernels can deadlock against in-flight cross-node expert all-to-alls.
+        "CUDA_MODULE_LOADING": "EAGER",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
