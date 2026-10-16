@@ -7,7 +7,7 @@ import os
 import shutil
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +116,7 @@ class MilesCommandBackend(Backend):
             train_mlp=bool(lora.train_mlp),
             train_unembed=bool(lora.train_unembed),
         )
+        state = self._freeze_untargeted_unembed(model_id, state)
         self._validate_job(state)
         if model_id in self.jobs:
             current = self.jobs[model_id]
@@ -565,6 +566,21 @@ class MilesCommandBackend(Backend):
                 ),
                 flush=True,
             )
+
+    def _freeze_untargeted_unembed(
+        self, model_id: str, state: MilesJobState
+    ) -> MilesJobState:
+        """Tinker clients train the unembedding by default; a deployment
+        without an unembedding target keeps it frozen instead of refusing."""
+        _, _, unembed = lora_target_flags(self.config.target_modules)
+        if not state.train_unembed or unembed:
+            return state
+        print(
+            f"spindle_lora_unembed model={model_id} requested=true "
+            "applied=false reason=not_a_deployment_target",
+            flush=True,
+        )
+        return replace(state, train_unembed=False)
 
     def _validate_job(self, state: MilesJobState) -> None:
         if not 0 < state.rank <= self.config.max_lora_rank:

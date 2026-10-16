@@ -315,6 +315,34 @@ def test_config_rejects_non_divisible_data_parallel_topology() -> None:
         config.validate()
 
 
+def test_default_unembed_request_is_frozen_without_an_unembed_target(tmp_path) -> None:
+    backend = MilesCommandBackend(
+        _config(
+            target_modules=("linear_qkv", "linear_proj", "linear_fc1", "linear_fc2")
+        ),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=FakeMilesRuntime(),
+    )
+    stock = ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=8, train_unembed=True),
+    )
+    backend.accept_model("model-a", stock)
+    assert backend.jobs["model-a"].train_unembed is False
+    backend.accept_model("model-a", stock)
+
+    no_mlp = ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=8, train_mlp=False),
+    )
+    with pytest.raises(ValueError, match="must match the deployment"):
+        backend.accept_model("model-b", no_mlp)
+
+
 def test_backend_routes_batches_and_preserves_per_model_state(tmp_path) -> None:
     runtime = FakeMilesRuntime()
     backend = _backend(tmp_path, runtime)
