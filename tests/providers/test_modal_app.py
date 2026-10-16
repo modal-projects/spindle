@@ -4,6 +4,7 @@ import json
 import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -39,6 +40,39 @@ def test_definitions_come_only_from_the_configured_records() -> None:
         FULL_DEFINITION,
         LORA_DEFINITION,
     }
+
+
+@pytest.mark.parametrize("policy", ["affinity", "joint"])
+def test_lora_sampling_shares_router_across_models_only_when_enabled(
+    monkeypatch, policy
+):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    definition = modal_app.module_for(LORA_DEFINITION)
+    monkeypatch.setattr(definition.recipe, "inference_lora_routing", policy)
+    monkeypatch.setitem(definition.recipe.sglang_cfg, "max_running_requests", 32)
+    monkeypatch.setattr(modal_app, "_routers", {})
+    monkeypatch.setattr(
+        modal_app, "_ready_lora_pool", AsyncMock(return_value="https://gateway")
+    )
+    monkeypatch.setattr(modal_app, "proxy_auth_headers", dict)
+    sample = AsyncMock(return_value={})
+    factory = Mock(return_value=object())
+    monkeypatch.setattr(modal_app, "sample_task", sample)
+    monkeypatch.setattr(modal_app, "create_router", factory)
+
+    async def scenario():
+        for model in ("one", "two"):
+            await modal_app._execute_sample(
+                {"engine_definition_id": LORA_DEFINITION, "model_id": model}, {}
+            )
+
+    asyncio.run(scenario())
+    assert factory.call_count == (1 if policy == "joint" else 0)
+    assert all(
+        call.kwargs["router"]
+        is (factory.return_value if policy == "joint" else None)
+        for call in sample.await_args_list
+    )
 
 
 def test_trainer_autoscaling_supports_full_and_lora_definitions() -> None:
