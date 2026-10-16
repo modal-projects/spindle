@@ -79,6 +79,7 @@ class CreateModelBody(BaseModel):
     base_model: str
     lora_config: dict[str, Any] | None = None
     parameterization: dict[str, str] | None = None
+    optimizer_config: dict[str, Any] | None = None
     rollout: RolloutPoolBody | None = None
     user_metadata: dict[str, str] | None = None
 
@@ -336,6 +337,10 @@ def create_control_plane_app(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
             )
+        if body.optimizer_config is not None:
+            family = body.optimizer_config.get("type")
+            if family != "adamw":
+                raise ValueError(f"optimizer family {family} is not supported")
         if body.parameterization is None:
             parameterization: Parameterization | None = (
                 "lora" if body.lora_config is not None else None

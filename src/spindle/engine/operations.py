@@ -97,6 +97,7 @@ def parse_operation_payload(
             loss_fn_config=parsed.loss_fn_config,
         )
     if kind == OperationKind.OPTIM_STEP:
+        _reject_non_adam_params(raw)
         return AdamParams.model_validate(raw.get("adam_params") or {})
     if kind == OperationKind.LOAD_WEIGHTS:
         known = {
@@ -155,6 +156,31 @@ def parse_operation_payload(
             extensions=_extensions(raw, known),
         )
     raise ValueError(f"unsupported operation: {kind.value}")
+
+
+def _reject_non_adam_params(raw: Mapping[str, Any]) -> None:
+    optimizer_params = raw.get("optimizer_params")
+    if optimizer_params is not None:
+        family = (
+            optimizer_params.get("type")
+            if isinstance(optimizer_params, Mapping)
+            else None
+        )
+        raise ValueError(
+            f"optimizer family {family or 'unknown'} is not supported; "
+            "optim_step accepts only adam_params"
+        )
+    if raw.get("adam_params") is None:
+        other = sorted(
+            key
+            for key, value in raw.items()
+            if key.endswith("_params") and value is not None
+        )
+        if other:
+            raise ValueError(
+                f"optim_step parameters {other} are not supported; "
+                "optim_step accepts only adam_params"
+            )
 
 
 def serialize_operation_payload(payload: OperationPayload) -> dict[str, Any]:
