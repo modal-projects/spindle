@@ -114,9 +114,10 @@ def main():
                     future.result()
             if runner is None and all(f.done() for f in ready.values()):
                 for p in POLICIES:
-                    app = DeploymentConfig.model_validate_json(
-                        (root / p / "deployment.json").read_text()
-                    ).trainer_app_name
+                    deployment = json.loads((root / p / "deployment.json").read_text())
+                    # Early manifests included this derived property.
+                    deployment.pop("trainer_app_name", None)
+                    app = DeploymentConfig.model_validate(deployment).trainer_app_name
                     candidates = [
                         r
                         for r in known.values()
