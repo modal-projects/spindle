@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import modal
 from pydantic import BaseModel
@@ -29,6 +31,10 @@ class EngineInstanceRecord(BaseModel):
     url: str | None = None
     token: str | None = None
     boot_id: str = ""
+    spawned_at: float | None = None
+    started_at: float | None = None
+    ready_at: float | None = None
+    startup: dict[str, Any] | None = None
 
     def instance(self) -> EngineInstance:
         return EngineInstance(
@@ -89,6 +95,7 @@ class ModalEnginePlatform:
 
     async def spawn_instance(self, definition_id: str) -> EngineInstance:
         instance_id = f"engine-{uuid.uuid4().hex[:12]}"
+        spawned_at = time.time()
         call_id = await self._spawn(definition_id, instance_id)
         record = EngineInstanceRecord(
             instance_id=instance_id,
@@ -96,6 +103,7 @@ class ModalEnginePlatform:
             revision="",
             state="starting",
             call_id=call_id,
+            spawned_at=spawned_at,
         )
         await self.kv.put_if_absent(
             instance_key(instance_id),

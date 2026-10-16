@@ -17,6 +17,7 @@ from typing import Any
 from spindle.backends.miles_arguments import defer_config_overrides
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.errors import BackendFailed
+from spindle.startup_timing import BACKEND_COMPONENT, timeline
 
 from .replay_data import install_bridge_replay, validate_routed_experts
 
@@ -249,6 +250,8 @@ class MilesRuntime:
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
         configure_logger(args, source=MainProcessIdentity())
+        startup = timeline(BACKEND_COMPONENT)
+        startup.mark("miles_args_parsed")
 
         if ray.is_initialized():
             raise RuntimeError("MilesRuntime requires exclusive ownership of Ray")
@@ -275,10 +278,12 @@ class MilesRuntime:
             nodes=self.config.actor_num_nodes,
             world_size=self.config.world_size,
         )
+        startup.mark("ray_started")
 
         self._worker_manager = launch_worker_manager(args)
         object_store.init_instance(args, contribute_segment=False)
         self._owns_object_store = True
+        startup.mark("ray_workers_launched")
         self._trainer = TrainerController(
             args=args,
             role="actor",
@@ -288,9 +293,11 @@ class MilesRuntime:
             rollout_executor=None,
         )
         await self._trainer.init()
+        startup.mark("trainer_actors_initialized")
         self._bridge = tinker_runtime.MilesBackend(
             self._trainer, router_url="", dp_size=1
         )
+        startup.mark("miles_backend_ready")
 
     async def _close(self) -> None:
         try:

@@ -25,6 +25,7 @@ from spindle.inference.serving import (
     terminate,
     wait_http,
 )
+from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timeline
 
 from .deployment import trainer_deployment_env
 from .fft_pool import FFTPoolSpec
@@ -110,6 +111,9 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     }
 
     def trainer(instance_id: str, config_json: str, frontend_app_id: str):
+        timeline(TRAINER_COMPONENT, instance_id=instance_id).mark(
+            "trainer_function_entered"
+        )
         saved = DeploymentConfig.model_validate_json(config_json)
         if saved.name != trainer_name:
             raise ValueError("trainer settings do not match the deployed app")
@@ -145,6 +149,7 @@ def run_trainer(deployment, instance_id, platform=None):
     recipe = deployment.recipe
     settings = deployment.trainer_settings
     assets = volumes_for(platform)["/assets"]
+    startup = timeline(TRAINER_COMPONENT, instance_id=instance_id)
     if recipe.trainer_nodes > 1:
         ray_address = start_trainer_cluster(
             recipe.trainer_nodes,
@@ -153,11 +158,14 @@ def run_trainer(deployment, instance_id, platform=None):
         )
         if ray_address is None:
             return
+        startup.mark("ray_cluster_joined")
     else:
         assets.reload()
         ray_address = None
+        startup.mark("assets_reloaded")
     if recipe.parameterization == "lora":
         _warm_lora_pool(platform["frontend"], deployment.definition_id)
+        startup.mark("lora_pool_warm_requested")
     env = {
         **KERNEL_CACHE_ENV,
         **deployment_env(recipe.trainer_env),
@@ -250,6 +258,8 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         def start(self):
             self.sidecar = None
             self.sglang = None
+            startup = timeline(SAMPLER_COMPONENT, pool=pool.app_name)
+            startup.mark("server_enter")
 
             self.sglang = subprocess.Popen(
                 [
@@ -267,6 +277,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sglang,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sglang_healthy")
                 kwargs = dict(
                     port=8000,
                     sglang_port=8001,
@@ -288,6 +299,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sidecar,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sidecar_healthy")
             except BaseException:
                 terminate(self.sidecar)
                 terminate(self.sglang)

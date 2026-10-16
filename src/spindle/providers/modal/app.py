@@ -19,6 +19,7 @@ from spindle.providers.contracts import (
     Parameterization,
     SamplingTask,
 )
+from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
 
 from .checkpoint_storage import (
@@ -180,11 +181,15 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
+    started = time.time()
     snapshot_download(
         repo_id=definition.weights_repo,
         local_dir=checkpoint,
     )
     model_assets.commit()
+    StartupTimeline("model-assets", origin=started, labels={"path": checkpoint}).mark(
+        "assets_ready"
+    )
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:

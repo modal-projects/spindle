@@ -24,6 +24,8 @@ from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
+from spindle.startup_timing import timeline
+
 from . import expert_lora_compat, host_syncs
 from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volume
 from .profiling import RankProfiler, TorchProfileConfig
@@ -199,6 +201,12 @@ def _sync_checkpoint_volume(action: str) -> None:
     sync_checkpoint_volume(action)
 
 
+def _mark_actor_initialized() -> None:
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    if rank == 0:
+        timeline("trainer-rank0").mark("actor_model_loaded")
+
+
 class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
     """Upstream multi-LoRA actor with Qwen MTP and weights-only save support."""
 
@@ -207,7 +215,9 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         # enable_mtp_training. Qwen3.5 then injects an auxiliary backward loss
         # even for a client datum whose weights are all zero.
         if args.enable_mtp_training:
-            return super().init(args, role, **kwargs)
+            result = super().init(args, role, **kwargs)
+            _mark_actor_initialized()
+            return result
         original = AutoBridge.to_megatron_provider
 
         def provider_without_mtp(bridge, *provider_args, **provider_kwargs):
@@ -218,9 +228,11 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
 
         AutoBridge.to_megatron_provider = provider_without_mtp
         try:
-            return super().init(args, role, **kwargs)
+            result = super().init(args, role, **kwargs)
         finally:
             AutoBridge.to_megatron_provider = original
+        _mark_actor_initialized()
+        return result
 
     def torch_profile_start(self) -> None:
         if not TorchProfileConfig.from_env().profiles_rank(dist.get_rank()):
