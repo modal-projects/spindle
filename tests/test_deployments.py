@@ -45,6 +45,12 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
+def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
+    assert "capture_dir" not in backend_config(recipe())
+    multi_node = backend_config(recipe("qwen38-27b-lora-256k"))
+    assert multi_node["capture_dir"] == "/checkpoints/.spindle-captures"
+
+
 def test_presets_context_topology_and_backend_options():
     spec = recipe()
     config = backend_config(spec)["miles"]
@@ -112,6 +118,15 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.trainer_settings["miles"]["hf_checkpoint"] == row.asset_path
     assert row.trainer_identity() != resolved().trainer_identity()
     assert row.inference_identity() != resolved().inference_identity()
+
+
+def test_image_choices_are_part_of_worker_identity():
+    trainer = resolved(recipe(trainer_image="miles-dsv41-lora"))
+    assert trainer.trainer_identity() != resolved().trainer_identity()
+    assert trainer.inference_identity() == resolved().inference_identity()
+    sampler = resolved(recipe(inference_image="sglang-dsv41-lora"))
+    assert sampler.inference_identity() != resolved().inference_identity()
+    assert sampler.trainer_identity() == resolved().trainer_identity()
 
 
 def test_routing_uses_deployment_order():
