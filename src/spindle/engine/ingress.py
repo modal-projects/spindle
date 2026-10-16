@@ -36,7 +36,7 @@ def decode_forward_backward(
         payload = ForwardBackwardInput(
             data=[_decode_proto_datum(item) for item in message.data],
             loss_fn=message.loss_fn,
-            loss_fn_config=dict(message.loss_fn_config) or None,
+            loss_fn_config=_proto_loss_fn_config(message),
         )
         model_id, seq_id = _identity(
             {"model_id": message.model_id, "seq_id": message.seq_id}, kind
@@ -55,6 +55,21 @@ def decode_forward_backward(
     )
     assert isinstance(payload, ForwardBackwardInput)
     return model_id, seq_id, OperationKind.FORWARD_BACKWARD, payload
+
+
+def _proto_loss_fn_config(
+    message: tinker_public_pb2.ForwardBackwardRequest,
+) -> dict[str, float] | None:
+    # Tinker SDK 0.26 and later also write loss_fn_config_v2, and put string
+    # values only there. Prefer it when present, as the SDK expects servers to.
+    if not message.loss_fn_config_v2:
+        return dict(message.loss_fn_config) or None
+    config = {}
+    for key, value in message.loss_fn_config_v2.items():
+        if value.WhichOneof("value") != "number":
+            raise ValueError(f"loss_fn_config value for {key} must be a number")
+        config[key] = value.number
+    return config
 
 
 def decode_json_operation(
