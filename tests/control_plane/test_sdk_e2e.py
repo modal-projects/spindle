@@ -23,6 +23,8 @@ from spindle.providers.local import (
 )
 from tests.support import TinkerStubExecutor, TinkerStubSampler, serve
 
+pytestmark = pytest.mark.usefixtures("sdk_garbage_collected_off_loop")
+
 BASE_MODEL = "Qwen/Qwen3-8B"
 DEFINITION = "qwen3_8b"
 FULL_DEFINITION = "qwen3_8b_full"
