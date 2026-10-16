@@ -9,7 +9,7 @@ from .image_dependencies import ignore_config_source
 from .miles_release_image import MILES_PATH, release_image
 
 MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
-MILES_REF = "db783526e5cbdda917da18657220cba10a5f73a4"
+MILES_REF = "1f4fba21d9b4483ceedade9c2e3954ed1f670768"
 
 image = release_image.run_commands(
     f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY} {MILES_REF}"
