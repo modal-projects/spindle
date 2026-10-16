@@ -142,7 +142,7 @@ def test_deepseek_v41_lora_recipe():
     assert serving["weight_loader_disable_mmap"] is False
     assert (row.recipe.trainer_image, row.recipe.inference_image) == (
         "miles-dsv41-lora",
-        "sglang-dsv41-lora",
+        "",
     )
 
 

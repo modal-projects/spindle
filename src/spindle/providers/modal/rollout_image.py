@@ -10,8 +10,6 @@ from .image_dependencies import (
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
 SGLANG_BRANCH = "spindle-sglang-v0.5.21"
-# Adds LoRA serving for DeepSeek-V4.1 on top of SGLANG_BRANCH.
-SGLANG_DSV41_LORA_BRANCH = "micah/v41-lora"
 
 
 def sglang_image(branch: str) -> modal.Image:
@@ -43,4 +41,3 @@ def sglang_image(branch: str) -> modal.Image:
 
 
 image = sglang_image(SGLANG_BRANCH)
-dsv41_lora_image = sglang_image(SGLANG_DSV41_LORA_BRANCH)

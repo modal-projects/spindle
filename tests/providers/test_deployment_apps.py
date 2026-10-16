@@ -454,14 +454,10 @@ def test_recipes_select_trainer_and_sampler_images(builders, monkeypatch):
         image_for("sglang", "trainer-x")
 
 
-def test_deepseek_v41_lora_images_are_registered():
+def test_deepseek_v41_lora_trainer_image_is_registered():
     assert (
         deployment_apps.image_for("miles", "miles-dsv41-lora")
         is deployment_apps.miles_dsv41_lora_image
-    )
-    assert (
-        deployment_apps.image_for("sglang", "sglang-dsv41-lora")
-        is deployment_apps.sglang_dsv41_lora_image
     )
 
 

@@ -43,14 +43,13 @@ from .megatron_image import image as megatron_image
 from .miles_dsv41_lora_image import image as miles_dsv41_lora_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
-from .rollout_image import dsv41_lora_image as sglang_dsv41_lora_image
 from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
 
 # Images a recipe selects by name through trainer_image or inference_image.
 TRAINER_IMAGES = {"miles-dsv41-lora": miles_dsv41_lora_image}
-INFERENCE_IMAGES = {"sglang-dsv41-lora": sglang_dsv41_lora_image}
+INFERENCE_IMAGES = {}
 
 
 def image_for(backend, name=""):

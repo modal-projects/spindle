@@ -65,7 +65,6 @@ class Config(BaseConfig):
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
-    inference_image = "sglang-dsv41-lora"
     inference_gpu = "B300"
     inference_gpus_per_node = 8
     inference_cpu = 32
