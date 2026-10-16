@@ -1,9 +1,4 @@
-"""Trainer image for DeepSeek-V4.1 multi-LoRA through Miles.
-
-The v0.1.2 release image with Miles replaced by a branch that adds
-multi-LoRA to DeepSeek-V4.1's raw (non-Bridge) model path. Point MILES_REF at
-a newer branch or commit to update it, then refresh the trainer app.
-"""
+"""Miles v0.1.2 release image with multi-LoRA for DeepSeek-V4.1."""
 
 from .image_dependencies import ignore_config_source
 from .miles_release_image import MILES_PATH, release_image

@@ -2,14 +2,7 @@ from spindle.configuration import BaseConfig
 
 
 class Config(BaseConfig):
-    """DeepSeek-V4.1-Flash LoRA training on two B300 nodes.
-
-    The FP8/FP4 release is converted to BF16 while preparing assets. Adapters
-    train the attention projections wq_a, wkv, wq_b and wo_b and the shared
-    expert; the router, routed experts, Engram tables and wo_a stay frozen.
-    Trainers and samplers run images built for DeepSeek-V4.1 LoRA. Samplers
-    keep the Engram tables in host memory.
-    """
+    """DeepSeek-V4.1-Flash LoRA on attention and the shared expert."""
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
