@@ -55,6 +55,8 @@ config = Config()
 
 Each parent's settings and overrides apply before its child's. Constructor fields and overrides apply last: `Config(trainer_gpu="H200", overrides={"sglang_cfg.max_running_requests": 16})`. Assigning a dictionary or list replaces that value; `trainer_env = {}` clears inherited environment settings. Instances own independent copies of mutable values and can also be edited directly.
 
+`trainer_gpu` and `inference_gpu` take one GPU type or a list in preference order, such as `["H200", "B300"]`. Modal schedules the first type with capacity. GPU counts and parallelism settings apply to every entry, so list only types with at least as much memory as the first. Each trainer and sampler container logs the type it was scheduled on, for example `spindle trainer scheduled on 8x NVIDIA B300`.
+
 ## Backend options
 
 | Setting | Consumed by |
