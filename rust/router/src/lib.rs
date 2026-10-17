@@ -2,7 +2,7 @@
 mod policy;
 mod radix;
 
-use policy::{Joint, LeastLoad, LoraRadix, Policy};
+use policy::{CacheAware, Joint, LeastLoad, LoraRadix, Policy};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde::Deserialize;
@@ -186,7 +186,7 @@ pub struct Router {
 #[pymethods]
 impl Router {
     #[new]
-    #[pyo3(signature = (policy, capacity, prefill_rate, decode_rate, gpu_load_seconds, registration_seconds, balance_absolute=4, balance_relative=1.25))]
+    #[pyo3(signature = (policy, capacity, prefill_rate, decode_rate, gpu_load_seconds, registration_seconds, balance_absolute=4, balance_relative=1.25, cache_threshold=0.5))]
     fn new(
         policy: &str,
         capacity: usize,
@@ -196,11 +196,17 @@ impl Router {
         registration_seconds: f64,
         balance_absolute: usize,
         balance_relative: f64,
+        cache_threshold: f64,
     ) -> PyResult<Self> {
-        let use_radix = policy == "lora_radix";
+        let use_radix = matches!(policy, "lora_radix" | "cache_aware");
         if !balance_relative.is_finite() || balance_relative < 1.0 {
             return Err(PyValueError::new_err(
                 "balance_relative must be finite and >= 1",
+            ));
+        }
+        if !cache_threshold.is_finite() || !(0.0..=1.0).contains(&cache_threshold) {
+            return Err(PyValueError::new_err(
+                "cache_threshold must be between 0 and 1",
             ));
         }
         let policy: Box<dyn Policy> = match policy {
@@ -210,6 +216,11 @@ impl Router {
             "lora_radix" => Box::new(LoraRadix {
                 absolute: balance_absolute,
                 relative: balance_relative,
+            }),
+            "cache_aware" => Box::new(CacheAware {
+                absolute: balance_absolute,
+                relative: balance_relative,
+                cache_threshold,
             }),
             _ => return Err(PyValueError::new_err("unknown routing policy")),
         };
@@ -264,6 +275,7 @@ impl Router {
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
         let mut candidates = Vec::new();
+        let mut max_active = 0;
         let hits = self
             .radix
             .matches(&request.adapter, &request.hashes, self.replicas.len());
@@ -291,6 +303,7 @@ impl Router {
                 .map(|(_, r)| r)
                 .collect();
             let active = replica.active + unobserved.len();
+            max_active = max_active.max(active);
             if active >= self.capacity {
                 continue;
             }
@@ -352,7 +365,10 @@ impl Router {
                 adapter_seconds,
             });
         }
-        let Some(selected) = self.policy.select(&candidates) else {
+        let Some(selected) = self
+            .policy
+            .select(&candidates, max_active, request.prompt_tokens)
+        else {
             return Ok(Decision::wait(if fresh { "wait" } else { "unavailable" }));
         };
         let c = &candidates[selected];
@@ -414,7 +430,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn router(policy: &str, capacity: usize) -> Router {
-        Router::new(policy, capacity, 1000., 100., 0.1, 1., 4, 1.25).unwrap()
+        Router::new(policy, capacity, 1000., 100., 0.1, 1., 4, 1.25, 0.5).unwrap()
     }
     fn request(adapter: &str) -> Request {
         Request::new(adapter.into(), "problem".into(), vec![42; 1024], 100).unwrap()

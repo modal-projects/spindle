@@ -25,6 +25,7 @@ class Router:
         close,
         balance_absolute=4,
         balance_relative=1.25,
+        cache_threshold=0.5,
     ):
         self.scheduler = Scheduler(
             policy,
@@ -35,6 +36,7 @@ class Router:
             rates["registration_seconds"],
             balance_absolute,
             balance_relative,
+            cache_threshold,
         )
         self.policy = policy
         self.discover = discover
@@ -53,7 +55,9 @@ class Router:
                 try:
                     rows = await asyncio.wait_for(self.discover(), timeout=3)
                     snapshot = await asyncio.to_thread(
-                        Snapshot, json.dumps(rows), self.policy == "lora_radix"
+                        Snapshot,
+                        json.dumps(rows),
+                        self.policy in {"lora_radix", "cache_aware"},
                     )
                     self.scheduler.install_snapshot(snapshot)
                 except Exception:

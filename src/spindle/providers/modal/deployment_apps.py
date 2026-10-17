@@ -251,7 +251,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                 }
                 if lora
                 and recipe.inference_lora_routing
-                in {"joint", "least_load", "load_balanced", "lora_radix"}
+                in {"joint", "least_load", "load_balanced", "lora_radix", "cache_aware"}
                 else {}
             )
         ),

@@ -55,6 +55,33 @@ def validate_inputs(root):
                 raise RuntimeError(f"Mismatched paired inputs for client {index}")
 
 
+async def observe_resources(root, apps, known, state):
+    # A monitoring RPC timeout is not evidence that a trainer failed.
+    deadline = time.monotonic() + 600
+    while True:
+        if (root / "STOP").exists():
+            raise RuntimeError("Experiment stop requested")
+        if time.time() - state["started"] > 12 * 3600:
+            raise TimeoutError("12-hour experiment deadline")
+        try:
+            result = await asyncio.wait_for(
+                resources.aio("lilo-deploy", apps, known, state["started"]), 30
+            )
+        except Exception as exc:
+            state["resource_poll_error"] = f"{type(exc).__name__}: {exc}"
+            state["resource_poll_attempt_at"] = time.time()
+            atomic_json(root / "status.json", state)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Resource observations unavailable for ten minutes"
+                ) from exc
+            await asyncio.sleep(5)
+        else:
+            state.pop("resource_poll_error", None)
+            state.pop("resource_poll_attempt_at", None)
+            return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
@@ -88,29 +115,13 @@ def main():
     collector = runner = None
     pool = ThreadPoolExecutor(len(policies(root)))
     ready = {p: pool.submit(prepare, root, p, config) for p in policies(root)}
-    monitor_failures = 0
     collector_restarts = 0
     trainers = {}
     try:
         while True:
             if (root / "STOP").exists():
                 raise RuntimeError("Experiment stop requested")
-            try:
-                known = asyncio.run(
-                    asyncio.wait_for(
-                        resources.aio(
-                            "lilo-deploy", owned + external, known, state["started"]
-                        ),
-                        30,
-                    )
-                )
-                monitor_failures = 0
-            except Exception:
-                monitor_failures += 1
-                if monitor_failures >= 3:
-                    raise
-                time.sleep(5)
-                continue
+            known = asyncio.run(observe_resources(root, owned + external, known, state))
             active = sum(r["gpu_count"] for r in known.values() if not r["finished_at"])
             if active > 48:
                 raise RuntimeError(f"Combined experiment GPU limit exceeded: {active}")

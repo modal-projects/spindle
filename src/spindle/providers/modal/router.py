@@ -19,6 +19,7 @@ def create_router(
     rates,
     balance_absolute=4,
     balance_relative=1.25,
+    cache_threshold=0.5,
 ):
     containers, discovered = [], 0.0
     client = httpx.AsyncClient(headers=proxy_auth_headers(), timeout=2, trust_env=False)
@@ -72,4 +73,5 @@ def create_router(
         close=client.aclose,
         balance_absolute=balance_absolute,
         balance_relative=balance_relative,
+        cache_threshold=cache_threshold,
     )

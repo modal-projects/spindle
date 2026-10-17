@@ -24,6 +24,7 @@ def main():
             "joint",
             "load_balanced",
             "lora_radix",
+            "cache_aware",
         ],
         action="append",
     )

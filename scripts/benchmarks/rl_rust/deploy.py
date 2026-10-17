@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument(
         "--policy",
-        choices=["default", "joint", "load_balanced", "lora_radix"],
+        choices=["default", "joint", "load_balanced", "lora_radix", "cache_aware"],
         required=True,
     )
     parser.add_argument("--prepare-only", action="store_true")

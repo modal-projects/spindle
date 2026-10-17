@@ -16,6 +16,7 @@ The Rust policies share observation freshness, admission and outcome handling:
 | `least_load` | Earlier request-count policy, also retaining sibling destination. |
 | `load_balanced` | Lowest active count, including unobserved local reservations; no sibling override. Admission-only control. |
 | `lora_radix` | Load band, adapter residency tier, longest confirmed prefix, sibling tie, active count, deterministic tie. |
+| `cache_aware` | Pool-wide imbalance switches to least-load; otherwise prefer a substantial prefix match, with adapter residency breaking ties. |
 
 For `lora_radix`, let `m` be the minimum active count among eligible replicas.
 Exclude a replica with count `n` from affinity preference when **both**
@@ -33,6 +34,23 @@ does not pin adapters or explicitly shrink their placement.
 A strict residency gate can choose a warm adapter with little KV over a cold
 adapter with substantial KV. That is a deliberate limitation to evaluate,
 not an assertion that loading an adapter always costs more than prefill.
+
+`cache_aware` uses the public SGLang policy's pool-wide switch. If both
+`max_active - min_active > balance_absolute` and
+`max_active > min_active * balance_relative`, select the least-loaded eligible
+replica, breaking ties by prefix length, then adapter residency. Full replicas
+remain part of this imbalance calculation even though they cannot receive work.
+Otherwise, if the best eligible prefix covers more than
+`inference_routing_cache_threshold` of the prompt (default 0.5), select the longest
+match, then adapter residency, then load. Below that threshold, select least-load
+with residency breaking ties. This policy has no sibling preference.
+
+For controlled comparison, the load thresholds remain 4 and 1.25, as in
+`lora_radix`; these are not claimed to be SGLang defaults or tuned optima.
+Unlike SGLang's request-history index, this policy uses observed token prefixes
+scoped to an exact adapter version. It keeps the same local admission and polling
+as the other Rust policies. It does not wait for a full replica solely to retain
+its prefix, and does not predict when an adapter load is cheaper than prefill.
 
 ## Prefix index
 

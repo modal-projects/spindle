@@ -50,12 +50,13 @@ def test_rust_hashes_match_engine_prefix_protocol():
     assert selected.replica == "b" and selected.cached_tokens == 64
 
 
-def test_saturation_waits_then_admits_without_flash():
+@pytest.mark.parametrize("policy", ["joint", "cache_aware"])
+def test_saturation_waits_then_admits_without_flash(policy):
     async def run():
         state = [replica(active=1)]
         router = Router(
             AsyncMock(side_effect=lambda: state),
-            policy="joint",
+            policy=policy,
             capacity=1,
             rates=RATES,
             close=AsyncMock(),
@@ -222,11 +223,12 @@ def test_radix_load_gate_overrides_warmth_and_sibling_preference():
     assert scheduler.select_destination(q, "overflow").replica == "b"
 
 
-def test_radix_exact_version_eviction_and_no_optimistic_credit():
+@pytest.mark.parametrize("policy", ["lora_radix", "cache_aware"])
+def test_radix_exact_version_eviction_and_no_optimistic_credit(policy):
     a, b = replica("a"), replica("b")
     adapter = "m/weight_v000007"
     b["work"]["prefix_nodes"] = catalog(adapter, [42] * 1024)
-    scheduler = Scheduler("lora_radix", 32, *RATES.values())
+    scheduler = Scheduler(policy, 32, *RATES.values())
     scheduler.update_snapshot(json.dumps([a, b]))
     q = Request(adapter, "group", [42] * 1024, 1)
     hit = scheduler.select_destination(q, "hit")
@@ -271,3 +273,69 @@ def test_invalid_snapshot_keeps_previous_tree():
         scheduler.update_snapshot(json.dumps([a]))
     q = Request(adapter, "group", [42] * 1024, 1)
     assert scheduler.select_destination(q, "valid").cached_tokens == 960
+
+
+@pytest.mark.parametrize("cached_length,expected", [(512, "idle"), (576, "cache")])
+def test_cache_aware_requires_more_than_half_the_prompt(cached_length, expected):
+    adapter = "m/weight_v000007"
+    a, b = replica("idle"), replica("cache", active=1)
+    b["work"]["prefix_nodes"] = catalog(adapter, [42] * (cached_length + 1))
+    scheduler = Scheduler("cache_aware", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request(adapter, "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "r").replica == expected
+
+
+def test_cache_aware_prefers_long_prefix_over_hot_adapter():
+    adapter = "m/weight_v000007"
+    a, b = replica("hot"), replica("cache", active=2)
+    b["work"]["gpu_adapters"] = []
+    b["work"]["prefix_nodes"] = catalog(adapter, [42] * 8192)
+    scheduler = Scheduler("cache_aware", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request(adapter, "group", [42] * 8192, 1)
+    assert scheduler.select_destination(q, "r").replica == "cache"
+
+
+@pytest.mark.parametrize("overloaded", [5, 32])
+def test_cache_aware_global_imbalance_includes_full_replicas(overloaded):
+    adapter = "m/weight_v000007"
+    a, b, c = (
+        replica("idle"),
+        replica("cache", active=1),
+        replica("overloaded", active=overloaded),
+    )
+    b["work"]["prefix_nodes"] = catalog(adapter, [42] * 8192)
+    scheduler = Scheduler("cache_aware", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b, c]))
+    q = Request(adapter, "group", [42] * 8192, 1)
+    assert scheduler.select_destination(q, "r").replica == "idle"
+
+
+def test_cache_aware_load_fallback_spreads_group_despite_warm_adapter():
+    adapter = "m/weight_v000007"
+    a, b = replica("hot"), replica("cold")
+    b["work"]["gpu_adapters"] = []
+    scheduler = Scheduler("cache_aware", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request(adapter, "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "first").replica == "hot"
+    assert scheduler.select_destination(q, "second").replica == "cold"
+
+
+def test_cache_aware_equal_prefixes_prefer_hot_adapter():
+    adapter = "m/weight_v000007"
+    a, b = replica("cold"), replica("hot")
+    a["work"]["gpu_adapters"] = []
+    for row in [a, b]:
+        row["work"]["prefix_nodes"] = catalog(adapter, [42] * 1024)
+    scheduler = Scheduler("cache_aware", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request(adapter, "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "r").replica == "hot"
+
+
+@pytest.mark.parametrize("threshold", [-0.1, 1.1, float("nan")])
+def test_cache_aware_rejects_invalid_threshold(threshold):
+    with pytest.raises(ValueError, match="cache_threshold"):
+        Scheduler("cache_aware", 32, *RATES.values(), cache_threshold=threshold)
