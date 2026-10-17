@@ -20,8 +20,6 @@ class Config(Parent):
     inference_cpu = 16
     inference_memory_mib = 65536
     inference_startup_timeout_s = 1800
-    session_idle_timeout_s = 86400
-    pool_idle_timeout_s = 86400
     overrides = {
         "miles_cfg.tensor_model_parallel_size": 1,
         "miles_cfg.context_parallel_size": 4,
@@ -39,5 +37,6 @@ class Config(Parent):
         "sglang_cfg.max_loras_per_batch": 16,
         "sglang_cfg.chunked_prefill_size": 8192,
     }
+
 
 config = Config()
