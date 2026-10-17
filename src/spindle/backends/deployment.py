@@ -122,7 +122,11 @@ def backend_config(spec, asset_path="/assets/pending"):
         raise ValueError("expert parallel sizes must divide the trainer GPU allocation")
     if spec.trainer_max_clients_per_instance > config.max_lora_slots:
         raise ValueError("max_clients_per_instance exceeds max_lora_slots")
-    return {"miles": asdict(config), "checkpoint_dir": "/checkpoints"}
+    settings = {"miles": asdict(config), "checkpoint_dir": "/checkpoints"}
+    if spec.trainer_nodes > 1:
+        # Captures on the shared volume let every node's shards be assembled.
+        settings["capture_dir"] = "/checkpoints/.spindle-captures"
+    return settings
 
 
 def serving_options(spec):

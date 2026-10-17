@@ -223,7 +223,7 @@ def test_real_modal_app_constructs_from_configs_without_legacy_catalog(monkeypat
             """
 import importlib, sys, modal
 from spindle.providers.modal import deployment_apps, deployment_configs
-deployment_apps.image_for = lambda backend: modal.Image.debian_slim()
+deployment_apps.image_for = lambda backend, name="": modal.Image.debian_slim()
 app = importlib.import_module('spindle.providers.modal.app')
 assert len(app.DEFINITIONS) == 1
 assert app.APP_NAME == 'spindle'
@@ -426,6 +426,23 @@ def test_declared_compute_settings_reach_modal(builders):
     )
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
     assert server["ephemeral_disk"] == 550_000
+
+
+def test_recipes_select_trainer_images(builders, monkeypatch):
+    image_for = deployment_apps.image_for
+    assert image_for("miles") is deployment_apps.miles_image
+    assert image_for("sglang") is deployment_apps.rollout_image
+    with pytest.raises(ValueError, match="unknown trainer image"):
+        image_for("miles", "missing")
+
+    trainer_image = object()
+    monkeypatch.setitem(deployment_apps.TRAINER_IMAGES, "trainer-x", trainer_image)
+    spec = deepcopy(deployment().recipe)
+    spec.trainer_image = "trainer-x"
+    row = DeploymentConfig.create(spec)
+    trainer_app, _ = deployment_apps.build_trainer_app(row)
+    trainer, _ = trainer_app.functions["trainer"]
+    assert trainer["image"] is trainer_image
 
 
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):

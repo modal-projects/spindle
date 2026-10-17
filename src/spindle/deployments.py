@@ -132,6 +132,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_max_clients_per_instance,
             recipe.trainer_timeout_s,
             recipe.trainer_env,
+            recipe.trainer_image,
             self.trainer_settings,
         )
 

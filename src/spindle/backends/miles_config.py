@@ -27,6 +27,10 @@ _ATTN_LEAVES = frozenset(
         "k_proj",
         "v_proj",
         "o_proj",
+        "wq_a",
+        "wkv",
+        "wq_b",
+        "wo_b",
     }
 )
 _MLP_LEAVES = frozenset(
@@ -38,9 +42,21 @@ _MLP_LEAVES = frozenset(
         "gate_proj",
         "up_proj",
         "down_proj",
+        "w1",
+        "w2",
+        "w3",
     }
 )
 _UNEMBED_LEAVES = frozenset({"output_layer", "lm_head"})
+
+
+def _peft_names(target: str) -> tuple[str, ...]:
+    if "*" in target:
+        # Miles matches a dotted target against whole module names; adapters
+        # and SGLang match module-name suffixes.
+        return (target.rsplit("*.", 1)[-1],)
+    leaf = target.rsplit(".", 1)[-1]
+    return _PEFT_TARGETS.get(leaf, (leaf,))
 
 
 def lora_target_flags(target_modules: tuple[str, ...]) -> tuple[bool, bool, bool]:
@@ -103,8 +119,7 @@ class MilesBackendConfig:
     def peft_target_modules(self) -> tuple[str, ...]:
         targets: list[str] = []
         for target in self.target_modules:
-            leaf = target.rsplit(".", 1)[-1]
-            for name in _PEFT_TARGETS.get(leaf, (leaf,)):
+            for name in _peft_names(target):
                 if name not in targets:
                     targets.append(name)
         return tuple(targets)

@@ -46,9 +46,18 @@ from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
 
-def image_for(backend):
+TRAINER_IMAGES = {}
+
+
+def image_for(backend, name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
+    if name:
+        if name not in TRAINER_IMAGES:
+            raise ValueError(
+                f"unknown trainer image {name!r}; choose from {sorted(TRAINER_IMAGES)}"
+            )
+        return TRAINER_IMAGES[name]
     return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
         backend
     ]
@@ -121,7 +130,11 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer = app.function(
         name="trainer",
         serialized=True,
-        image=image if image is not None else image_for(recipe.backend),
+        image=(
+            image
+            if image is not None
+            else image_for(recipe.backend, recipe.trainer_image)
+        ),
         gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,

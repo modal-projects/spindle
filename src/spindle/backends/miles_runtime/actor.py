@@ -6,23 +6,41 @@ import torch.distributed as dist
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
 from megatron.core import dist_checkpointing
-from miles.backends.fsdp_utils import actor as fsdp_actor
 from miles.backends.megatron_utils import actor as megatron_actor
 from miles.backends.megatron_utils import model as megatron_model
 from miles.backends.megatron_utils.lora import checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
 from miles.backends.megatron_utils.lora.actor import MultiLoRATrainRayActor
-from miles.backends.training_utils import checkpoint_io, cp_utils, data, loss, mm_data
-from miles.backends.training_utils.loss_hub import (
-    logit_processors,
-    math_utils,
-    tinker_losses,
-)
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.backends.training_utils.replay_data import fill_replay_data
 from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
+
+try:
+    from miles.backends.training_utils.checkpoint import io as checkpoint_io
+except ImportError:
+    # Miles v0.1.1 layout; its Tinker losses need Spindle to gather CP log probs.
+    from miles.backends.fsdp_utils import actor as fsdp_actor
+    from miles.backends.training_utils import (
+        checkpoint_io,
+        cp_utils,
+        data,
+        loss,
+        mm_data,
+    )
+    from miles.backends.training_utils.loss_hub import (
+        logit_processors,
+        math_utils,
+        tinker_losses,
+    )
+    from miles.backends.training_utils.replay_data import fill_replay_data
+
+    MILES_GATHERS_TINKER_CP = False
+else:
+    from miles.backends.training_utils.loss.hub import logit_processors, tinker_losses
+    from miles.backends.training_utils.replay.data import fill_replay_data
+
+    MILES_GATHERS_TINKER_CP = True
 
 from . import expert_lora_compat, host_syncs
 from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volume
@@ -170,7 +188,8 @@ def _gather_tinker_logprobs_across_cp() -> None:
             module.slice_log_prob_with_cp = slice_log_prob_with_cp
 
 
-_gather_tinker_logprobs_across_cp()
+if not MILES_GATHERS_TINKER_CP:
+    _gather_tinker_logprobs_across_cp()
 
 install_replay_hooks(
     megatron_model=megatron_model,

@@ -74,6 +74,12 @@ Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/
 
 Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size` (set it to `false` for attention layouts such as `bshd` that take one sequence per micro-batch).
 
+`target_modules` entries containing `*` are matched by Miles against whole module paths (`layers.*.attn.wq_b` selects the attention `wq_b` but not an indexer's `wq_b`), and samplers receive the path after the wildcard. Tinker clients request the unembedding by default; when a Miles deployment does not target it, the unembedding stays frozen for that model. Multi-node Miles trainers write LoRA captures to the checkpoint volume so every node's shards can be assembled.
+
+### Images
+
+`trainer_image` selects a named trainer image instead of the backend default; the names are listed in [deployment_apps.py](../src/spindle/providers/modal/deployment_apps.py). The multi-LoRA actor runs on Miles v0.1.1 and v0.1.2.
+
 ### Disk and asset conversion
 
 `trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers; leave them at 0 for the default disk, since Modal's smallest request is 524288 MiB. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Converted assets are kept, so preparing them again skips the conversion.
