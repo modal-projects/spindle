@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -46,12 +47,24 @@ async def resources(environment, owned, known, since=0.0):
         api_pb2.TaskListRequest(environment_name=environment)
     )
     task_apps = {t.task_id: t.app_description for t in listed.tasks}
-    ids = set(known)
+    # Finished tasks are immutable; keep their accounting without polling again.
+    ids = {task_id for task_id, row in known.items() if not row["finished_at"]}
     ids.update(t.task_id for t in listed.tasks if t.app_description in owned)
-    for task_id in ids:
-        info = (
-            await client.stub.TaskGetInfo(api_pb2.TaskGetInfoRequest(task_id=task_id))
-        ).info
+    ids.difference_update(
+        task_id for task_id, row in known.items() if row["finished_at"]
+    )
+    slots = asyncio.Semaphore(16)
+
+    async def inspect(task_id):
+        async with slots:
+            info = (
+                await client.stub.TaskGetInfo(
+                    api_pb2.TaskGetInfoRequest(task_id=task_id)
+                )
+            ).info
+        return task_id, info
+
+    for task_id, info in await asyncio.gather(*(inspect(task_id) for task_id in ids)):
         if info.finished_at and info.finished_at < since:
             known.pop(task_id, None)
             continue
@@ -94,6 +107,9 @@ def main():
         help="Fail an evaluation if its multinode/multi-GPU trainer exits before all updates",
     )
     p.add_argument("--recover-clients", action="store_true")
+    p.add_argument(
+        "--resume", action="store_true", help="Continue existing checkpointed clients"
+    )
     p.add_argument("--environment", default="lilo-deploy")
     p.add_argument("--owned-apps", nargs="+", required=True)
     p.add_argument(
@@ -112,8 +128,12 @@ def main():
         help="Keep successful pilot deployments for the next stage",
     )
     args = p.parse_args()
-    args.root.mkdir(parents=True, exist_ok=False)
+    args.root.mkdir(parents=True, exist_ok=args.resume)
+    supervisor_lock = (args.root / "supervisor.lock").open("a")
+    fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     config = json.loads(args.config.read_text())
+    if args.resume and json.loads((args.root / "config.json").read_text()) != config:
+        raise ValueError("Resume configuration differs from original experiment")
     write(args.root / "config.json", config)
     state = dict(
         state="starting",

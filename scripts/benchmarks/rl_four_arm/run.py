@@ -73,6 +73,8 @@ def main():
                 str(time.time()),
             ]
             command += ["--initialization-model", json.loads(held.read_text())]
+            if (directory / stage).exists():
+                command.append("--resume")
             command += [
                 "--owned-apps",
                 *json.loads((directory / "owned-apps.json").read_text()),

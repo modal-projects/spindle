@@ -51,5 +51,38 @@ Entry points:
 
 The latter calls the existing recoverable supervisor, adds combined GPU
 accounting and the existing trainer guard, and cleans up only its own apps.
-It does not stop the older H200 experiment. Results are pending; this document
-is an evaluation specification, not a performance claim.
+It does not stop the older H200 experiment.
+
+## Partial DAPO results, October 17
+
+The first attempt committed 25 default and 30 joint client updates before a
+resource-monitor timeout stopped both arms. Codeforces had not started.
+The following compares the same 02:20–04:50 UTC interval, with four H200
+inference replicas per arm and identical split-K engines:
+
+| Metric | Default | Joint |
+| --- | ---: | ---: |
+| Completed output tokens/s | 4,650 | 4,744 |
+| Token-weighted prefix cache hit rate | 40.4% | 41.7% |
+| Mean accepted-request latency, seconds | 220.6 | 183.2 |
+| Mean completed SDK group latency, seconds | 2,198 | 1,891 |
+| HTTP 503 attempts | 1,536,161 | 80 |
+| GPU LoRA loads / evictions | 83 / 80 | 127 / 123 |
+| Mean running requests across four replicas | 124.9 | 127.8 |
+| Mean engine-queued requests across four replicas | 30.0 | 4.0 |
+
+Throughput increased 2.0%. Five consecutive 30-minute windows ranged from
+−0.1% to +5.4%; these are subdivisions of one run, not independent trials.
+The clearest change is admission behavior: fewer rejected attempts and less
+engine queueing. Accepted-request latency excludes waiting in the router.
+Completed group latency includes that wait but excludes timed-out groups;
+three sampling timeouts occurred in the joint arm. Neither latency measure
+establishes an unconditional end-to-end improvement. Increased adapter loads
+also do not support a claim of reduced LoRA thrashing on this workload.
+
+The monitor repeatedly queried 785 already-finished tasks among 860 records.
+Skipping immutable finished records and bounding concurrent queries reduced
+the same history audit to 0.25 seconds. Recovery preserves committed optimizer
+checkpoints and the original client inputs. Analyze resumed intervals separately.
+Raw counters, interval bounds and the analysis script are in the experiment's
+`dapo/partial-comparison-20261017.json` and `dapo/analyze-partial.py` artifacts.
