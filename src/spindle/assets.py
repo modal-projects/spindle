@@ -21,15 +21,7 @@ TRANSFORMS = ("dequantize_bf16",)
 TRANSFORM_MARKER = ".spindle-transform.json"
 _INDEX = "model.safetensors.index.json"
 _DROP_PREFIXES = ("mtp.", "vision.", "aligner.", "image_")
-_DTYPE_BYTES = {
-    "BF16": 2,
-    "F16": 2,
-    "F32": 4,
-    "F8_E4M3": 1,
-    "F8_E8M0": 1,
-    "I8": 1,
-    "U8": 1,
-}
+_QUANTIZED_DTYPES = ("F8_E4M3", "I8")
 _FP4_VALUES = np.array(
     [
         0.0,
@@ -100,13 +92,18 @@ def to_bfloat16(values: np.ndarray) -> np.ndarray:
     return ((bits + rounding) >> 16).astype(np.uint16)
 
 
+def _scaled(values: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    (rows, cols), (scale_rows, scale_cols) = values.shape, scales.shape
+    if rows % scale_rows or cols % scale_cols:
+        raise ValueError(f"scales {scales.shape} do not tile values {values.shape}")
+    scales = np.repeat(scales, rows // scale_rows, axis=0)
+    scales = np.repeat(scales, cols // scale_cols, axis=1)
+    return to_bfloat16(values * scales)
+
+
 def dequantize_fp8(file, base: int, weight: dict, scale: dict) -> np.ndarray:
     values = _FP8_VALUES[_read(file, base, weight)].reshape(weight["shape"])
-    scales = _e8m0(file, base, scale)
-    rows, cols = values.shape
-    block_rows, block_cols = rows // scales.shape[0], cols // scales.shape[1]
-    scales = np.repeat(np.repeat(scales, block_rows, axis=0), block_cols, axis=1)
-    return to_bfloat16(values * scales)
+    return _scaled(values, _e8m0(file, base, scale))
 
 
 def dequantize_fp4(file, base: int, weight: dict, scale: dict) -> np.ndarray:
@@ -114,9 +111,7 @@ def dequantize_fp4(file, base: int, weight: dict, scale: dict) -> np.ndarray:
     values = np.empty((packed.shape[0], packed.shape[1] * 2), dtype=np.float32)
     values[:, 0::2] = _FP4_VALUES[packed & 0xF]
     values[:, 1::2] = _FP4_VALUES[packed >> 4]
-    scales = _e8m0(file, base, scale)
-    scales = np.repeat(scales, values.shape[1] // scales.shape[1], axis=1)
-    return to_bfloat16(values * scales)
+    return _scaled(values, _e8m0(file, base, scale))
 
 
 def plan_shard(header: dict) -> dict[str, tuple[str, str, list[int]]]:
@@ -135,6 +130,8 @@ def plan_shard(header: dict) -> dict[str, tuple[str, str, list[int]]]:
             outputs[name] = ("fp4", "BF16", [info["shape"][0], info["shape"][1] * 2])
         elif scale in header:
             raise ValueError(f"unexpected quantized dtype for {name}: {info['dtype']}")
+        elif info["dtype"] in _QUANTIZED_DTYPES:
+            raise ValueError(f"{name} ({info['dtype']}) has no scale in its shard")
         else:
             outputs[name] = ("copy", info["dtype"], info["shape"])
     return outputs
@@ -142,14 +139,20 @@ def plan_shard(header: dict) -> dict[str, tuple[str, str, list[int]]]:
 
 def convert_shard(source: Path, target: Path) -> dict[str, str]:
     """Write ``target`` with the dequantized tensors of ``source``; returns the
-    tensor names it holds, mapped to ``target``'s file name."""
+    tensor names it holds, mapped to ``target``'s file name. A ``target`` left by
+    an earlier, interrupted conversion is complete and kept."""
     header, base = read_header(source)
     outputs = plan_shard(header)
-    if not outputs:
-        return {}
-    meta, offset = {}, 0
-    for name, (_, dtype, shape) in outputs.items():
-        size = math.prod(shape) * _DTYPE_BYTES[dtype]
+    if not outputs or target.exists():
+        return {name: target.name for name in outputs}
+    meta: dict = {"__metadata__": {"format": "pt"}}
+    offset = 0
+    for name, (kind, dtype, shape) in outputs.items():
+        if kind == "copy":
+            start, end = header[name]["data_offsets"]
+            size = end - start
+        else:
+            size = math.prod(shape) * 2
         meta[name] = {
             "dtype": dtype,
             "shape": shape,
@@ -168,16 +171,14 @@ def convert_shard(source: Path, target: Path) -> dict[str, str]:
                 remaining = end - start
                 while remaining:
                     chunk = file.read(min(remaining, 1 << 30))
+                    if not chunk:
+                        raise RuntimeError(f"{source} is truncated at {name}")
                     out.write(chunk)
                     remaining -= len(chunk)
             else:
                 scale = header[name[: -len(".weight")] + ".scale"]
                 convert = dequantize_fp8 if kind == "fp8" else dequantize_fp4
-                out.write(
-                    np.ascontiguousarray(
-                        convert(file, base, header[name], scale)
-                    ).tobytes()
-                )
+                out.write(convert(file, base, header[name], scale).tobytes())
             if out.tell() - (8 + len(blob)) != meta[name]["data_offsets"][1]:
                 raise RuntimeError(f"size mismatch writing {name}")
     partial.replace(target)
