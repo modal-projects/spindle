@@ -61,6 +61,7 @@ class MilesBackendConfig:
     model_type: str
     actor_num_gpus_per_node: int
     actor_num_nodes: int = 1
+    megatron_to_hf_mode: str = "bridge"
     tensor_model_parallel_size: int = 1
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
@@ -77,6 +78,7 @@ class MilesBackendConfig:
         "output_layer",
     )
     max_tokens_per_gpu: int = 8192
+    dynamic_batch_size: bool = True
     align_sequences_to_parallel_layout: bool = False
     extra_args: tuple[str, ...] = ()
     cli_options: dict[str, Any] = field(default_factory=dict)
@@ -108,6 +110,8 @@ class MilesBackendConfig:
         return tuple(targets)
 
     def validate(self) -> None:
+        if self.megatron_to_hf_mode not in ("bridge", "raw"):
+            raise ValueError("megatron_to_hf_mode must be bridge or raw")
         positive = {
             "actor_num_gpus_per_node": self.actor_num_gpus_per_node,
             "actor_num_nodes": self.actor_num_nodes,
@@ -141,11 +145,10 @@ class MilesBackendConfig:
             raise ValueError("default_lora_alpha must be a positive integer")
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("lora_dropout must be in [0, 1)")
-        if (
-            self.world_size
-            % (self.tensor_model_parallel_size * self.context_parallel_size)
-            != 0
-        ):
+        model_parallel_size = (
+            self.tensor_model_parallel_size * self.context_parallel_size
+        )
+        if self.world_size % model_parallel_size != 0:
             raise ValueError(
                 "actor_num_nodes * actor_num_gpus_per_node must be a multiple of "
                 "tensor_model_parallel_size * context_parallel_size"
@@ -171,8 +174,10 @@ class MilesBackendConfig:
             self.hf_checkpoint,
             "--pretrained-checkpoint",
             self.hf_checkpoint,
+            "--ref-load",
+            self.hf_checkpoint,
             "--megatron-to-hf-mode",
-            "bridge",
+            self.megatron_to_hf_mode,
             "--debug-train-only",
             "--rollout-num-gpus",
             "0",
@@ -205,9 +210,7 @@ class MilesBackendConfig:
             str(self.expert_model_parallel_size),
             "--expert-tensor-parallel-size",
             str(self.expert_tensor_parallel_size),
-            "--use-dynamic-batch-size",
-            "--max-tokens-per-gpu",
-            str(self.max_tokens_per_gpu),
+            *self._batching_arguments(),
             "--attention-dropout",
             "0.0",
             "--hidden-dropout",
@@ -220,6 +223,16 @@ class MilesBackendConfig:
         if self.tensor_model_parallel_size > 1:
             arguments.append("--sequence-parallel")
         return [*arguments, *self.extra_args]
+
+    def _batching_arguments(self) -> list[str]:
+        if self.dynamic_batch_size:
+            return [
+                "--use-dynamic-batch-size",
+                "--max-tokens-per-gpu",
+                str(self.max_tokens_per_gpu),
+            ]
+        # Attention layouts such as bshd take one sequence per micro-batch.
+        return ["--micro-batch-size", "1"]
 
 
 def parse_backend_config(
