@@ -15,6 +15,9 @@ from spindle.assets import TRANSFORMS
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
 
+# Modal's smallest ephemeral disk request.
+MIN_EPHEMERAL_DISK_MIB = 524_288
+
 
 def _jsonable(value):
     return json.loads(json.dumps(value))
@@ -44,6 +47,12 @@ class DeploymentConfig(BaseModel):
         pinned = BaseConfig(**_jsonable(vars(recipe)))
         if pinned.asset_transform and pinned.asset_transform not in TRANSFORMS:
             raise ValueError(f"unknown asset_transform: {pinned.asset_transform!r}")
+        for field in ("trainer_disk_mib", "inference_disk_mib"):
+            disk = getattr(pinned, field)
+            if disk and disk < MIN_EPHEMERAL_DISK_MIB:
+                raise ValueError(
+                    f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
+                )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
