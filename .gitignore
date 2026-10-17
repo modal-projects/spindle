@@ -8,3 +8,6 @@ build/
 dist/
 .env
 scripts/results/
+
+/rust/router/target/
+/rust/router/dist/
