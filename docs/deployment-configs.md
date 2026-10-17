@@ -72,7 +72,7 @@ Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/
 
 ### Miles options
 
-Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size` (set it to `false` for attention layouts such as `bshd` that take one sequence per micro-batch). `pipeline_model_parallel_size` is passed to Miles but must be 1 for multi-LoRA training. Miles loads its reference model from the same Hugging Face checkpoint as the actor.
+Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size` (set it to `false` for attention layouts such as `bshd` that take one sequence per micro-batch).
 
 ### Disk and asset conversion
 

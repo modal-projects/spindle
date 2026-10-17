@@ -63,7 +63,6 @@ class MilesBackendConfig:
     actor_num_nodes: int = 1
     megatron_to_hf_mode: str = "bridge"
     tensor_model_parallel_size: int = 1
-    pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: int = 1
@@ -91,9 +90,7 @@ class MilesBackendConfig:
     @property
     def data_parallel_size(self) -> int:
         return self.world_size // (
-            self.tensor_model_parallel_size
-            * self.pipeline_model_parallel_size
-            * self.context_parallel_size
+            self.tensor_model_parallel_size * self.context_parallel_size
         )
 
     @property
@@ -113,17 +110,12 @@ class MilesBackendConfig:
         return tuple(targets)
 
     def validate(self) -> None:
-        if self.pipeline_model_parallel_size != 1:
-            raise ValueError(
-                "multi-LoRA training does not support pipeline parallelism"
-            )
         if self.megatron_to_hf_mode not in ("bridge", "raw"):
             raise ValueError("megatron_to_hf_mode must be bridge or raw")
         positive = {
             "actor_num_gpus_per_node": self.actor_num_gpus_per_node,
             "actor_num_nodes": self.actor_num_nodes,
             "tensor_model_parallel_size": self.tensor_model_parallel_size,
-            "pipeline_model_parallel_size": self.pipeline_model_parallel_size,
             "context_parallel_size": self.context_parallel_size,
             "expert_model_parallel_size": self.expert_model_parallel_size,
             "expert_tensor_parallel_size": self.expert_tensor_parallel_size,
@@ -154,15 +146,12 @@ class MilesBackendConfig:
         if not 0 <= self.lora_dropout < 1:
             raise ValueError("lora_dropout must be in [0, 1)")
         model_parallel_size = (
-            self.tensor_model_parallel_size
-            * self.pipeline_model_parallel_size
-            * self.context_parallel_size
+            self.tensor_model_parallel_size * self.context_parallel_size
         )
         if self.world_size % model_parallel_size != 0:
             raise ValueError(
                 "actor_num_nodes * actor_num_gpus_per_node must be a multiple of "
-                "tensor_model_parallel_size * pipeline_model_parallel_size * "
-                "context_parallel_size"
+                "tensor_model_parallel_size * context_parallel_size"
             )
         if (
             self.actor_num_nodes > 1
@@ -214,7 +203,7 @@ class MilesBackendConfig:
             "--tensor-model-parallel-size",
             str(self.tensor_model_parallel_size),
             "--pipeline-model-parallel-size",
-            str(self.pipeline_model_parallel_size),
+            "1",
             "--context-parallel-size",
             str(self.context_parallel_size),
             "--expert-model-parallel-size",
