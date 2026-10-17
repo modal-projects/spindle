@@ -1,12 +1,13 @@
 //! One scheduler per frontend process and inference pool. No network I/O here.
 mod policy;
+mod radix;
 
-use policy::{Joint, LeastLoad, Policy};
+use policy::{Joint, LeastLoad, LoraRadix, Policy};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
@@ -14,6 +15,8 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 struct Work {
     age_seconds: f64,
     prefixes: HashSet<String>,
+    #[serde(default)]
+    prefix_nodes: Vec<radix::Row>,
     cpu_adapters: HashSet<String>,
     gpu_adapters: HashSet<String>,
     request_ids: HashSet<String>,
@@ -36,6 +39,7 @@ pub struct Request {
     prompt_tokens: usize,
     output_tokens: usize,
     prefixes: Vec<(String, usize)>,
+    hashes: Vec<u128>,
     preferred: Mutex<Option<String>>,
 }
 #[pymethods]
@@ -68,6 +72,10 @@ impl Request {
             affinity,
             prompt_tokens: tokens.len(),
             output_tokens,
+            hashes: prefixes
+                .iter()
+                .map(|(h, _)| u128::from_str_radix(h, 16).unwrap())
+                .collect(),
             prefixes,
             preferred: Mutex::new(None),
         })
@@ -99,6 +107,10 @@ impl Decision {
 }
 
 pub struct Candidate {
+    replica_index: usize,
+    adapter_tier: u8,
+    preferred: bool,
+    tie: u64,
     active: usize,
     cached_tokens: usize,
     backlog_seconds: f64,
@@ -111,10 +123,55 @@ struct Reservation {
     work: f64,
 }
 
+/// Built away from the asyncio thread; installation only swaps immutable state.
+#[pyclass(frozen)]
+pub struct Snapshot {
+    replicas: Arc<Vec<Replica>>,
+    radix: Arc<radix::Index>,
+    observed: Instant,
+}
+impl Snapshot {
+    fn build(json: &str, use_radix: bool) -> PyResult<Self> {
+        let observed = Instant::now();
+        let replicas: Vec<Replica> = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("invalid routing snapshot: {e}")))?;
+        let mut ids = HashSet::new();
+        if replicas.iter().any(|r| {
+            !ids.insert(&r.replica) || !r.work.age_seconds.is_finite() || r.work.age_seconds < 0.0
+        }) {
+            return Err(PyValueError::new_err(
+                "duplicate replica or invalid snapshot age",
+            ));
+        }
+        let mut radix = radix::Index::default();
+        if use_radix {
+            for (i, r) in replicas.iter().enumerate() {
+                radix
+                    .add(i, &r.work.prefix_nodes)
+                    .map_err(PyValueError::new_err)?;
+            }
+        }
+        Ok(Self {
+            replicas: Arc::new(replicas),
+            radix: Arc::new(radix),
+            observed,
+        })
+    }
+}
+#[pymethods]
+impl Snapshot {
+    #[new]
+    fn new(py: Python<'_>, json: String, use_radix: bool) -> PyResult<Self> {
+        py.detach(move || Self::build(&json, use_radix))
+    }
+}
+
 #[pyclass]
 pub struct Router {
     policy: Box<dyn Policy>,
-    replicas: Vec<Replica>,
+    replicas: Arc<Vec<Replica>>,
+    radix: Arc<radix::Index>,
+    use_radix: bool,
     reservations: HashMap<String, Reservation>,
     busy_until: HashMap<String, f64>,
     failed_until: HashMap<String, f64>,
@@ -129,6 +186,7 @@ pub struct Router {
 #[pymethods]
 impl Router {
     #[new]
+    #[pyo3(signature = (policy, capacity, prefill_rate, decode_rate, gpu_load_seconds, registration_seconds, balance_absolute=4, balance_relative=1.25))]
     fn new(
         policy: &str,
         capacity: usize,
@@ -136,11 +194,24 @@ impl Router {
         decode_rate: f64,
         gpu_load_seconds: f64,
         registration_seconds: f64,
+        balance_absolute: usize,
+        balance_relative: f64,
     ) -> PyResult<Self> {
+        let use_radix = policy == "lora_radix";
+        if !balance_relative.is_finite() || balance_relative < 1.0 {
+            return Err(PyValueError::new_err(
+                "balance_relative must be finite and >= 1",
+            ));
+        }
         let policy: Box<dyn Policy> = match policy {
             "joint" => Box::new(Joint),
-            "least_load" => Box::new(LeastLoad),
-            _ => return Err(PyValueError::new_err("policy must be joint or least_load")),
+            "least_load" => Box::new(LeastLoad { sticky: true }),
+            "load_balanced" => Box::new(LeastLoad { sticky: false }),
+            "lora_radix" => Box::new(LoraRadix {
+                absolute: balance_absolute,
+                relative: balance_relative,
+            }),
+            _ => return Err(PyValueError::new_err("unknown routing policy")),
         };
         if capacity == 0
             || [prefill_rate, decode_rate]
@@ -154,7 +225,9 @@ impl Router {
         }
         Ok(Self {
             policy,
-            replicas: vec![],
+            replicas: Arc::new(vec![]),
+            radix: Arc::new(radix::Index::default()),
+            use_radix,
             reservations: HashMap::new(),
             busy_until: HashMap::new(),
             failed_until: HashMap::new(),
@@ -170,19 +243,16 @@ impl Router {
 
     /// Replace a complete observation, not an incremental request-path lookup.
     fn update_snapshot(&mut self, json: &str) -> PyResult<()> {
-        let replicas: Vec<Replica> = serde_json::from_str(json)
-            .map_err(|e| PyValueError::new_err(format!("invalid routing snapshot: {e}")))?;
-        let mut ids = HashSet::new();
-        if replicas.iter().any(|r| {
-            !ids.insert(&r.replica) || !r.work.age_seconds.is_finite() || r.work.age_seconds < 0.0
-        }) {
-            return Err(PyValueError::new_err(
-                "duplicate replica or invalid snapshot age",
-            ));
-        }
-        self.replicas = replicas;
-        self.updated = self.clock.elapsed().as_secs_f64();
+        let snapshot = Snapshot::build(json, self.use_radix)?;
+        self.install_snapshot(&snapshot);
         Ok(())
+    }
+
+    fn install_snapshot(&mut self, snapshot: &Snapshot) {
+        self.replicas = snapshot.replicas.clone();
+        self.radix = snapshot.radix.clone();
+        self.updated =
+            self.clock.elapsed().as_secs_f64() - snapshot.observed.elapsed().as_secs_f64();
     }
 
     /// Select and reserve in one short call. A busy pool stays busy, not unhealthy.
@@ -193,7 +263,10 @@ impl Router {
         let now = self.clock.elapsed().as_secs_f64();
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
-        let mut chosen: Option<(usize, Candidate, f64, u64)> = None;
+        let mut candidates = Vec::new();
+        let hits = self
+            .radix
+            .matches(&request.adapter, &request.hashes, self.replicas.len());
         for (i, replica) in self.replicas.iter().enumerate() {
             let w = &replica.work;
             if w.age_seconds + now - self.updated >= 3.0 {
@@ -221,12 +294,16 @@ impl Router {
             if active >= self.capacity {
                 continue;
             }
-            let hit = request
-                .prefixes
-                .iter()
-                .rev()
-                .find(|(hash, _)| w.prefixes.contains(hash))
-                .map_or(0, |(_, n)| *n);
+            let hit = if self.use_radix {
+                hits[i]
+            } else {
+                request
+                    .prefixes
+                    .iter()
+                    .rev()
+                    .find(|(hash, _)| w.prefixes.contains(hash))
+                    .map_or(0, |(_, n)| *n)
+            };
             let mut pending = w.pending_adapters.clone();
             for r in &unobserved {
                 pending.insert(r.adapter.clone());
@@ -249,36 +326,37 @@ impl Router {
                     self.registration_seconds
                 }
             };
-            let c = Candidate {
+            candidates.push(Candidate {
+                replica_index: i,
+                adapter_tier: if w.gpu_adapters.contains(&request.adapter) {
+                    0
+                } else if pending.contains(&request.adapter) {
+                    1
+                } else if w.cpu_adapters.contains(&request.adapter) {
+                    2
+                } else {
+                    3
+                },
+                preferred: preferred.as_ref() == Some(&replica.replica),
+                tie: xxh3_64(
+                    format!(
+                        "{}\0{}\0{}",
+                        request.adapter, request.affinity, replica.replica
+                    )
+                    .as_bytes(),
+                ),
                 active,
                 cached_tokens: hit,
                 backlog_seconds: backlog,
                 prefill_seconds: (request.prompt_tokens - hit) as f64 / self.prefill_rate,
                 adapter_seconds,
-            };
-            let score = self.policy.score(&c);
-            let tie = xxh3_64(
-                format!(
-                    "{}\0{}\0{}",
-                    request.adapter, request.affinity, replica.replica
-                )
-                .as_bytes(),
-            );
-            let keep_group = preferred.as_ref() == Some(&replica.replica);
-            if keep_group
-                || chosen.as_ref().is_none_or(|(_, _, best, rank)| {
-                    score < *best || (score == *best && tie > *rank)
-                })
-            {
-                chosen = Some((i, c, score, tie));
-            }
-            if keep_group {
-                break;
-            }
+            });
         }
-        let Some((i, c, _, _)) = chosen else {
+        let Some(selected) = self.policy.select(&candidates) else {
             return Ok(Decision::wait(if fresh { "wait" } else { "unavailable" }));
         };
+        let c = &candidates[selected];
+        let i = c.replica_index;
         let replica = &self.replicas[i];
         *request.preferred.lock().unwrap() = Some(replica.replica.clone());
         self.reservations.insert(
@@ -326,6 +404,7 @@ impl Router {
 fn spindle_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Router>()?;
     m.add_class::<Request>()?;
+    m.add_class::<Snapshot>()?;
     m.add_class::<Decision>()?;
     Ok(())
 }
@@ -335,7 +414,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn router(policy: &str, capacity: usize) -> Router {
-        Router::new(policy, capacity, 1000., 100., 0.1, 1.).unwrap()
+        Router::new(policy, capacity, 1000., 100., 0.1, 1., 4, 1.25).unwrap()
     }
     fn request(adapter: &str) -> Request {
         Request::new(adapter.into(), "problem".into(), vec![42; 1024], 100).unwrap()

@@ -10,7 +10,16 @@ from spindle.inference.router import Router
 from .fft_pool import proxy_auth_headers
 
 
-def create_router(app_name, gateway, *, policy, capacity, rates):
+def create_router(
+    app_name,
+    gateway,
+    *,
+    policy,
+    capacity,
+    rates,
+    balance_absolute=4,
+    balance_relative=1.25,
+):
     containers, discovered = [], 0.0
     client = httpx.AsyncClient(headers=proxy_auth_headers(), timeout=2, trust_env=False)
 
@@ -56,5 +65,11 @@ def create_router(app_name, gateway, *, policy, capacity, rates):
         ]
 
     return Router(
-        discover, policy=policy, capacity=capacity, rates=rates, close=client.aclose
+        discover,
+        policy=policy,
+        capacity=capacity,
+        rates=rates,
+        close=client.aclose,
+        balance_absolute=balance_absolute,
+        balance_relative=balance_relative,
     )

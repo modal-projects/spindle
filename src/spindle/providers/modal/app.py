@@ -333,10 +333,19 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         policy = definition.recipe.inference_lora_routing
-        if policy not in {"affinity", "joint", "least_load"}:
+        if policy not in {
+            "affinity",
+            "joint",
+            "least_load",
+            "load_balanced",
+            "lora_radix",
+        }:
             raise ValueError(f"unknown LoRA routing policy: {policy}")
         router = None
-        if policy in {"joint", "least_load"} and task.get("model_id") is not None:
+        if (
+            policy in {"joint", "least_load", "load_balanced", "lora_radix"}
+            and task.get("model_id") is not None
+        ):
             if spec.app_name not in _routers:
                 _routers[spec.app_name] = create_router(
                     spec.app_name,
@@ -344,6 +353,8 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                     policy=policy,
                     capacity=definition.inference_settings["max_running_requests"],
                     rates=definition.recipe.inference_routing_work_rates,
+                    balance_absolute=definition.recipe.inference_routing_balance_absolute,
+                    balance_relative=definition.recipe.inference_routing_balance_relative,
                 )
             router = _routers[spec.app_name]
 

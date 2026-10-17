@@ -78,3 +78,39 @@ def test_lora_admissions_exclude_base_probes_and_count_chunked_requests_once(
         "request_lora_hits": 1,
         "request_lora_misses": 1,
     }
+
+
+def test_catalog_preserves_structural_hybrid_ancestry_across_unaligned_splits():
+    rows = [
+        (1, 0, "uid", list(range(37)), False, 1),
+        (2, 1, "uid", list(range(37, 128)), True, 2),
+    ]
+    catalog = observer.PrefixCatalog()
+    rust_prefixes(cache(rows), {"uid": "model/7"}, catalog)
+    first, second = token_prefixes("model/7", list(range(129)))
+    assert catalog.export() == [
+        ("model/7", first[0], None, False),
+        ("model/7", second[0], first[0], True),
+    ]
+
+
+def test_catalog_cap_never_exports_orphans():
+    catalog = observer.PrefixCatalog(limit=2)
+    catalog.add("v", "a", None, False, 0)
+    catalog.add("v", "b", "a", True, 1)
+    catalog.add("v", "c", "b", True, 2)
+    assert catalog.export() == [("v", "a", None, False), ("v", "b", "a", True)]
+
+
+def test_catalog_branches_merge_shared_ancestry():
+    rows = [
+        (1, 0, "uid", [1] * 64, True, 1),
+        (2, 1, "uid", [2] * 64, True, 2),
+        (3, 1, "uid", [3] * 64, True, 3),
+    ]
+    catalog = observer.PrefixCatalog()
+    rust_prefixes(cache(rows), {"uid": "v"}, catalog)
+    result = catalog.export()
+    assert len(result) == 3
+    root = next(r[1] for r in result if r[2] is None)
+    assert sum(r[2] == root for r in result) == 2

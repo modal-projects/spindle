@@ -19,16 +19,20 @@ class Config(Parent):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--policy", choices=["default", "joint"], required=True)
+    parser.add_argument(
+        "--policy",
+        choices=["default", "joint", "load_balanced", "lora_radix"],
+        required=True,
+    )
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     directory = args.root / args.policy
     directory.mkdir(parents=True, exist_ok=True)
     # The root name is frozen in the manifest; never reuse another experiment's apps.
-    name = f"routing27-rust-{args.policy}-{args.root.name}"
+    name = f"routing27-rust-{args.policy}-{args.root.parent.name}-{args.root.name}"
     recipe = Config(
         name=name,
-        inference_lora_routing="affinity" if args.policy == "default" else "joint",
+        inference_lora_routing="affinity" if args.policy == "default" else args.policy,
         inference_env=Config.inference_env | {"SGLANG_ENABLE_LORA_CSGMV_SPLIT_K": "1"},
         inference_routing_work_rates=json.loads(
             (args.root / "work-rates.json").read_text()

@@ -14,7 +14,9 @@ def test_paired_manifest_check_waits_for_both_then_rejects_changed_inputs(tmp_pa
         packages={},
         source_sha256={},
     )
-    for policy in ("default", "joint"):
+    policies = ["default", "load_balanced", "lora_radix"]
+    (tmp_path / "schedule.json").write_text(json.dumps({"pairs": [policies]}))
+    for policy in policies:
         path = tmp_path / policy / "measured/client-00/manifest.json"
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(manifest))

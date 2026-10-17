@@ -87,6 +87,7 @@ def create_app(
             work = dict(
                 age_seconds=time.time() - snapshot["timestamp"],
                 prefixes=snapshot["prefixes"],
+                prefix_nodes=snapshot.get("prefix_nodes", []),
                 cpu_adapters=snapshot["cpu_adapters"],
                 gpu_adapters=snapshot["gpu_adapters"],
                 request_ids=list(rows),

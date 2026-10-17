@@ -194,3 +194,80 @@ def test_cancelling_generation_releases_reservation():
         await router.aclose()
 
     asyncio.run(run())
+
+
+def catalog(adapter, tokens, reusable=True):
+    from array import array
+
+    digest = xxhash.xxh3_128((adapter + "\0").encode())
+    rows, parent = [], None
+    for end in range(64, len(tokens), 64):
+        digest.update(array("q", tokens[end - 64 : end]).tobytes())
+        key = digest.hexdigest()
+        rows.append((adapter, key, parent, reusable))
+        parent = key
+    return rows
+
+
+def test_radix_load_gate_overrides_warmth_and_sibling_preference():
+    a, b = replica("a"), replica("b")
+    b["work"]["gpu_adapters"] = []
+    scheduler = Scheduler("lora_radix", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request("m/weight_v000007", "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "first").replica == "a"
+    scheduler.complete("first", "ok")
+    a["active"] = 5
+    scheduler.update_snapshot(json.dumps([a, b]))
+    assert scheduler.select_destination(q, "overflow").replica == "b"
+
+
+def test_radix_exact_version_eviction_and_no_optimistic_credit():
+    a, b = replica("a"), replica("b")
+    adapter = "m/weight_v000007"
+    b["work"]["prefix_nodes"] = catalog(adapter, [42] * 1024)
+    scheduler = Scheduler("lora_radix", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request(adapter, "group", [42] * 1024, 1)
+    hit = scheduler.select_destination(q, "hit")
+    assert (hit.replica, hit.cached_tokens) == ("b", 960)
+    scheduler.complete("hit", "ok")
+    new = Request("m/weight_v000008", "group", [42] * 1024, 1)
+    assert scheduler.select_destination(new, "new-version").cached_tokens == 0
+    b["work"]["prefix_nodes"] = []
+    scheduler.update_snapshot(json.dumps([a, b]))
+    assert scheduler.select_destination(q, "evicted").cached_tokens == 0
+
+
+def test_radix_gate_prefers_warmth_even_over_longer_cold_prefix():
+    # Deliberate policy limitation, not a claim that warm-first is always faster.
+    a, b = replica("a"), replica("b")
+    b["work"]["gpu_adapters"] = []
+    b["work"]["prefix_nodes"] = catalog("m/weight_v000007", [42] * 8192)
+    scheduler = Scheduler("lora_radix", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    q = Request("m/weight_v000007", "group", [42] * 8192, 1)
+    assert scheduler.select_destination(q, "warm").replica == "a"
+
+
+def test_load_balanced_control_has_no_sibling_override():
+    scheduler = Scheduler("load_balanced", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([replica("a"), replica("b")]))
+    q = Request("m/weight_v000007", "group", [42] * 1024, 1)
+    assert (
+        scheduler.select_destination(q, "one").replica
+        != scheduler.select_destination(q, "two").replica
+    )
+
+
+def test_invalid_snapshot_keeps_previous_tree():
+    adapter = "m/weight_v000007"
+    a = replica()
+    a["work"]["prefix_nodes"] = catalog(adapter, [42] * 1024)
+    scheduler = Scheduler("lora_radix", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a]))
+    a["work"]["prefix_nodes"][0] = (adapter, "01", "02", True)
+    with pytest.raises(ValueError):
+        scheduler.update_snapshot(json.dumps([a]))
+    q = Request(adapter, "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "valid").cached_tokens == 960

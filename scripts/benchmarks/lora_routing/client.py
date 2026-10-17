@@ -271,7 +271,7 @@ class Client:
             ),
         )
         self.event("group_submitted", group=index, policy_version=version)
-        result = future.result(timeout=3600)
+        result = future.result(timeout=cfg.get("sampling_timeout_seconds", 3600))
         if len(result.sequences) != cfg["samples_per_group"]:
             raise ValueError("Incomplete sample group")
         sequences = []
@@ -421,6 +421,34 @@ class Client:
         self.event("rollout_done", **stats)
         return data, stats
 
+    def restore_sampler(self, version, path):
+        """Re-publish vanished session artifacts from the exact behavior checkpoint."""
+        self.sampling_paths[version] = path
+        try:
+            return self.service.create_sampling_client(model_path=path), version
+        except tinker.NotFoundError:
+            if version == self.completed_update:
+                return self.publish(version)
+            if version == 0:
+                checkpoint = self.cfg["initial_state_paths"][self.client_index]
+            else:
+                checkpoint = json.loads(
+                    (self.root / f"commit-{version:03d}.json").read_text()
+                )["checkpoint_path"]
+            timeout = self.cfg.get("training_timeout_seconds", 7200)
+            try:
+                self.trainer.load_state(checkpoint).result(timeout=timeout)
+                restored = self.publish(version)
+            finally:
+                # No rollout/training runs during recovery. Restore optimizer too.
+                self.trainer.load_state_with_optimizer(
+                    self.commit["checkpoint_path"]
+                ).result(timeout=timeout)
+            self.event(
+                "sampler_republished", policy_version=version, checkpoint=checkpoint
+            )
+            return restored
+
     def run(self):
         cfg = self.cfg
         if self.completed_update == cfg["updates"]:
@@ -428,23 +456,12 @@ class Client:
             self.unload()
             return
         if self.commit:
-            version = self.completed_update
-            self.sampling_paths[version] = self.commit["published_path"]
-            snapshot = (
-                self.service.create_sampling_client(
-                    model_path=self.commit["published_path"]
-                ),
-                version,
+            snapshot = self.restore_sampler(
+                self.completed_update, self.commit["published_path"]
             )
             # Preserve the original one-update-lagged prefetched behavior policy.
-            version, path = (
-                self.commit["next_policy_version"],
-                self.commit["next_policy_path"],
-            )
-            self.sampling_paths[version] = path
-            first_snapshot = (
-                self.service.create_sampling_client(model_path=path),
-                version,
+            first_snapshot = self.restore_sampler(
+                self.commit["next_policy_version"], self.commit["next_policy_path"]
             )
         else:
             snapshot = self.publish(0)

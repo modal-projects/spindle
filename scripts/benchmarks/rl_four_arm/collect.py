@@ -76,7 +76,9 @@ async def collect(pools, seconds):
                             state["request_count"] = len(state.pop("request_ids"))
                             work = state["work"]
                             if work is not None:
-                                for key in ("prefixes", "request_ids"):
+                                for key in ("prefixes", "request_ids", "prefix_nodes"):
+                                    if key not in work:
+                                        continue
                                     work[key + "_count"] = len(work.pop(key))
                             return state
                         except Exception as exc:

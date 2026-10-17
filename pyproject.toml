@@ -32,7 +32,7 @@ pythonpath = [".", "src", "examples/codeforces-codegolf"]
 
 [tool.setuptools.data-files]
 "share/spindle/router" = ["rust/router/Cargo.toml", "rust/router/Cargo.lock", "rust/router/pyproject.toml"]
-"share/spindle/router/src" = ["rust/router/src/lib.rs", "rust/router/src/policy.rs"]
+"share/spindle/router/src" = ["rust/router/src/lib.rs", "rust/router/src/policy.rs", "rust/router/src/radix.rs"]
 
 [tool.ruff]
 extend-exclude = ["*.md", "src/spindle/proto/*_pb2.py"]

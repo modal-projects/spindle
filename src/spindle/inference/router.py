@@ -8,14 +8,24 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 
-from spindle_router import Decision, Request, Router as Scheduler
+from spindle_router import Decision, Request, Snapshot, Router as Scheduler
 
 log = logging.getLogger(__name__)
 SnapshotReader = Callable[[], Awaitable[list[dict]]]
 
 
 class Router:
-    def __init__(self, discover: SnapshotReader, *, policy, capacity, rates, close):
+    def __init__(
+        self,
+        discover: SnapshotReader,
+        *,
+        policy,
+        capacity,
+        rates,
+        close,
+        balance_absolute=4,
+        balance_relative=1.25,
+    ):
         self.scheduler = Scheduler(
             policy,
             capacity,
@@ -23,6 +33,8 @@ class Router:
             rates["decode_tokens_per_second"],
             rates["gpu_lora_seconds"],
             rates["registration_seconds"],
+            balance_absolute,
+            balance_relative,
         )
         self.policy = policy
         self.discover = discover
@@ -40,7 +52,10 @@ class Router:
             while self.scheduler.pending or time.monotonic() - self.last_used < 60:
                 try:
                     rows = await asyncio.wait_for(self.discover(), timeout=3)
-                    self.scheduler.update_snapshot(json.dumps(rows))
+                    snapshot = await asyncio.to_thread(
+                        Snapshot, json.dumps(rows), self.policy == "lora_radix"
+                    )
+                    self.scheduler.install_snapshot(snapshot)
                 except Exception:
                     # A discovery failure must not kill the poller.
                     log.warning(

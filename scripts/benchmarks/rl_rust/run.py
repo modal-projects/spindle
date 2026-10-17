@@ -18,7 +18,10 @@ from scripts.benchmarks.rl_four_arm.prepare_holders import prepare
 from spindle.deployments import DeploymentConfig
 
 REPO = Path(__file__).resolve().parents[3]
-POLICIES = ("default", "joint")
+
+
+def policies(root):
+    return json.loads((root / "schedule.json").read_text())["pairs"][0]
 
 
 def command(module, *args, **kwargs):
@@ -44,11 +47,11 @@ def validate_inputs(root):
     for index in range(8):
         paths = [
             root / p / "measured" / f"client-{index:02d}" / "manifest.json"
-            for p in POLICIES
+            for p in policies(root)
         ]
         if all(path.exists() for path in paths):
-            a, b = [json.loads(path.read_text()) for path in paths]
-            if any(a[k] != b[k] for k in keys):
+            a, *others = [json.loads(path.read_text()) for path in paths]
+            if any(a[k] != b[k] for b in others for k in keys):
                 raise RuntimeError(f"Mismatched paired inputs for client {index}")
 
 
@@ -61,7 +64,11 @@ def main():
     os.environ["TINKER_API_KEY"] = Path("/tmp/spindle-rl-three-arm-api-key").read_text()
     config = json.loads((root / "config.json").read_text())
     owned = sum(
-        (json.loads((root / p / "owned-apps.json").read_text()) for p in POLICIES), []
+        (
+            json.loads((root / p / "owned-apps.json").read_text())
+            for p in policies(root)
+        ),
+        [],
     )
     external = json.loads((args.external_root / "owned-apps.json").read_text())
     (root / "owned-apps.json").write_text(json.dumps(owned))
@@ -79,8 +86,8 @@ def main():
     state = dict(started=time.time(), phase="initializing", complete=False)
     known = {}
     collector = runner = None
-    pool = ThreadPoolExecutor(2)
-    ready = {p: pool.submit(prepare, root, p, config) for p in POLICIES}
+    pool = ThreadPoolExecutor(len(policies(root)))
+    ready = {p: pool.submit(prepare, root, p, config) for p in policies(root)}
     monitor_failures = 0
     collector_restarts = 0
     trainers = {}
@@ -113,7 +120,7 @@ def main():
                 if future.done():
                     future.result()
             if runner is None and all(f.done() for f in ready.values()):
-                for p in POLICIES:
+                for p in policies(root):
                     deployment = json.loads((root / p / "deployment.json").read_text())
                     # Early manifests included this derived property.
                     deployment.pop("trainer_app_name", None)
@@ -136,10 +143,7 @@ def main():
                             "scripts.benchmarks.rl_four_arm.run",
                             "--root",
                             str(root),
-                            "--policy",
-                            "default",
-                            "--policy",
-                            "joint",
+                            *[arg for p in policies(root) for arg in ("--policy", p)],
                         ],
                         stdout=out,
                         stderr=subprocess.STDOUT,
@@ -185,7 +189,7 @@ def main():
         state["finished"] = time.time()
         atomic_json(root / "status.json", state)
         (root / "STOP").write_text(state.get("error", "Completed"))
-        for p in POLICIES:
+        for p in policies(root):
             directory = root / p / "measured"
             if directory.exists():
                 (directory / "STOP_NOW").write_text("Pair ended")

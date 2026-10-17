@@ -21,7 +21,7 @@ def main():
             root = args.root / workload
             status.update(workload=workload, phase="deploying")
             atomic_json(args.root / "study-status.json", status)
-            for policy in ("default", "joint"):
+            for policy in json.loads((root / "schedule.json").read_text())["pairs"][0]:
                 with (root / f"deploy-{policy}.log").open("a") as output:
                     subprocess.run(
                         [

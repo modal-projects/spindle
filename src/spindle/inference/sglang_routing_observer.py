@@ -59,17 +59,45 @@ def batch(batch, manager):
         counters["decode_batch_size_" + str(len(batch.reqs))] += 1
 
 
-def rust_prefixes(cache, adapter_names):
+class PrefixCatalog:
+    """Bounded parent-linked cache observations; hashes include exact adapter versions."""
+
+    def __init__(self, limit=8192):
+        self.nodes = {}
+        self.limit = limit
+
+    def add(self, adapter, key, parent, reusable, accessed):
+        self.nodes[key] = (adapter, key, parent, reusable, accessed)
+
+    def export(self):
+        selected = {}
+        for row in sorted(self.nodes.values(), key=lambda r: r[4], reverse=True):
+            if not row[3]:
+                continue
+            path = []
+            key = row[1]
+            while key is not None and key not in selected:
+                item = self.nodes[key]
+                path.append(item)
+                key = item[2]
+            if len(selected) + len(path) > self.limit:
+                continue
+            for item in reversed(path):
+                selected[item[1]] = item[:4]
+        return list(selected.values())
+
+
+def rust_prefixes(cache, adapter_names, catalog=None):
     rows = cache.tree_core._binding.routing_snapshot()
     children = {}
     for row in rows:
         children.setdefault(row[1], []).append(row)
     # The native root is omitted. Descendants of an evicted ancestor receive no credit.
     root = cache.tree_core.root_node_handle()
-    stack = [(row, None, 0) for row in children.get(root, ())]
+    stack = [(row, None, 0, None) for row in children.get(root, ())]
     result = []
     while stack:
-        row, parent_digest, start = stack.pop()
+        row, parent_digest, start, parent_key = stack.pop()
         node_id, parent_id, extra_key, raw_tokens, mamba, accessed = row
         adapter = adapter_names.get(extra_key)
         if adapter is None:
@@ -85,15 +113,22 @@ def rust_prefixes(cache, adapter_names):
         for end in range((start // 64 + 1) * 64, end_node + 1, 64):
             take = end - start
             digest.update(tokens[offset:take].tobytes())
-            if not cache.is_mamba_enabled or (mamba and end == end_node):
-                result.append((accessed, digest.hexdigest()))
+            key = digest.hexdigest()
+            reusable = not cache.is_mamba_enabled or (mamba and end == end_node)
+            if catalog is not None:
+                catalog.add(adapter, key, parent_key, reusable, accessed)
+            parent_key = key
+            if reusable:
+                result.append((accessed, key))
             offset = take
         digest.update(tokens[offset:].tobytes())
-        stack.extend((child, digest, end_node) for child in children.get(node_id, ()))
+        stack.extend(
+            (child, digest, end_node, parent_key) for child in children.get(node_id, ())
+        )
     return [key for _, key in sorted(result, reverse=True)[:8192]]
 
 
-def device_prefixes(cache, adapter_names):
+def device_prefixes(cache, adapter_names, catalog=None):
     """Hash reusable device boundaries, including hybrid-state requirements.
 
     No salted, bigram, host-only or unsupported cache state receives credit.
@@ -105,7 +140,7 @@ def device_prefixes(cache, adapter_names):
             return None
         core = cache.tree_core
         if type(core).__name__ == "RustUnifiedTreeCore":
-            return rust_prefixes(cache, adapter_names)
+            return rust_prefixes(cache, adapter_names, catalog)
         if type(core).__name__ != "UnifiedTreeCore":
             return None
         root = core.root_node
@@ -143,9 +178,9 @@ def device_prefixes(cache, adapter_names):
         return None
     result = []
     fresh_hashes = {}
-    stack = [(n, None, 0) for n in root.children.values()]
+    stack = [(n, None, 0, None) for n in root.children.values()]
     while stack:
-        node, parent_digest, start = stack.pop()
+        node, parent_digest, start, parent_key = stack.pop()
         if not resident(node) or node.key.is_bigram:
             continue
         adapter = adapter_names.get(node.key.extra_key)
@@ -171,11 +206,17 @@ def device_prefixes(cache, adapter_names):
             digest.update(tokens[offset:].tobytes())
         end = start + len(node.key)
         fresh_hashes[node.id] = (node.key, start, digest, boundaries)
-        if valid(node):
-            for key, length in boundaries:
-                if not hybrid or length == end:
-                    result.append((node.last_access_time, key))
-        stack.extend((child, digest, end) for child in node.children.values())
+        node_valid = valid(node)
+        for key, length in boundaries:
+            reusable = node_valid and (not hybrid or length == end)
+            if catalog is not None:
+                catalog.add(adapter, key, parent_key, reusable, node.last_access_time)
+            parent_key = key
+            if reusable:
+                result.append((node.last_access_time, key))
+        stack.extend(
+            (child, digest, end, parent_key) for child in node.children.values()
+        )
     hashes.clear()
     hashes.update(fresh_hashes)
     # Cap transport and frontend memory, dropping the least recently used hints.
@@ -207,7 +248,8 @@ def snapshot(scheduler, running_batch, last_batch):
         return
     manager = scheduler.tp_worker.model_runner.lora_manager
     names = {uid: ref.lora_name for uid, ref in manager.lora_refs.items()}
-    prefixes = device_prefixes(scheduler.tree_cache, names)
+    catalog = PrefixCatalog()
+    prefixes = device_prefixes(scheduler.tree_cache, names, catalog)
     if prefixes is None:
         return
     requests = {r.rid: r for r in scheduler.waiting_queue}
@@ -237,6 +279,7 @@ def snapshot(scheduler, running_batch, last_batch):
         sequence=sequence,
         incarnation=os.getpid(),
         prefixes=prefixes,
+        prefix_nodes=catalog.export(),
         requests=rows,
         cpu_adapters=[names[uid] for uid in manager.loras if uid in names],
         gpu_adapters=[

@@ -236,3 +236,35 @@ def test_supervisor_restarts_failed_client_and_preserves_peer(tmp_path, monkeypa
     assert status["state"] == "completed"
     assert status["updates"] == [1, 1]
     assert len(status["recoveries"]) == 1
+
+
+def test_missing_sampler_republishes_exact_lagged_weights_then_restores_optimizer(
+    tmp_path,
+):
+    import tinker
+    import httpx
+
+    instance = client(tmp_path, dict(update=2, checkpoint_path="current-checkpoint"))
+    atomic_json(tmp_path / "commit-001.json", dict(checkpoint_path="lagged-checkpoint"))
+    error = tinker.NotFoundError(
+        "sampler artifact not found",
+        response=httpx.Response(404, request=httpx.Request("POST", "http://test")),
+        body={},
+    )
+    instance.service.create_sampling_client = Mock(side_effect=error)
+    calls = []
+    instance.trainer.load_state = lambda path: (
+        calls.append(("weights", path)) or future(None)
+    )
+    instance.trainer.load_state_with_optimizer = lambda path: (
+        calls.append(("optimizer", path)) or future(None)
+    )
+    instance.publish = lambda version: (
+        calls.append(("publish", version)) or ("restored", version)
+    )
+    assert instance.restore_sampler(1, "expired") == ("restored", 1)
+    assert calls == [
+        ("weights", "lagged-checkpoint"),
+        ("publish", 1),
+        ("optimizer", "current-checkpoint"),
+    ]

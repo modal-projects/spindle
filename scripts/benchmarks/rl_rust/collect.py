@@ -13,7 +13,7 @@ def main():
     args = parser.parse_args()
     pools = {
         p: json.loads((args.root / p / "owned-apps.json").read_text())[-1]
-        for p in ("default", "joint")
+        for p in json.loads((args.root / "schedule.json").read_text())["pairs"][0]
     }
     with (
         modal.enable_output(),

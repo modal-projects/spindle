@@ -16,7 +16,15 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument(
         "--policy",
-        choices=["default-no-split-k", "default", "stable", "model-spill", "joint"],
+        choices=[
+            "default-no-split-k",
+            "default",
+            "stable",
+            "model-spill",
+            "joint",
+            "load_balanced",
+            "lora_radix",
+        ],
         action="append",
     )
     args = parser.parse_args()
@@ -62,7 +70,7 @@ def main():
                 "--stagger-seconds",
                 str(config["client_stagger_seconds"]),
                 "--hours",
-                "8",
+                str(config.get("experiment_hours", 8)),
                 "--initialization-timeout",
                 "1800",
                 "--environment",

@@ -76,7 +76,7 @@ def sample_group(client, index, snapshot, row_index):
         ),
     )
     client.event("group_submitted", group=index, policy_version=version)
-    first = first.result(timeout=3600)
+    first = first.result(timeout=client.cfg.get("sampling_timeout_seconds", 3600))
     if len(first.sequences) != cfg["samples_per_group"]:
         raise ValueError("Incomplete initial Codeforces group")
 
@@ -111,7 +111,7 @@ def sample_group(client, index, snapshot, row_index):
                 stop=client.stops,
                 seed=cfg["seed"] + index * cfg["samples_per_group"] + sibling + 100000,
             ),
-        ).result(timeout=3600)
+        ).result(timeout=client.cfg.get("sampling_timeout_seconds", 3600))
         if len(response.sequences) != 1:
             raise ValueError("Incomplete revision")
         turn2 = sequence_row(response.sequences[0], next_prompt, client.tokenizer)
