@@ -13,7 +13,6 @@ from .image_dependencies import (
     MEGATRON_RUNTIME_CHECK,
     MEGATRON_RUNTIME_PACKAGES,
     STITCH_PACKAGE,
-    ignore_config_source,
 )
 
 MILES_RELEASE = "v0.1.2"
@@ -32,7 +31,7 @@ def _check_release(miles_commit: str) -> None:
     head = subprocess.check_output(
         ["git", "-C", MILES_PATH, "rev-parse", "HEAD"], text=True
     ).strip()
-    assert head == miles_commit, f"Miles is at {head}, not MILES_COMMIT"
+    assert head == miles_commit, f"Miles is at {head}, not {miles_commit}"
 
 
 release_image = (
@@ -43,7 +42,6 @@ release_image = (
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH",
             "PYTHONPATH": f"{MEGATRON_PATH}:$PYTHONPATH",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-            "SPINDLE_MILES_COMMIT": MILES_COMMIT,
         }
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE)
@@ -57,4 +55,3 @@ release_image = (
     .run_function(_check_release, kwargs={"miles_commit": MILES_COMMIT})
     .run_commands(MEGATRON_RUNTIME_CHECK)
 )
-image = release_image.add_local_python_source("spindle", ignore=ignore_config_source)

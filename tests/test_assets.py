@@ -177,3 +177,23 @@ def test_dequantize_checkpoint_converts_each_tensor_kind(tmp_path) -> None:
 def test_unknown_transform_is_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="unknown asset transform"):
         assets.apply_transform("fp4", tmp_path, tmp_path)
+
+
+def test_quantized_tensor_without_scale_is_rejected(tmp_path) -> None:
+    shard = tmp_path / "model.safetensors"
+    _write_shard(
+        shard, {"layers.0.attn.wq_a.weight": ("F8_E4M3", np.zeros((4, 4), np.uint8))}
+    )
+
+    with pytest.raises(ValueError, match="no scale"):
+        assets.convert_shard(shard, tmp_path / "out.safetensors")
+
+
+def test_converted_shard_is_kept_on_retry(tmp_path) -> None:
+    shard = tmp_path / "model.safetensors"
+    _write_shard(shard, {"norm.weight": ("F32", np.ones(4, np.float32))})
+    target = tmp_path / "out.safetensors"
+    target.write_bytes(b"done")
+
+    assert assets.convert_shard(shard, target) == {"norm.weight": target.name}
+    assert target.read_bytes() == b"done"
