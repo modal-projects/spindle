@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import hashlib
 import random
 import socket
@@ -340,6 +341,9 @@ async def _sample_one(
                 selected_replica=upstream,
                 routing=dict(
                     policy=router.policy,
+                    reason=decision.reason,
+                    available_replicas=decision.available_replicas,
+                    best_cached_tokens=decision.best_cached_tokens,
                     cached_tokens=decision.cached_tokens,
                     backlog_seconds=decision.backlog_seconds,
                     prefill_seconds=decision.prefill_seconds,
@@ -349,6 +353,15 @@ async def _sample_one(
         headers["x-spindle-benchmark-route"] = (
             router.policy if router is not None else "flash"
         )
+        headers["x-spindle-benchmark-group"] = str(request_id)
+        if router is not None:
+            headers["x-spindle-benchmark-decision"] = json.dumps(
+                {
+                    **observation.attrs["routing"],
+                    "wait_s": routing_wait,
+                },
+                separators=(",", ":"),
+            )
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:

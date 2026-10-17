@@ -25,6 +25,7 @@ def main():
             "load_balanced",
             "lora_radix",
             "cache_aware",
+            "cache_wait",
         ],
         action="append",
     )

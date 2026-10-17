@@ -340,12 +340,20 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             "load_balanced",
             "lora_radix",
             "cache_aware",
+            "cache_wait",
         }:
             raise ValueError(f"unknown LoRA routing policy: {policy}")
         router = None
         if (
             policy
-            in {"joint", "least_load", "load_balanced", "lora_radix", "cache_aware"}
+            in {
+                "joint",
+                "least_load",
+                "load_balanced",
+                "lora_radix",
+                "cache_aware",
+                "cache_wait",
+            }
             and task.get("model_id") is not None
         ):
             if spec.app_name not in _routers:

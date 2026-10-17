@@ -170,6 +170,32 @@ def create_app(
                         k: v for k, v in meta.items() if isinstance(v, (int, float))
                     },
                 )
+                record["group"] = request.headers.get("x-spindle-benchmark-group")
+                # Diagnostics must never turn a successful generation into an error.
+                try:
+                    decision = json.loads(
+                        request.headers.get("x-spindle-benchmark-decision", "null")
+                    )
+                    if isinstance(decision, dict):
+                        record["routing"] = {
+                            k: v
+                            for k, v in decision.items()
+                            if k
+                            in {
+                                "policy",
+                                "reason",
+                                "available_replicas",
+                                "best_cached_tokens",
+                                "cached_tokens",
+                                "wait_s",
+                                "backlog_seconds",
+                                "prefill_seconds",
+                                "adapter_seconds",
+                            }
+                            and isinstance(v, (str, int, float))
+                        }
+                except (ValueError, TypeError):
+                    pass
                 app.state.completions.append(record)
                 for key in ("prompt_tokens", "output_tokens", "cached_tokens"):
                     app.state.measurements[key] += record[key]

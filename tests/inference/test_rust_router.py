@@ -339,3 +339,125 @@ def test_cache_aware_equal_prefixes_prefer_hot_adapter():
 def test_cache_aware_rejects_invalid_threshold(threshold):
     with pytest.raises(ValueError, match="cache_threshold"):
         Scheduler("cache_aware", 32, *RATES.values(), cache_threshold=threshold)
+
+
+def wait_router(a_active=32, b_active=31, cached=8192):
+    adapter = "m/weight_v000007"
+    a, b = replica("cache", a_active), replica("other", b_active)
+    a["work"]["prefix_nodes"] = catalog(adapter, [42] * cached)
+    scheduler = Scheduler("cache_wait", 32, *RATES.values())
+    scheduler.update_snapshot(json.dumps([a, b]))
+    return scheduler, Request(adapter, "group", [42] * 8192, 1), a, b
+
+
+def test_full_cached_replica_waits_then_admits_when_free():
+    scheduler, q, a, b = wait_router()
+    d = scheduler.select_destination(q, "r")
+    assert (d.status, d.reason, d.available_replicas) == ("wait", "cached_capacity", 1)
+    assert d.retry_after == 2 and d.best_cached_tokens == 8128
+    assert scheduler.pending == 0
+    a["active"] = 31
+    scheduler.update_snapshot(json.dumps([a, b]))
+    d = scheduler.select_destination(q, "r", 0.1)
+    assert (d.replica, d.cached_tokens) == ("cache", 8128)
+
+
+def test_cache_wait_budget_expires_without_reset_on_new_snapshot():
+    scheduler, q, a, b = wait_router()
+    assert scheduler.select_destination(q, "r").status == "wait"
+    scheduler.update_snapshot(json.dumps([a, b]))
+    d = scheduler.select_destination(q, "r", 2.01)
+    assert (d.status, d.replica, d.cached_tokens) == ("route", "other", 0)
+
+
+def test_cache_wait_budget_scales_with_saved_prefill():
+    scheduler, q, a, b = wait_router(cached=1024)
+    q = Request("m/weight_v000007", "group", [42] * 1024, 1)
+    assert scheduler.select_destination(q, "r").retry_after == pytest.approx(0.96)
+    assert scheduler.select_destination(q, "r", 0.97).replica == "other"
+
+
+def test_overloaded_warm_replica_spills_immediately():
+    scheduler, q, _, _ = wait_router(b_active=0)
+    assert scheduler.select_destination(q, "r").replica == "other"
+
+
+def test_all_full_is_capacity_wait_not_affinity_wait():
+    scheduler, q, _, _ = wait_router(b_active=32)
+    d = scheduler.select_destination(q, "r")
+    assert (d.status, d.reason, scheduler.pending) == ("wait", "capacity", 0)
+
+
+def test_pending_group_waits_for_observed_prefix_without_optimistic_hit():
+    scheduler, q, a, b = wait_router(0, 0, 0)
+    first = scheduler.select_destination(q, "first")
+    assert first.cached_tokens == 0
+    second = scheduler.select_destination(q, "second")
+    assert (second.status, second.reason, second.cached_tokens) == (
+        "wait",
+        "pending_prefix",
+        0,
+    )
+    target = a if first.replica == "cache" else b
+    target["work"]["prefix_nodes"] = catalog("m/weight_v000007", [42] * 8192)
+    scheduler.update_snapshot(json.dumps([a, b]))
+    second = scheduler.select_destination(q, "second", 0.5)
+    assert (second.replica, second.cached_tokens) == (first.replica, 8128)
+
+
+def test_pending_prefix_expires_and_does_not_block_other_groups_or_versions():
+    scheduler, q, _, _ = wait_router(0, 0, 0)
+    scheduler.select_destination(q, "first")
+    for adapter in ["m/weight_v000007", "m/weight_v000008"]:
+        other = Request(adapter, "different-group", [42] * 8192, 1)
+        assert scheduler.select_destination(other, adapter).status == "route"
+    assert scheduler.select_destination(q, "second", 2.01).status == "route"
+
+
+@pytest.mark.parametrize("outcome", ["busy", "failed", "cancelled", "ok"])
+def test_completed_leader_cannot_leave_a_pending_prefix_wait(outcome):
+    scheduler, q, _, _ = wait_router(0, 0, 0)
+    scheduler.select_destination(q, "first")
+    scheduler.complete("first", outcome)
+    assert scheduler.select_destination(q, "second").status == "route"
+
+
+def test_pending_prefix_spills_if_leader_becomes_overloaded():
+    scheduler, q, a, b = wait_router(0, 0, 0)
+    first = scheduler.select_destination(q, "first")
+    target = a if first.replica == "cache" else b
+    target["active"] = 20
+    scheduler.update_snapshot(json.dumps([a, b]))
+    second = scheduler.select_destination(q, "second")
+    assert second.status == "route" and second.replica != first.replica
+
+
+def test_short_prompt_has_no_pending_prefix_wait():
+    scheduler, _, _, _ = wait_router(0, 0, 0)
+    q = Request("m/weight_v000007", "group", [42] * 64, 1)
+    scheduler.select_destination(q, "first")
+    assert scheduler.select_destination(q, "second").status == "route"
+
+
+def test_async_wait_honors_subpoll_prefill_budget():
+    async def run():
+        scheduler, q, a, b = wait_router(cached=1024)
+        router = Router(
+            AsyncMock(return_value=[a, b]),
+            policy="cache_wait",
+            capacity=32,
+            rates={**RATES, "prefill_tokens_per_second": 100000.0},
+            close=AsyncMock(),
+        )
+        router.scheduler.update_snapshot(json.dumps([a, b]))
+        q = router.prepare_request("m/weight_v000007", "group", [42] * 1024, 1)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        selected = await router.select_destination(q, "r", deadline=started + 1)
+        elapsed = loop.time() - started
+        assert selected.replica == "other"
+        assert 0.009 <= elapsed < 0.20  # The normal polling jitter is >=250 ms.
+        router.complete("r")
+        await router.aclose()
+
+    asyncio.run(run())

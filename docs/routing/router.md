@@ -16,6 +16,7 @@ The Rust policies share observation freshness, admission and outcome handling:
 | `least_load` | Earlier request-count policy, also retaining sibling destination. |
 | `load_balanced` | Lowest active count, including unobserved local reservations; no sibling override. Admission-only control. |
 | `lora_radix` | Load band, adapter residency tier, longest confirmed prefix, sibling tie, active count, deterministic tie. |
+| `cache_wait` | Confirmed prefix preference within a load band; bounded waits for a full cached replica or a sibling establishing its prefix. |
 | `cache_aware` | Pool-wide imbalance switches to least-load; otherwise prefer a substantial prefix match, with adapter residency breaking ties. |
 
 For `lora_radix`, let `m` be the minimum active count among eligible replicas.
@@ -52,6 +53,38 @@ scoped to an exact adapter version. It keeps the same local admission and pollin
 as the other Rust policies. It does not wait for a full replica solely to retain
 its prefix, and does not predict when an adapter load is cheaper than prefill.
 
+## Bounded cache waiting
+
+`cache_wait` considers fresh full replicas before admission. It prefers the
+longest confirmed prefix above the 50% threshold within the same 4/1.25 load
+band. Adapter residency breaks ties. Unlike `cache_aware`, an unrelated overloaded
+replica does not turn off cache preference throughout the pool.
+
+If the better cached replica is full, wait for at most
+`min(2 seconds, extra_cached_tokens / prefill_tokens_per_second)`. The alternative
+is the best confirmed cache on any available replica. Spill on expiry, excess
+load, stale observations or failure. No request is dispatched above capacity.
+The measured prefill rate is an approximation; this is a bounded experiment,
+not an accurate latency predictor for all batches.
+
+The first sibling also creates a group-local pending-prefix hint. Other siblings
+may wait up to two seconds from its dispatch for the engine to report the full
+aligned prompt prefix. This grace covers observation delay; it can add latency
+when the engine does not retain that prefix. It ends on leader completion,
+failure, overload, or expiry. Pending work never counts as a confirmed hit.
+Independent groups and adapter versions do not share this hint.
+
+Affinity elapsed time is local to the asynchronous selection call and cannot
+reset on polling or target changes. Waiting for a completely full pool does not
+start it. The wrapper wakes at the remaining budget even when it is shorter
+than the normal poll interval. After release, routing uses confirmed cache and
+load; no permanent LoRA home is created.
+
+Benchmark completion records retain group ID, predicted cached tokens, best
+observed cache, eligible replica count and routing wait separately from the
+engine's actual cached tokens. The same routing fields are exported on OTLP
+attempt spans. Missing observations are not cache misses.
+
 ## Prefix index
 
 `rust/router/src/radix.rs` holds one compressed radix tree per exact adapter
@@ -77,7 +110,8 @@ Public reference: [SGLang cache-aware policy](https://github.com/sgl-project/sgl
 
 ## Execution and limits
 
-- `rust/router/src/policy.rs`: policy selection only.
+- `rust/router/src/policy.rs`: immediate policy selection.
+- `rust/router/src/cache_wait.rs`: bounded affinity decisions.
 - `rust/router/src/lib.rs`: request hashing, immutable snapshots, reservations,
   capacity checks and outcome feedback.
 - `src/spindle/inference/router.py`: background refresh and asynchronous admission.

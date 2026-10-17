@@ -56,30 +56,21 @@ def validate_inputs(root):
 
 
 async def observe_resources(root, apps, known, state):
-    # A monitoring RPC timeout is not evidence that a trainer failed.
-    deadline = time.monotonic() + 600
-    while True:
-        if (root / "STOP").exists():
-            raise RuntimeError("Experiment stop requested")
-        if time.time() - state["started"] > 12 * 3600:
-            raise TimeoutError("12-hour experiment deadline")
-        try:
-            result = await asyncio.wait_for(
-                resources.aio("lilo-deploy", apps, known, state["started"]), 30
-            )
-        except Exception as exc:
-            state["resource_poll_error"] = f"{type(exc).__name__}: {exc}"
-            state["resource_poll_attempt_at"] = time.time()
-            atomic_json(root / "status.json", state)
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    "Resource observations unavailable for ten minutes"
-                ) from exc
-            await asyncio.sleep(5)
-        else:
-            state.pop("resource_poll_error", None)
-            state.pop("resource_poll_attempt_at", None)
-            return result
+    # Keep checking clients during a monitoring outage. Never launch measured
+    # work with stale resource counts; running deployments already have fixed caps.
+    try:
+        result = await asyncio.wait_for(
+            resources.aio("lilo-deploy", apps, dict(known), state["started"]), 30
+        )
+    except Exception as exc:
+        state["resource_poll_error"] = f"{type(exc).__name__}: {exc}"
+        state["resource_poll_attempt_at"] = time.time()
+        atomic_json(root / "status.json", state)
+        return None
+    state.pop("resource_poll_error", None)
+    state.pop("resource_poll_attempt_at", None)
+    state["resource_observed_at"] = time.time()
+    return result
 
 
 def main():
@@ -121,7 +112,11 @@ def main():
         while True:
             if (root / "STOP").exists():
                 raise RuntimeError("Experiment stop requested")
-            known = asyncio.run(observe_resources(root, owned + external, known, state))
+            observed = asyncio.run(
+                observe_resources(root, owned + external, known, state)
+            )
+            if observed is not None:
+                known = observed
             active = sum(r["gpu_count"] for r in known.values() if not r["finished_at"])
             if active > 48:
                 raise RuntimeError(f"Combined experiment GPU limit exceeded: {active}")
@@ -130,7 +125,11 @@ def main():
             for policy, future in ready.items():
                 if future.done():
                     future.result()
-            if runner is None and all(f.done() for f in ready.values()):
+            if (
+                runner is None
+                and observed is not None
+                and all(f.done() for f in ready.values())
+            ):
                 for p in policies(root):
                     deployment = json.loads((root / p / "deployment.json").read_text())
                     # Early manifests included this derived property.

@@ -1,4 +1,5 @@
 //! One scheduler per frontend process and inference pool. No network I/O here.
+mod cache_wait;
 mod policy;
 mod radix;
 
@@ -41,7 +42,14 @@ pub struct Request {
     prefixes: Vec<(String, usize)>,
     hashes: Vec<u128>,
     preferred: Mutex<Option<String>>,
+    pending_prefix: Mutex<Option<PendingPrefix>>,
 }
+struct PendingPrefix {
+    replica: String,
+    leader: String,
+    started: Instant,
+}
+
 #[pymethods]
 impl Request {
     #[new]
@@ -78,6 +86,7 @@ impl Request {
                 .collect(),
             prefixes,
             preferred: Mutex::new(None),
+            pending_prefix: Mutex::new(None),
         })
     }
 }
@@ -91,6 +100,10 @@ pub struct Decision {
     pub backlog_seconds: f64,
     pub prefill_seconds: f64,
     pub adapter_seconds: f64,
+    pub reason: &'static str,
+    pub retry_after: f64,
+    pub available_replicas: usize,
+    pub best_cached_tokens: usize,
 }
 impl Decision {
     fn wait(status: &'static str) -> Self {
@@ -102,10 +115,15 @@ impl Decision {
             backlog_seconds: 0.0,
             prefill_seconds: 0.0,
             adapter_seconds: 0.0,
+            reason: "capacity",
+            retry_after: 0.5,
+            available_replicas: 0,
+            best_cached_tokens: 0,
         }
     }
 }
 
+#[derive(Clone)]
 pub struct Candidate {
     replica_index: usize,
     adapter_tier: u8,
@@ -172,6 +190,7 @@ pub struct Router {
     replicas: Arc<Vec<Replica>>,
     radix: Arc<radix::Index>,
     use_radix: bool,
+    wait_policy: Option<cache_wait::CacheWait>,
     reservations: HashMap<String, Reservation>,
     busy_until: HashMap<String, f64>,
     failed_until: HashMap<String, f64>,
@@ -198,7 +217,7 @@ impl Router {
         balance_relative: f64,
         cache_threshold: f64,
     ) -> PyResult<Self> {
-        let use_radix = matches!(policy, "lora_radix" | "cache_aware");
+        let use_radix = matches!(policy, "lora_radix" | "cache_aware" | "cache_wait");
         if !balance_relative.is_finite() || balance_relative < 1.0 {
             return Err(PyValueError::new_err(
                 "balance_relative must be finite and >= 1",
@@ -209,6 +228,11 @@ impl Router {
                 "cache_threshold must be between 0 and 1",
             ));
         }
+        let wait_policy = (policy == "cache_wait").then_some(cache_wait::CacheWait {
+            absolute: balance_absolute,
+            relative: balance_relative,
+            threshold: cache_threshold,
+        });
         let policy: Box<dyn Policy> = match policy {
             "joint" => Box::new(Joint),
             "least_load" => Box::new(LeastLoad { sticky: true }),
@@ -217,7 +241,7 @@ impl Router {
                 absolute: balance_absolute,
                 relative: balance_relative,
             }),
-            "cache_aware" => Box::new(CacheAware {
+            "cache_aware" | "cache_wait" => Box::new(CacheAware {
                 absolute: balance_absolute,
                 relative: balance_relative,
                 cache_threshold,
@@ -239,6 +263,7 @@ impl Router {
             replicas: Arc::new(vec![]),
             radix: Arc::new(radix::Index::default()),
             use_radix,
+            wait_policy,
             reservations: HashMap::new(),
             busy_until: HashMap::new(),
             failed_until: HashMap::new(),
@@ -267,7 +292,16 @@ impl Router {
     }
 
     /// Select and reserve in one short call. A busy pool stays busy, not unhealthy.
-    fn select_destination(&mut self, request: &Request, request_id: String) -> PyResult<Decision> {
+    #[pyo3(signature = (request, request_id, affinity_elapsed=0.0))]
+    fn select_destination(
+        &mut self,
+        request: &Request,
+        request_id: String,
+        affinity_elapsed: f64,
+    ) -> PyResult<Decision> {
+        if !affinity_elapsed.is_finite() || affinity_elapsed < 0.0 {
+            return Err(PyValueError::new_err("invalid affinity elapsed time"));
+        }
         if self.reservations.contains_key(&request_id) {
             return Err(PyValueError::new_err("request already has a reservation"));
         }
@@ -304,9 +338,6 @@ impl Router {
                 .collect();
             let active = replica.active + unobserved.len();
             max_active = max_active.max(active);
-            if active >= self.capacity {
-                continue;
-            }
             let hit = if self.use_radix {
                 hits[i]
             } else {
@@ -365,16 +396,67 @@ impl Router {
                 adapter_seconds,
             });
         }
-        let Some(selected) = self
-            .policy
-            .select(&candidates, max_active, request.prompt_tokens)
-        else {
+        let all = candidates;
+        let candidates: Vec<_> = all
+            .iter()
+            .filter(|c| c.active < self.capacity)
+            .cloned()
+            .collect();
+        let available = candidates.len();
+        let best_cached = all.iter().map(|c| c.cached_tokens).max().unwrap_or(0);
+        let mut reason = "policy";
+        let selected = if let Some(policy) = &self.wait_policy {
+            let pending = request.pending_prefix.lock().unwrap();
+            let pending = pending
+                .as_ref()
+                .filter(|p| self.reservations.contains_key(&p.leader));
+            match policy.select(
+                &all,
+                &candidates,
+                &self.replicas,
+                request,
+                pending,
+                self.prefill_rate,
+                affinity_elapsed,
+            ) {
+                cache_wait::Selection::Wait(why, seconds) => {
+                    let mut d = Decision::wait("wait");
+                    d.reason = why;
+                    d.retry_after = seconds;
+                    d.available_replicas = available;
+                    d.best_cached_tokens = best_cached;
+                    return Ok(d);
+                }
+                cache_wait::Selection::Route(index, why) => {
+                    reason = why;
+                    index
+                }
+            }
+        } else {
+            self.policy
+                .select(&candidates, max_active, request.prompt_tokens)
+        };
+        let Some(selected) = selected else {
             return Ok(Decision::wait(if fresh { "wait" } else { "unavailable" }));
         };
         let c = &candidates[selected];
         let i = c.replica_index;
         let replica = &self.replicas[i];
         *request.preferred.lock().unwrap() = Some(replica.replica.clone());
+        if self.wait_policy.is_some() {
+            let mut pending = request.pending_prefix.lock().unwrap();
+            // One leader per live group; retries may replace a failed leader.
+            if pending
+                .as_ref()
+                .is_none_or(|p| !self.reservations.contains_key(&p.leader))
+            {
+                *pending = Some(PendingPrefix {
+                    replica: replica.replica.clone(),
+                    leader: request_id.clone(),
+                    started: Instant::now(),
+                });
+            }
+        }
         self.reservations.insert(
             request_id,
             Reservation {
@@ -391,6 +473,10 @@ impl Router {
             backlog_seconds: c.backlog_seconds,
             prefill_seconds: c.prefill_seconds,
             adapter_seconds: c.adapter_seconds,
+            reason,
+            retry_after: 0.0,
+            available_replicas: available,
+            best_cached_tokens: best_cached,
         })
     }
 
@@ -464,7 +550,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into())
+            r.select_destination(&q, "1".into(), 0.0)
                 .unwrap()
                 .replica
                 .as_deref(),
@@ -485,7 +571,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            r.select_destination(&q, "2".into())
+            r.select_destination(&q, "2".into(), 0.0)
                 .unwrap()
                 .replica
                 .as_deref(),
@@ -499,17 +585,23 @@ mod tests {
         r.update_snapshot(&json!([replica("a", 0, vec![], vec![])]).to_string())
             .unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into()).unwrap().status,
+            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
             "route"
         );
-        assert_eq!(r.select_destination(&q, "2".into()).unwrap().status, "wait");
+        assert_eq!(
+            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            "wait"
+        );
         r.complete("1", "busy").unwrap();
         assert_eq!(r.pending(), 0);
         assert!(r.failed_until.is_empty());
-        assert_eq!(r.select_destination(&q, "2".into()).unwrap().status, "wait");
+        assert_eq!(
+            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            "wait"
+        );
         r.busy_until.clear();
         assert_eq!(
-            r.select_destination(&q, "2".into()).unwrap().status,
+            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
             "route"
         );
         r.complete("2", "cancelled").unwrap();
@@ -521,12 +613,12 @@ mod tests {
         let q = request("m/v1");
         let mut a = replica("a", 0, vec![], vec![]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
-        r.select_destination(&q, "1".into()).unwrap();
+        r.select_destination(&q, "1".into(), 0.0).unwrap();
         a["active"] = json!(1);
         a["work"]["request_ids"] = json!(["1"]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "2".into()).unwrap().status,
+            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
             "route"
         );
     }
@@ -542,9 +634,9 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let one = r.select_destination(&q, "1".into()).unwrap();
-        let two = r.select_destination(&q, "2".into()).unwrap();
-        let three = r.select_destination(&q, "3".into()).unwrap();
+        let one = r.select_destination(&q, "1".into(), 0.0).unwrap();
+        let two = r.select_destination(&q, "2".into(), 0.0).unwrap();
+        let three = r.select_destination(&q, "3".into(), 0.0).unwrap();
         assert_eq!(one.replica, two.replica);
         assert_ne!(one.replica, three.replica);
     }
@@ -553,14 +645,14 @@ mod tests {
         let mut r = router("joint", 1);
         let q = request("m/v1");
         assert_eq!(
-            r.select_destination(&q, "1".into()).unwrap().status,
+            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
             "unavailable"
         );
         let mut a = replica("a", 0, vec![], vec![]);
         a["work"]["age_seconds"] = json!(4.);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into()).unwrap().status,
+            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
             "unavailable"
         );
     }

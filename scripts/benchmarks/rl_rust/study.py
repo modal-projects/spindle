@@ -14,10 +14,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--external-root", type=Path, required=True)
+    parser.add_argument(
+        "--workloads",
+        nargs="+",
+        choices=["dapo", "codeforces"],
+        default=["dapo", "codeforces"],
+    )
     args = parser.parse_args()
     status = dict(started=time.time(), complete=False)
     try:
-        for workload in ("dapo", "codeforces"):
+        for workload in args.workloads:
             root = args.root / workload
             status.update(workload=workload, phase="deploying")
             atomic_json(args.root / "study-status.json", status)

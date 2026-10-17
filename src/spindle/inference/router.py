@@ -57,7 +57,7 @@ class Router:
                     snapshot = await asyncio.to_thread(
                         Snapshot,
                         json.dumps(rows),
-                        self.policy in {"lora_radix", "cache_aware"},
+                        self.policy in {"lora_radix", "cache_aware", "cache_wait"},
                     )
                     self.scheduler.install_snapshot(snapshot)
                 except Exception:
@@ -75,12 +75,21 @@ class Router:
     ) -> Decision:
         """Wait locally for admission; never turn pool saturation into Flash fallback."""
         loop = asyncio.get_running_loop()
+        affinity_started = None
         while True:
             self.last_used = time.monotonic()
             if self.poller is None or self.poller.done():
                 self.poller = asyncio.create_task(self._poll())
             self.changed.clear()
-            decision = self.scheduler.select_destination(request, request_id)
+            elapsed = (
+                0.0 if affinity_started is None else loop.time() - affinity_started
+            )
+            decision = self.scheduler.select_destination(request, request_id, elapsed)
+            if (
+                decision.reason in {"pending_prefix", "cached_capacity"}
+                and affinity_started is None
+            ):
+                affinity_started = loop.time()
             if decision.status == "route":
                 return decision
             remaining = deadline - loop.time()
@@ -89,7 +98,8 @@ class Router:
             # Jitter also limits correlated retries across independent workers.
             with suppress(TimeoutError):
                 await asyncio.wait_for(
-                    self.changed.wait(), min(remaining, random.uniform(0.25, 0.75))
+                    self.changed.wait(),
+                    min(remaining, decision.retry_after, random.uniform(0.25, 0.75)),
                 )
 
     def complete(self, request_id, *, status=None, failed=False):
