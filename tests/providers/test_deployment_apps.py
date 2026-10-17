@@ -445,6 +445,13 @@ def test_recipes_select_trainer_images(builders, monkeypatch):
     assert trainer["image"] is trainer_image
 
 
+def test_deepseek_v41_lora_trainer_image_is_registered():
+    assert (
+        deployment_apps.image_for("miles", "miles-dsv41-lora")
+        is deployment_apps.miles_dsv41_lora_image
+    )
+
+
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     row = deployment("qwen38-27b-lora-256k")
     clusters = []
