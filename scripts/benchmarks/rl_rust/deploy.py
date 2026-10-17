@@ -29,7 +29,7 @@ def main():
     directory = args.root / args.policy
     directory.mkdir(parents=True, exist_ok=True)
     # The root name is frozen in the manifest; never reuse another experiment's apps.
-    name = f"routing27-rust-{args.policy}-{args.root.parent.name}-{args.root.name}"
+    name = f"r27-{args.policy}-{args.root.parent.name}-{args.root.name}"
     recipe = Config(
         name=name,
         inference_lora_routing="affinity" if args.policy == "default" else args.policy,
