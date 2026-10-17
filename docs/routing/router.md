@@ -50,14 +50,12 @@ cache and unsupported cache types receive no credit. Snapshot replacement remove
 old observations. New requests never manufacture confirmed cache entries.
 The last prompt token is excluded because it must be evaluated for logits.
 
-Unlike FPRS+'s request-history index and weighted cost, this policy uses engine
-observations and explicit residency/load gates. It follows the SGLang cache-aware
-policy's separation of load balancing and prefix preference, adding exact LoRA
-version identity and residency tiers. It does not implement either system wholesale.
-Inspected sources: Modal FPRS+ `89381450167ff47250d9ac57ec99f1bdab8ccbfc`,
-`crates/flash-proxy/src/bin/fprs-plus/router/cache_aware.rs`; SGLang
-`a270ed4ed5bf9379ebae8859da3fe3e374e637f4`,
-`sgl-model-gateway/src/policies/cache_aware.rs`.
+The public SGLang cache-aware policy motivates separating load balancing from
+prefix preference. This policy applies the absolute/relative load test to each
+candidate rather than switching the whole pool to least-load routing. It adds
+exact LoRA version identity, adapter residency tiers, and observed reusable
+engine state. It does not implement SGLang's router wholesale.
+Public reference: [SGLang cache-aware policy](https://github.com/sgl-project/sglang/blob/a270ed4ed5bf9379ebae8859da3fe3e374e637f4/sgl-model-gateway/src/policies/cache_aware.rs).
 
 ## Execution and limits
 
