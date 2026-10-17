@@ -1,8 +1,4 @@
-"""Miles release image that recipe-specific trainer images build on.
-
-It tracks a newer Miles release than the default multi-LoRA image: v0.1.2 is
-the first release with DeepSeek-V4.1 training support.
-"""
+"""Miles v0.1.2 release image, the first release that trains DeepSeek-V4.1."""
 
 import subprocess
 

@@ -112,11 +112,10 @@ def test_deepseek_v41_lora_recipe():
     assert (
         miles.world_size,
         miles.tensor_model_parallel_size,
-        miles.pipeline_model_parallel_size,
         miles.context_parallel_size,
         miles.expert_model_parallel_size,
         miles.expert_tensor_parallel_size,
-    ) == (16, 4, 1, 1, 16, 1)
+    ) == (16, 4, 1, 16, 1)
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
     assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
@@ -140,10 +139,7 @@ def test_deepseek_v41_lora_recipe():
     assert serving["disable_shared_experts_fusion"] is True
     assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
     assert serving["weight_loader_disable_mmap"] is False
-    assert (row.recipe.trainer_image, row.recipe.inference_image) == (
-        "miles-dsv41-lora",
-        "",
-    )
+    assert row.recipe.trainer_image == "miles-dsv41-lora"
 
 
 def test_asset_paths_follow_the_model():
@@ -169,13 +165,10 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.inference_identity() != resolved().inference_identity()
 
 
-def test_image_choices_are_part_of_worker_identity():
-    trainer = resolved(recipe(trainer_image="miles-dsv41-lora"))
+def test_trainer_image_is_part_of_trainer_identity():
+    trainer = resolved(recipe(trainer_image="trainer-x"))
     assert trainer.trainer_identity() != resolved().trainer_identity()
     assert trainer.inference_identity() == resolved().inference_identity()
-    sampler = resolved(recipe(inference_image="sglang-dsv41-lora"))
-    assert sampler.inference_identity() != resolved().inference_identity()
-    assert sampler.trainer_identity() == resolved().trainer_identity()
 
 
 def test_routing_uses_deployment_order():

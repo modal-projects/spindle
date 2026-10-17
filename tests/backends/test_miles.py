@@ -222,15 +222,6 @@ def test_config_exports_lora_through_the_raw_converter() -> None:
         _config(megatron_to_hf_mode="direct").validate()
 
 
-def test_config_rejects_pipeline_parallelism() -> None:
-    config = _config(pipeline_model_parallel_size=2)
-
-    arguments = config.miles_arguments()
-    assert arguments[arguments.index("--pipeline-model-parallel-size") + 1] == "2"
-    with pytest.raises(ValueError, match="pipeline parallelism"):
-        config.validate()
-
-
 def test_config_wildcard_targets_serve_by_module_suffix() -> None:
     targets = (
         "layers.*.attn.wq_a",

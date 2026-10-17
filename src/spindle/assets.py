@@ -1,10 +1,6 @@
 """Transforms applied to downloaded model weights before they become assets.
 
-``dequantize_bf16`` turns a DeepSeek-style quantized release (FP8 dense
-weights with 32x32 e8m0 block scales, FP4 routed experts with 1x32 scales)
-into a BF16 checkpoint the trainer loads directly. Engram tables stay FP8
-with their scales; multi-token-prediction and vision tensors are dropped.
-Only NumPy is needed, so the conversion runs in the frontend image.
+``dequantize_bf16`` converts a DeepSeek-style FP8/FP4 release to BF16; Engram tables stay FP8.
 """
 
 from __future__ import annotations

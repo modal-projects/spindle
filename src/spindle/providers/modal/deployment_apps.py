@@ -47,19 +47,18 @@ from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
 
-# Images a recipe selects by name through trainer_image or inference_image.
 TRAINER_IMAGES = {"miles-dsv41-lora": miles_dsv41_lora_image}
-INFERENCE_IMAGES = {}
 
 
 def image_for(backend, name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
     if name:
-        images = INFERENCE_IMAGES if backend == "sglang" else TRAINER_IMAGES
-        if name not in images:
-            raise ValueError(f"unknown image {name!r}; choose from {sorted(images)}")
-        return images[name]
+        if name not in TRAINER_IMAGES:
+            raise ValueError(
+                f"unknown trainer image {name!r}; choose from {sorted(TRAINER_IMAGES)}"
+            )
+        return TRAINER_IMAGES[name]
     return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
         backend
     ]
@@ -245,9 +244,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     @app.server(
         name="Server",
         serialized=True,
-        image=(
-            image if image is not None else image_for("sglang", recipe.inference_image)
-        ),
+        image=image if image is not None else image_for("sglang"),
         gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
