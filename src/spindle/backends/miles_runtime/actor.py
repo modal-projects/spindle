@@ -19,7 +19,7 @@ from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 try:
     from miles.backends.training_utils.checkpoint import io as checkpoint_io
 except ImportError:
-    # Miles v0.1.1 layout; its Tinker losses expect CP-sharded log probs.
+    # Miles v0.1.1 layout; its Tinker losses need Spindle to gather CP log probs.
     from miles.backends.fsdp_utils import actor as fsdp_actor
     from miles.backends.training_utils import (
         checkpoint_io,

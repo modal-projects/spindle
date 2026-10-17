@@ -153,6 +153,12 @@ def test_asset_paths_follow_the_model():
     assert a.asset_path != b.asset_path
 
 
+@pytest.mark.parametrize("field", ["trainer_disk_mib", "inference_disk_mib"])
+def test_disk_requests_below_modal_minimum_are_rejected(field):
+    with pytest.raises(ValueError, match=field):
+        resolved(**{field: 100_000})
+
+
 def test_model_weights_override_assets_but_not_the_served_model():
     row = resolved(recipe(model_weights="org/model-bf16"))
     assert row.model == row.recipe.model

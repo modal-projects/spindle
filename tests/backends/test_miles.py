@@ -345,6 +345,10 @@ def test_default_unembed_request_is_frozen_without_an_unembed_target(tmp_path) -
     assert backend.jobs["model-a"].train_unembed is False
     backend.accept_model("model-a", stock)
 
+    targeted = _backend(tmp_path)
+    targeted.accept_model("model-a", stock)
+    assert targeted.jobs["model-a"].train_unembed is True
+
     no_mlp = ModelSpec(
         base_model="Qwen/Qwen3-4B",
         parameterization="lora",
