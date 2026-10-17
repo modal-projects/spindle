@@ -33,7 +33,7 @@ async def replicas(app_name):
 
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("lilo-proxy")],
+    secrets=[modal.Secret.from_name("lilo-proxy", environment_name="lilo-deploy")],
     timeout=64800,
     nonpreemptible=True,
 )

@@ -17,7 +17,7 @@ def main():
     }
     with (
         modal.enable_output(),
-        app.run(),
+        app.run(environment_name="lilo-deploy"),
         (args.root / "observations.jsonl").open("a") as output,
     ):
         for row in collect.remote_gen(pools, 64800):
