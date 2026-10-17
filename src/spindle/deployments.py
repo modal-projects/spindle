@@ -157,7 +157,6 @@ class DeploymentConfig(BaseModel):
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
-            recipe.inference_image,
             self.inference_settings,
         )
 

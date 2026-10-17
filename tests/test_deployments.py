@@ -126,13 +126,10 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.inference_identity() != resolved().inference_identity()
 
 
-def test_image_choices_are_part_of_worker_identity():
-    trainer = resolved(recipe(trainer_image="miles-dsv41-lora"))
+def test_trainer_image_is_part_of_trainer_identity():
+    trainer = resolved(recipe(trainer_image="trainer-x"))
     assert trainer.trainer_identity() != resolved().trainer_identity()
     assert trainer.inference_identity() == resolved().inference_identity()
-    sampler = resolved(recipe(inference_image="sglang-dsv41-lora"))
-    assert sampler.inference_identity() != resolved().inference_identity()
-    assert sampler.trainer_identity() == resolved().trainer_identity()
 
 
 def test_routing_uses_deployment_order():
