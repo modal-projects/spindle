@@ -126,7 +126,7 @@ image = (
     .run_function(_check_release, kwargs={"miles_commit": MILES_RELEASE_COMMIT})
     .run_commands(
         f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY}"
-        f" refs/heads/{MILES_BRANCH}"
+        " 9d047db23a5760414de12185b3a133363ca2fde8"
         f" && git -C {MILES_PATH} checkout -B {MILES_BRANCH} FETCH_HEAD",
         "python - <<'PY'\n"
         "from importlib.metadata import distribution\n"

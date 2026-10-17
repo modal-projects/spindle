@@ -43,6 +43,7 @@ from .megatron_image import image as megatron_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
+from .rollout_image import split_k_image
 from .serve import run_engine_with_backend
 
 
@@ -226,6 +227,12 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         maximum = maximum if pool.max_containers is None else pool.max_containers
         window = window if pool.scaledown_window is None else pool.scaledown_window
 
+    if (
+        image is None
+        and recipe.inference_env.get("SGLANG_ENABLE_LORA_CSGMV_SPLIT_K") == "1"
+    ):
+        image = split_k_image
+
     @app.server(
         name="Server",
         serialized=True,
@@ -235,7 +242,19 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         memory=recipe.inference_memory_mib,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
-        env=deployment_env(recipe.inference_env),
+        env=deployment_env(
+            recipe.inference_env
+            | (
+                {
+                    "SGLANG_SPINDLE_MODEL_ROUTING": "1",
+                    "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
+                }
+                if lora
+                and recipe.inference_lora_routing
+                in {"joint", "least_load", "load_balanced", "lora_radix", "cache_aware"}
+                else {}
+            )
+        ),
         min_containers=minimum,
         max_containers=maximum,
         target_concurrency=recipe.inference_target_concurrency,

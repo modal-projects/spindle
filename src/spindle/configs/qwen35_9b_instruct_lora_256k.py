@@ -40,4 +40,5 @@ class Config(Parent):
         "sglang_cfg.chunked_prefill_size": 8192,
     }
 
+
 config = Config()

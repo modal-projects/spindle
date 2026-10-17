@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
+import os
+import time
 import uuid
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -37,6 +41,12 @@ def create_app(
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
+        app.state.routing_requests = {}
+        app.state.request_work = {}
+        app.state.measurements = Counter()
+        app.state.completions = deque(maxlen=4096)
+        app.state.routing_catalog = {}
+        app.state.routing_read_at = 0.0
         try:
             yield
         finally:
@@ -47,6 +57,68 @@ def create_app(
             await app.state.client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.get("/routing-state")
+    async def routing_state():
+        now = time.monotonic()
+        if now - app.state.routing_read_at > 0.5:
+            app.state.routing_read_at = now
+            try:
+                app.state.routing_catalog = json.loads(
+                    await asyncio.to_thread(
+                        Path("/tmp/spindle-routing-work.json").read_text
+                    )
+                )
+            except (OSError, ValueError):
+                app.state.routing_catalog = {}
+        snapshot = app.state.routing_catalog
+        work = None
+        if snapshot:
+            rows = {
+                r["rid"]: r
+                for r in snapshot["requests"]
+                if r["rid"] in app.state.routing_requests
+            }
+            rows.update(
+                (rid, row)
+                for rid, row in app.state.request_work.items()
+                if rid not in rows
+            )
+            work = dict(
+                age_seconds=time.time() - snapshot["timestamp"],
+                prefixes=snapshot["prefixes"],
+                prefix_nodes=snapshot.get("prefix_nodes", []),
+                cpu_adapters=snapshot["cpu_adapters"],
+                gpu_adapters=snapshot["gpu_adapters"],
+                request_ids=list(rows),
+                pending_adapters=sorted(set(app.state.routing_requests.values())),
+                prefill_tokens=sum(r["prefill_tokens"] for r in rows.values()),
+                decode_tokens=sum(r["decode_tokens"] for r in rows.values()),
+                snapshot_seconds=snapshot["snapshot_seconds"],
+                cache_kind=snapshot["cache_kind"],
+                running_requests=snapshot["running_requests"],
+                waiting_requests=snapshot["waiting_requests"],
+            )
+        return {
+            "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "active": len(app.state.routing_requests),
+            "adapters": dict(Counter(app.state.routing_requests.values())),
+            "request_ids": list(app.state.routing_requests),
+            "pending_adapters": sorted(set(app.state.routing_requests.values())),
+            "cpu_adapters": snapshot.get("cpu_adapters", []),
+            "age_seconds": time.time() - snapshot["timestamp"] if snapshot else None,
+            "work": work,
+        }
+
+    @app.get("/benchmark-state")
+    async def benchmark_state(after: float = 0):
+        state = await routing_state()
+        return {
+            **state,
+            "gpu_lora": app.state.routing_catalog.get("counters", {}),
+            "measurements": dict(app.state.measurements),
+            "completions": [r for r in app.state.completions if r["finished"] > after],
+        }
 
     @app.get("/health")
     async def health() -> Response:
@@ -60,6 +132,58 @@ def create_app(
     @app.post("/generate")
     async def generate(request: Request) -> Response:
         payload = await request.json()
+        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        constraint = VersionConstraint.from_payload(payload)
+        run_id = payload.get("weight_run_id")
+        if isinstance(rid, str):
+            app.state.routing_requests[rid] = (
+                VersionRef(str(run_id), constraint.exact_version).identity
+                if run_id is not None and constraint.exact_version is not None
+                else payload.get("lora_path", "base")
+            )
+        start = time.time()
+        app.state.request_work[rid] = dict(
+            rid=rid,
+            adapter=app.state.routing_requests.get(rid, "base"),
+            prefill_tokens=len(payload.get("input_ids", ())),
+            decode_tokens=payload.get("sampling_params", {}).get("max_new_tokens", 1),
+        )
+        app.state.measurements["arrivals"] += 1
+        app.state.measurements[
+            "route_" + request.headers.get("x-spindle-benchmark-route", "unknown")
+        ] += 1
+        try:
+            response = await generate_response(request, payload)
+            app.state.measurements["http_" + str(response.status_code)] += 1
+            if response.status_code == 200:
+                body = json.loads(response.body)
+                meta = body.get("meta_info", {})
+                record = dict(
+                    rid=rid,
+                    adapter=app.state.routing_requests.get(rid),
+                    started=start,
+                    finished=time.time(),
+                    prompt_tokens=len(payload.get("input_ids", ())),
+                    output_tokens=meta.get("completion_tokens", 0),
+                    cached_tokens=meta.get("cached_tokens", 0),
+                    backend={
+                        k: v for k, v in meta.items() if isinstance(v, (int, float))
+                    },
+                )
+                app.state.completions.append(record)
+                for key in ("prompt_tokens", "output_tokens", "cached_tokens"):
+                    app.state.measurements[key] += record[key]
+                app.state.measurements["completed"] += 1
+            response.headers["x-spindle-replica"] = os.environ.get(
+                "MODAL_TASK_ID", "local"
+            )
+            return response
+        finally:
+            if isinstance(rid, str):
+                app.state.routing_requests.pop(rid, None)
+                app.state.request_work.pop(rid, None)
+
+    async def generate_response(request: Request, payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -83,6 +207,10 @@ def create_app(
                     status_code=409,
                 )
 
+        if isinstance(payload["rid"], str):
+            app.state.routing_requests[payload["rid"]] = payload.get(
+                "lora_path", "base"
+            )
         response = await _post_generate(app.state.client, request, payload)
         if response is None:
             return Response(status_code=499)
@@ -151,6 +279,7 @@ async def _prepare_adapter(
                     if resolved.identity in app.state.registered_adapters:
                         return resolved, None
                     path = await asyncio.to_thread(bulletin.resolve, resolved)
+                registration_start = time.monotonic()
                 response = await app.state.client.post(
                     "/load_lora_adapter",
                     json={
@@ -161,6 +290,10 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
+                app.state.measurements["adapter_registrations"] += 1
+                app.state.measurements["adapter_registration_seconds"] += (
+                    time.monotonic() - registration_start
+                )
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 
