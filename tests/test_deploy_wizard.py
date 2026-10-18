@@ -100,3 +100,15 @@ def test_setup_check_passes_when_every_secret_exists(monkeypatch):
     console = Console(record=True, width=160)
     deploy_wizard.check_setup(console, None)
     assert "✗" not in console.export_text()
+
+
+def test_progress_reports_the_total_deploy_time():
+    console = Console(record=True, width=120)
+    steps = [("Trainer    a", lambda: None), ("API server", lambda: None)]
+    deploy_wizard.deploy_with_progress(console, steps, retry_command="spindle deploy a")
+    assert "Deployed in 0s" in console.export_text()
+
+
+def test_format_duration():
+    assert deploy_wizard.format_duration(8.4) == "8s"
+    assert deploy_wizard.format_duration(125) == "2m 05s"

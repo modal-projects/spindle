@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -248,8 +249,8 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
     width = max(len(model) for model in models)
     choices = []
     for index, model in enumerate(models):
-        if index == 0 or provider(model) != provider(models[index - 1]):
-            choices.append(questionary.Separator(f"── {provider(model)} ──"))
+        if index and provider(model) != provider(models[index - 1]):
+            choices.append(questionary.Separator(" "))
         choices.append(
             questionary.Choice(
                 model_title(presets, model, width),
@@ -368,6 +369,7 @@ def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
         TimeElapsedColumn(),
         console=console,
     )
+    started = time.monotonic()
     with progress:
         tasks = [progress.add_task(label, total=1, start=False) for label, _ in steps]
         for task, (label, step) in zip(tasks, steps):
@@ -384,6 +386,14 @@ def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
                 )
                 raise
             progress.update(task, completed=1)
+    console.print(
+        f"[green]✓[/green] Deployed in {format_duration(time.monotonic() - started)}"
+    )
+
+
+def format_duration(seconds: float) -> str:
+    minutes, seconds = divmod(round(seconds), 60)
+    return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
 
 
 def show_next_steps(
