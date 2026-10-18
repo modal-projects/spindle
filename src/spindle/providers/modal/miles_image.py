@@ -25,6 +25,7 @@ BASE_IMAGE = (
 MILES_RELEASE_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
 MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
 MILES_BRANCH = "spindle-miles"
+MILES_COMMIT = "fdd808c008175d4895fd8c57c95ef4fa5bb6a2a0"
 MILES_PATH = "/root/miles"
 MEGATRON_PATH = "/root/Megatron-LM"
 
@@ -125,8 +126,7 @@ image = (
     )
     .run_function(_check_release, kwargs={"miles_commit": MILES_RELEASE_COMMIT})
     .run_commands(
-        f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY}"
-        f" refs/heads/{MILES_BRANCH}"
+        f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY} {MILES_COMMIT}"
         f" && git -C {MILES_PATH} checkout -B {MILES_BRANCH} FETCH_HEAD",
         "python - <<'PY'\n"
         "from importlib.metadata import distribution\n"

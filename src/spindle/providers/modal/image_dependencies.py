@@ -21,7 +21,8 @@ STITCH_PACKAGE = (
     "@d9f681fd894b02257da129ec3483a977659cd7ab"
 )
 
-TINKER_PACKAGE = "tinker>=0.24.1,<0.26"
+# Exact Tinker SDK release installed in the server images.
+TINKER_PACKAGE = "tinker==0.33.1"
 TINKER_CLIENT_PACKAGES = ("huggingface-hub", TINKER_PACKAGE)
 MEGATRON_RUNTIME_PACKAGES = (
     *TINKER_CLIENT_PACKAGES,

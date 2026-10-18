@@ -78,8 +78,9 @@ training = create_full_training_client(
 ```
 
 After creation, the client exposes the normal Tinker training methods. Spindle
-supports `tinker>=0.24.1,<0.26`. Deploy the updated server before upgrading
-clients to SDK 0.25, which requires protobuf training and sampling responses.
+supports `tinker>=0.24.1`. Deploy the current server before upgrading clients:
+SDK 0.25 requires protobuf training and sampling responses, and SDK 0.26 requires
+per-sequence ids on sampling submissions.
 
 ### Training checkpoints and sampler publications are different
 
