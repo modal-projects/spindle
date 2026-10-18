@@ -86,11 +86,15 @@ def test_single_client_recipe_keeps_shared_backend_capacity():
     assert backend_config(single) == backend_config(shared)
 
 
-@pytest.mark.parametrize("value", [None, "", "[]", "{}"])
-def test_missing_configs_have_no_python_catalog_fallback(monkeypatch, value):
-    if value is None:
-        monkeypatch.delenv("SPINDLE_DEPLOYMENT_CONFIGS", raising=False)
+@pytest.mark.parametrize("contents", [None, "[]", "{}"])
+def test_missing_configs_have_no_python_catalog_fallback(
+    monkeypatch, tmp_path, contents
+):
+    if contents is None:
+        monkeypatch.delenv("SPINDLE_DEPLOYMENT_CONFIGS_FILE", raising=False)
     else:
-        monkeypatch.setenv("SPINDLE_DEPLOYMENT_CONFIGS", value)
+        path = tmp_path / "configs.json"
+        path.write_text(contents)
+        monkeypatch.setenv("SPINDLE_DEPLOYMENT_CONFIGS_FILE", str(path))
     with pytest.raises(ValueError, match="configs"):
         configs_from_env()

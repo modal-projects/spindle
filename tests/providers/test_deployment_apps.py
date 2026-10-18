@@ -23,9 +23,17 @@ from spindle.providers.modal import (
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
 
+LINUX_ENV_VALUE_LIMIT = 131_072
+
 
 def deployment(preset="qwen35-9b-lora-16k"):
     return DeploymentConfig.create(load(config_path(preset)))
+
+
+def write_configs(tmp_path, rows):
+    path = tmp_path / "deployment_configs.json"
+    path.write_text(json.dumps([row.model_dump(mode="json") for row in rows]))
+    return str(path)
 
 
 class App:
@@ -180,9 +188,11 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     assert stops == [process, process]
 
 
-def test_pool_lookup_uses_definition_name(monkeypatch):
+def test_pool_lookup_uses_definition_name(monkeypatch, tmp_path):
     row = deployment()
-    monkeypatch.setenv(deployment_configs.CONFIGS_ENV, json.dumps([row.model_dump()]))
+    monkeypatch.setenv(
+        deployment_configs.CONFIGS_FILE_ENV, write_configs(tmp_path, [row])
+    )
     saved = deployment_configs.pool_config(row.definition_id)
     assert saved.definition_id == row.definition_id
     assert deployment_configs.pool_config("missing") is None
@@ -210,11 +220,11 @@ def test_startup_failure_is_visible_and_blocks_new_spawns(monkeypatch):
     asyncio.run(run())
 
 
-def test_real_modal_app_constructs_from_configs_without_legacy_catalog(monkeypatch):
+def test_real_modal_app_constructs_from_configs_without_legacy_catalog(tmp_path):
     row = deployment()
     env = {
         **os.environ,
-        deployment_configs.CONFIGS_ENV: json.dumps([row.model_dump()]),
+        deployment_configs.CONFIGS_FILE_ENV: write_configs(tmp_path, [row]),
     }
     result = subprocess.run(
         [
@@ -242,6 +252,40 @@ print('constructed')
     assert "constructed" in result.stdout
 
 
+def test_frontend_with_every_bundled_config_keeps_env_values_under_linux_limit(
+    tmp_path,
+):
+    rows = [
+        DeploymentConfig.create(load(path))
+        for path in sorted(config_path("qwen35-9b-lora-16k").parent.glob("[!_]*.py"))
+    ]
+    env = {
+        **os.environ,
+        deployment_configs.CONFIGS_FILE_ENV: write_configs(tmp_path, rows),
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib, modal
+from spindle.providers.modal import deployment_apps
+deployment_apps.image_for = lambda backend: modal.Image.debian_slim()
+app = importlib.import_module('spindle.providers.modal.app')
+print(len(app.DEFINITIONS), max(len(value) for value in app.TRAINER_DEPLOYMENT_ENV.values()))
+""",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    definitions, longest = map(int, result.stdout.split())
+    assert definitions == len(rows)
+    assert longest < LINUX_ENV_VALUE_LIMIT
+
+
 def test_admission_changes_preserve_serialized_trainer(builders):
     first = deployment()
     old_bytes = serialize(deployment_apps.build_trainer_app(first, image="test")[1])
@@ -262,9 +306,11 @@ def test_admission_changes_preserve_serialized_trainer(builders):
 
 
 @pytest.mark.parametrize("kind", ["lora", "full"])
-def test_pool_launch_uses_only_generic_deployment_app(monkeypatch, kind):
+def test_pool_launch_uses_only_generic_deployment_app(monkeypatch, tmp_path, kind):
     row = deployment("qwen35-9b-lora-16k" if kind == "lora" else "qwen35-4b-fft-64k")
-    monkeypatch.setenv(deployment_configs.CONFIGS_ENV, json.dumps([row.model_dump()]))
+    monkeypatch.setenv(
+        deployment_configs.CONFIGS_FILE_ENV, write_configs(tmp_path, [row])
+    )
     module = lora_pool if kind == "lora" else fft_pool
     spec = (
         LoraPoolSpec(row.definition_id)
@@ -303,9 +349,11 @@ def test_pool_launch_uses_only_generic_deployment_app(monkeypatch, kind):
 
 
 @pytest.mark.parametrize("kind", ["lora", "full"])
-def test_missing_pool_uses_saved_provisioner(monkeypatch, kind):
+def test_missing_pool_uses_saved_provisioner(monkeypatch, tmp_path, kind):
     row = deployment("qwen35-9b-lora-16k" if kind == "lora" else "qwen35-4b-fft-64k")
-    monkeypatch.setenv(deployment_configs.CONFIGS_ENV, json.dumps([row.model_dump()]))
+    monkeypatch.setenv(
+        deployment_configs.CONFIGS_FILE_ENV, write_configs(tmp_path, [row])
+    )
     module = lora_pool if kind == "lora" else fft_pool
     spec = (
         LoraPoolSpec(row.definition_id)
