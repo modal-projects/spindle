@@ -1,0 +1,18 @@
+{
+  "kind": "CPU-only deterministic stale-view counterexample; no service-time or GPU measurement",
+  "frontends": 8,
+  "replicas": 8,
+  "group_size": 36,
+  "capacity_per_replica": 36,
+  "loads": {
+    "h0": 288,
+    "h1": 0,
+    "h2": 0,
+    "h3": 0,
+    "h4": 0,
+    "h5": 0,
+    "h6": 0,
+    "h7": 0
+  },
+  "total": 288
+}

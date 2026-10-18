@@ -1,0 +1,15 @@
+{
+  "at": 1791951401.7529206,
+  "trial": "serving64-final-r0",
+  "limit": 8192,
+  "kv": {
+    "maximum": 176,
+    "at_limit": 0,
+    "observations": 1696
+  },
+  "domains": {
+    "maximum": 161,
+    "at_limit": 0,
+    "observations": 1056
+  }
+}

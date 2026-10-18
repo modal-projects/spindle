@@ -1,0 +1,15 @@
+{
+  "raw_sha256": "68235116581e7eb8abe813cf6350415430f60e3cf5d26e6b85b2d1be510ea8fa",
+  "preserved_observations": [
+    {
+      "replica": "ta-01M4VWVBNHF66BSKR7QKHNB99R",
+      "running": 2,
+      "waiting": 0,
+      "seconds_before_last_completion": 0.04270672798156738
+    }
+  ],
+  "newer_nonempty_native_snapshot_rejected": true,
+  "logical_requests": 2048,
+  "reroutes": 0,
+  "final_sidecar_active": 0
+}

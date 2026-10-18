@@ -1,0 +1,22 @@
+{
+  "dtype": "auto",
+  "kv_cache_dtype": "auto",
+  "quantization": null,
+  "attention_backend": "fa3",
+  "lora_backend": "csgmv",
+  "max_lora_rank": 32,
+  "lora_target_modules": [
+    "gate_proj",
+    "v_proj",
+    "o_proj",
+    "k_proj",
+    "up_proj",
+    "down_proj",
+    "q_proj"
+  ],
+  "page_size": 1,
+  "disable_radix_cache": false,
+  "chunked_prefill_size": 8192,
+  "max_running_requests": 128,
+  "mem_fraction_static": 0.8
+}

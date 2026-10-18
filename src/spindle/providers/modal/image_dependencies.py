@@ -5,7 +5,7 @@ def ignore_config_source(path):
 
 CORE_PACKAGES = (
     "fastapi>=0.141.1",
-    "httpx>=0.28.1",
+    "httpx[http2]>=0.28.1",
     "opentelemetry-sdk==1.43.0",
     "opentelemetry-exporter-otlp-proto-http==1.43.0",
     "modal>=1.5.3",

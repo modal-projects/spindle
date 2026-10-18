@@ -18,6 +18,7 @@ import modal.experimental
 from modal.config import config
 
 from spindle.deployments import DeploymentConfig
+from spindle.inference.routing_simple import SIMPLE_POLICIES
 from spindle.inference.serving import (
     start_fft_sidecar,
     start_lora_sidecar,
@@ -257,7 +258,13 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         memory=recipe.inference_memory_mib,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
-        env=deployment_env(recipe.inference_env),
+        env=deployment_env(recipe.inference_env)
+        | (
+            {"SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"}
+            if recipe.inference_lora_routing
+            in {"work", "domains", "capacity", *SIMPLE_POLICIES}
+            else {}
+        ),
         min_containers=minimum,
         max_containers=maximum,
         target_concurrency=recipe.inference_target_concurrency,

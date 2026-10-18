@@ -1,0 +1,10 @@
+{
+  "at": 1791945953.3258758,
+  "previous_deadline": 1791951071.7866793,
+  "deadline": 1791954671.7866793,
+  "peak_gpu_limit": 8,
+  "maximum_monitor_hours": 4.75,
+  "maximum_gpu_hours": 38,
+  "reason": "Complete reversed-order HTTP/2 comparisons and a 1024-output-token asynchronous RL control after the slow 64-version default control",
+  "previous_monitor_pid": 399081
+}

@@ -1,0 +1,10 @@
+{
+  "at": 1791952920.1150177,
+  "original_window_seconds": 300,
+  "window_seconds": 180,
+  "decode_tokens": 1024,
+  "same_window_for_both_policies": true,
+  "peak_gpus": 8,
+  "deadline_unchanged": 1791954671.7866793,
+  "reason": "Fit the longer-output control after the primary paired comparisons within the unchanged allocation. At least 960 seconds must remain before launch; all admitted work drains."
+}

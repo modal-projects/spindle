@@ -1,0 +1,42 @@
+{
+  "model": "Qwen/Qwen3.8-27B",
+  "model_weights": "",
+  "inference_settings": {
+    "context_length": 16384,
+    "tp_size": 1,
+    "mem_fraction_static": 0.8,
+    "max_running_requests": 128,
+    "weight_loader_disable_mmap": true,
+    "ep_size": 1,
+    "max_queued_requests": 4096,
+    "max_loaded_loras": 256,
+    "max_loras_per_batch": 8,
+    "schedule_policy": "lpm",
+    "enable_lora_overlap_loading": false,
+    "enable_lora": true,
+    "max_lora_rank": 32,
+    "lora_target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "allocation": {
+    "inference_gpu": "H200",
+    "inference_gpus_per_node": 1,
+    "inference_cpu": 8,
+    "inference_memory_mib": 65536,
+    "inference_min_replicas": 8,
+    "inference_max_replicas": 8,
+    "inference_target_concurrency": 64,
+    "inference_env": {
+      "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1"
+    }
+  },
+  "effective_running_capacity_per_replica": 36,
+  "sglang_revision": "d050d06437d96196fc68d5b4e5c246408790d537"
+}
