@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
+from spindle import __version__
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
 
@@ -27,6 +28,8 @@ class DeploymentConfig(BaseModel):
     recipe: BaseConfig
     trainer_settings: dict
     inference_settings: dict
+    # Configs saved before versioning have no version and report 0.1.0.
+    spindle_version: str = "0.1.0"
 
     @field_validator("recipe", mode="before")
     @classmethod
@@ -48,6 +51,7 @@ class DeploymentConfig(BaseModel):
             recipe=pinned,
             trainer_settings=_jsonable(trainer_settings),
             inference_settings=_jsonable(inference_settings),
+            spindle_version=__version__,
         )
 
     @property
@@ -115,6 +119,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_timeout_s,
             recipe.trainer_env,
             self.trainer_settings,
+            self.spindle_version,
         )
 
     def inference_identity(self) -> tuple:
@@ -137,6 +142,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
             self.inference_settings,
+            self.spindle_version,
         )
 
 

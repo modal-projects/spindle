@@ -11,6 +11,7 @@ import modal
 import pytest
 from modal._serialization import serialize
 
+import spindle
 import spindle.backends.deployment as backend
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.local import InMemoryKeyValueStore
@@ -29,8 +30,9 @@ def deployment(preset="qwen35-9b-lora-16k"):
 
 
 class App:
-    def __init__(self, name):
+    def __init__(self, name, tags=None):
         self.name = name
+        self.tags = tags
         self.functions = {}
         self.servers = {}
 
@@ -434,6 +436,20 @@ def test_gpu_type_lists_become_modal_fallbacks(builders):
     )
     assert trainer_app.functions["trainer"][0]["gpu"] == ["H200:8", "B300:8"]
     assert pool_app.servers["Server"][0]["gpu"] == ["H200:2", "B200:2"]
+
+
+def test_deployed_apps_carry_version_tags(builders, monkeypatch):
+    monkeypatch.setenv("SPINDLE_COMMIT", "abc123")
+    row = deployment()
+    apps = [
+        deployment_apps.build_trainer_app(row, image="test")[0],
+        deployment_apps.build_inference_app(row, image="test")[0],
+        deployment_apps.build_rollout_app(
+            row, LoraPoolSpec(row.definition_id), image="test"
+        )[0],
+    ]
+    expected = {"spindle_version": spindle.__version__, "spindle_commit": "abc123"}
+    assert [app.tags for app in apps] == [expected] * 3
 
 
 def test_gpu_type_lists_survive_saved_config_round_trip():

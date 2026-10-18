@@ -20,6 +20,7 @@ from spindle.providers.contracts import (
     SamplingTask,
 )
 from spindle.telemetry.otlp import sample_trace
+from spindle.version import COMMIT_ENV, source_commit, version_tags
 
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
@@ -98,8 +99,9 @@ TRAINER_DEPLOYMENT_ENV = {
     CONFIGS_ENV: os.environ[CONFIGS_ENV],
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
+    COMMIT_ENV: source_commit() or "",
 }
-app = modal.App(APP_NAME)
+app = modal.App(APP_NAME, tags=version_tags())
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:

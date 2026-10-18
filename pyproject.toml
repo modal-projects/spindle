@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modal-spindle"
-version = "0.1.0"
+dynamic = ["version"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
@@ -22,6 +22,9 @@ dependencies = [
     "xxhash>=3.8.1",
     "zstandard>=0.25.0",
 ]
+
+[tool.setuptools.dynamic]
+version = { attr = "spindle.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

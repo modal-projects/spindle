@@ -28,8 +28,10 @@ Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a pr
 ```bash
 uv init --python 3.12 my-spindle-project
 cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.2.0'
 ```
+
+This pins a release tag. Releases and their changes are listed in [CHANGELOG.md](CHANGELOG.md), and `uv run spindle --version` prints the installed version and commit.
 
 **If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
 
@@ -266,6 +268,17 @@ To deploy the above config, it's just:
 ```bash
 spindle deploy config.py
 ```
+
+## Upgrade Spindle
+
+Read the [CHANGELOG.md](CHANGELOG.md) sections between your version and the new one; minor releases can change config defaults. Then point the dependency at the new tag and redeploy:
+
+```bash
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.3.0'
+spindle deploy config.py
+```
+
+Every app Spindle deploys carries `spindle_version` and `spindle_commit` tags in the Modal dashboard, and `/api/v1/get_server_capabilities` reports the same fields, so you can check which release a deployment runs.
 
 ## Clean up
 

@@ -31,6 +31,7 @@ from spindle.providers.modal.deployment_configs import (
 )
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
+from spindle.version import __version__, source_commit
 
 
 def compile_configs(paths):
@@ -131,8 +132,23 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=()):
     )
 
 
+class PrintVersion(argparse.Action):
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(
+            option_strings,
+            dest,
+            nargs=0,
+            help="show the Spindle version and source commit, then exit",
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(f"spindle {__version__} ({source_commit() or 'unknown commit'})")
+        parser.exit()
+
+
 def parser():
     result = argparse.ArgumentParser(prog="spindle")
+    result.add_argument("--version", action=PrintVersion)
     commands = result.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config").add_subparsers(dest="action", required=True)
     init = config.add_parser("init")
