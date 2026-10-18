@@ -279,6 +279,8 @@ def main(argv=None):
             ).remote(args.definition_id)
     except deploy_wizard.Cancelled:
         cli.exit(1, "Deploy cancelled.\n")
+    except deploy_wizard.SetupIncomplete:
+        cli.exit(1, "\nRun `spindle deploy` again once the secrets exist.\n")
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         cli.exit(1, f"{exc}\n")
 

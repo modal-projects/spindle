@@ -18,14 +18,42 @@ from spindle.deployments import DeploymentConfig, load
 CONFIG_DIR = Path(__file__).with_name("configs")
 SERVED_TIMEOUT_S = 20
 CONTEXT_CHOICES = (2_048, 16_384, 32_768, 65_536, 131_072, 262_144)
-DEFAULT_CONTEXT = 16_384
-DEFAULT_MODEL = "Qwen/Qwen3.5-9B"
+DEFAULT_CONTEXT = 32_768
+DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
 PROVIDER_ORDER = ("Qwen", "openai", "nvidia", "deepseek-ai", "zai-org", "moonshotai")
 MODE_LABELS = {"lora": "LoRA", "full": "Full fine-tune"}
 
 
 class Cancelled(Exception):
     pass
+
+
+class SetupIncomplete(Exception):
+    pass
+
+
+# (platform secret, required keys, what it is, how to create it)
+SECRETS = (
+    (
+        "api",
+        ("TINKER_API_KEY",),
+        "API key your Tinker clients send to Spindle",
+        'modal secret create {name} TINKER_API_KEY="tml-$(openssl rand -hex 32)"',
+    ),
+    (
+        "sampler_proxy",
+        ("MODAL_PROXY_TOKEN_ID", "MODAL_PROXY_TOKEN_SECRET"),
+        "Modal proxy token Spindle uses to reach its sampler pools",
+        "modal workspace proxy-tokens create, allow it for your environment, then\n"
+        "    modal secret create {name} MODAL_PROXY_TOKEN_ID=wk-... MODAL_PROXY_TOKEN_SECRET=ws-...",
+    ),
+    (
+        "huggingface",
+        ("HF_TOKEN",),
+        "Hugging Face read token for downloading model weights",
+        "modal secret create {name} HF_TOKEN=hf_...  (token from huggingface.co/settings/tokens)",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +155,51 @@ def model_title(presets: list[Preset], model: str, width: int) -> str:
     return f"{model:<{width}}  {modes} · up to {longest} · from {smallest.trainer}"
 
 
+def secret_problem(
+    name: str, keys: tuple[str, ...], environment: str | None
+) -> str | None:
+    try:
+        modal.Secret.from_name(
+            name, environment_name=environment, required_keys=list(keys)
+        ).hydrate()
+    except modal.exception.NotFoundError:
+        return "not found"
+    except modal.exception.ConflictError as exc:
+        return str(exc)
+    return None
+
+
+def check_setup(console: Console, environment: str | None) -> None:
+    """Show each secret Spindle needs and stop before any prompt if one is missing."""
+    names = BaseConfig.platform["secrets"]
+    table = Table(
+        title="Setup check", title_justify="left", show_header=False, box=None
+    )
+    table.add_row(
+        "[green]✓[/green]",
+        "MODAL_ENVIRONMENT",
+        environment or "unset: your profile's default environment",
+    )
+    fixes = []
+    with console.status("Checking your Modal secrets..."):
+        for key, keys, purpose, fix in SECRETS:
+            name = names[key]
+            problem = secret_problem(name, keys, environment)
+            mark = "[green]✓[/green]" if problem is None else "[red]✗[/red]"
+            detail = purpose if problem is None else f"{purpose} [red]({problem})[/red]"
+            table.add_row(mark, f"{name} · {', '.join(keys)}", detail)
+            if problem is not None:
+                fixes.append(fix.format(name=name))
+    console.print(table)
+    if fixes:
+        env = f" (with MODAL_ENVIRONMENT={environment})" if environment else ""
+        console.print(f"\nCreate the missing secrets{env}:")
+        for fix in fixes:
+            console.print(f"  [bold]{fix}[/bold]")
+        raise SetupIncomplete
+    console.print()
+
+
 def ask(question):
     answer = question.ask()
     if answer is None:
@@ -169,6 +242,7 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
             border_style="green",
         )
     )
+    check_setup(console, environment)
 
     models = models_by_provider(presets)
     width = max(len(model) for model in models)
@@ -224,7 +298,7 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
                 for tokens in CONTEXT_CHOICES
             ],
             default=DEFAULT_CONTEXT,
-            instruction="(not sure? start with 16K; pick longer for long reasoning traces)",
+            instruction="(not sure? 32K covers most RL and SFT runs)",
         )
     )
 
