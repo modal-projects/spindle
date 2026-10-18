@@ -999,3 +999,90 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+def concurrent_pool_plane(monkeypatch, *, prepare, deploy):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+
+    async def missing(spec):
+        raise modal_app.modal.exception.NotFoundError("no pool")
+
+    monkeypatch.setattr(modal_app, "lora_pool_gateway", missing)
+    monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+    for name in ("ensure_lora_pool", "ensure_fft_pool"):
+        monkeypatch.setattr(
+            modal_app, name, SimpleNamespace(remote=SimpleNamespace(aio=deploy))
+        )
+    return modal_app._plane()
+
+
+def base_session(definition):
+    return SimpleNamespace(
+        engine_definition_id=definition,
+        model_id=None,
+        publish_version=None,
+        latest=False,
+    )
+
+
+@pytest.mark.parametrize("definition", [LORA_DEFINITION, FULL_DEFINITION])
+def test_first_pool_downloads_weights_while_deploying(monkeypatch, definition):
+    events = []
+    both_started = asyncio.Event()
+
+    async def step(name):
+        events.append(f"{name} started")
+        if len(events) == 2:
+            both_started.set()
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        events.append(f"{name} done")
+
+    async def prepare(definition_id):
+        await step("assets")
+
+    async def deploy(spec):
+        await step("deploy")
+        return "https://gateway"
+
+    async def run():
+        plane = concurrent_pool_plane(monkeypatch, prepare=prepare, deploy=deploy)
+        await plane.ensure_sampling_pool(base_session(definition))
+
+    asyncio.run(run())
+    assert sorted(events[:2]) == ["assets started", "deploy started"]
+    assert sorted(events[2:]) == ["assets done", "deploy done"]
+
+
+@pytest.mark.parametrize("failing", ["assets", "deploy"])
+def test_first_pool_surfaces_the_failing_step(monkeypatch, failing):
+    cancelled = []
+
+    async def blocked_or_failing(name):
+        if name == failing:
+            raise RuntimeError(f"{name} failed")
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(name)
+            raise
+
+    async def prepare(definition_id):
+        await blocked_or_failing("assets")
+
+    async def deploy(spec):
+        await blocked_or_failing("deploy")
+
+    async def run():
+        plane = concurrent_pool_plane(monkeypatch, prepare=prepare, deploy=deploy)
+        with pytest.raises(RuntimeError, match=f"{failing} failed"):
+            await plane.ensure_sampling_pool(base_session(LORA_DEFINITION))
+
+    asyncio.run(run())
+    assert cancelled == [{"assets": "deploy", "deploy": "assets"}[failing]]

@@ -243,6 +243,18 @@ async def _ensure_model_assets(definition_id: str) -> None:
     await shared_kv().put(key, time.time())
 
 
+async def _all_or_first_error(*steps) -> None:
+    """Run steps concurrently; on the first failure, cancel the rest and raise it."""
+    tasks = [asyncio.ensure_future(step) for step in steps]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 async def _trainer_booted(registry, definition_id: str) -> bool:
     return any(
         record.definition_id == definition_id
@@ -501,9 +513,10 @@ def _plane():
         definition_id = session.engine_definition_id
         parameterization = parameterization_for(definition_id)
         if parameterization == "lora":
+            steps = [_ready_lora_pool(LoraPoolSpec(definition_id))]
             if session.model_id is None:
-                await _ensure_model_assets(definition_id)
-            await _ready_lora_pool(LoraPoolSpec(definition_id))
+                steps.append(_ensure_model_assets(definition_id))
+            await _all_or_first_error(*steps)
             return
         if parameterization != "full":
             return
@@ -522,11 +535,12 @@ def _plane():
         key = f"fft_pool:{pool.app_name}"
         record = await registry.get(key)
         if record is None:
-            if session.model_id is None:
-                await _ensure_model_assets(definition_id)
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
-            await ensure_fft_pool.remote.aio(pool.as_dict())
+            steps = [ensure_fft_pool.remote.aio(pool.as_dict())]
+            if session.model_id is None:
+                steps.append(_ensure_model_assets(definition_id))
+            await _all_or_first_error(*steps)
         else:
             await _touch_fft_pool(pool)
 
