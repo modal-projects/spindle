@@ -33,7 +33,13 @@ def deployment():
 def deployed(monkeypatch):
     monkeypatch.setattr(cli.sys, "version_info", (3, 12, 0))
     state = SimpleNamespace(
-        apps=set(), configs=[], platform=None, pools=[], calls=[], fail=None
+        apps=set(),
+        configs=[],
+        platform=None,
+        pools=[],
+        calls=[],
+        fail=None,
+        images=[],
     )
 
     class FakeApp:
@@ -56,6 +62,7 @@ def deployed(monkeypatch):
 
     def run(command, *, env, check, **kwargs):
         state.calls.append("frontend")
+        assert state.images, "frontend deployed before the sampler image was built"
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
         state.configs = json.loads(Path(env[CONFIGS_FILE_ENV]).read_text())
@@ -89,6 +96,11 @@ def deployed(monkeypatch):
         lambda row, pool, platform: (FakeApp(pool.app_name, "pool"), None),
     )
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(
+        cli,
+        "build_sampler_image",
+        lambda frontend, environment: state.images.append((frontend, environment)),
+    )
     monkeypatch.setattr(
         modal.Dict,
         "from_name",
@@ -186,6 +198,40 @@ def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deploye
     assert "Inference  qwen35-9b-lora-16k failed" in output
     assert "spindle deploy qwen35-9b-lora-16k" in output
     assert deployed.calls == ["trainer", "inference"]
+
+
+def test_every_deploy_builds_the_sampler_image_once(deployed):
+    row = deployment()
+    cli.deploy([row])
+    cli.deploy([row])
+    assert deployed.calls == ["trainer", "inference", "frontend", "frontend"]
+    assert deployed.images == [("spindle", None), ("spindle", None)]
+
+
+def test_sampler_image_failure_stops_before_the_frontend(monkeypatch, deployed):
+    def broken(frontend, environment):
+        raise RuntimeError("image build failed")
+
+    monkeypatch.setattr(cli, "build_sampler_image", broken)
+    with pytest.raises(RuntimeError, match="image build failed"):
+        cli.deploy([deployment()])
+    assert "frontend" not in deployed.calls
+
+
+def test_progress_shows_the_sampler_image_row(deployed):
+    console = Console(record=True, width=120)
+    cli.deploy(
+        [deployment()],
+        run_steps=partial(
+            deploy_wizard.deploy_with_progress,
+            console,
+            retry_command="spindle deploy qwen35-9b-lora-16k",
+        ),
+    )
+    output = console.export_text()
+    assert "Sampler image" in output
+    assert "API server" in output
+    assert deployed.images == [("spindle", None)]
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):

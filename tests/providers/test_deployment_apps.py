@@ -606,3 +606,26 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_sampler_image_builds_against_the_frontend_app(monkeypatch):
+    built = []
+    looked_up = []
+
+    class FakeImage:
+        def build(self, app):
+            built.append(app)
+
+    def lookup(name, **kwargs):
+        looked_up.append((name, kwargs))
+        return "frontend-app"
+
+    monkeypatch.setattr(deployment_apps.modal.App, "lookup", lookup)
+    monkeypatch.setattr(
+        deployment_apps, "image_for", lambda backend: {"sglang": FakeImage()}[backend]
+    )
+    deployment_apps.build_sampler_image("spindle", "dev")
+    assert looked_up == [
+        ("spindle", {"environment_name": "dev", "create_if_missing": True})
+    ]
+    assert built == ["frontend-app"]
