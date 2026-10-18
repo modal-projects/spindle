@@ -10,7 +10,10 @@ import sys
 from pathlib import Path
 
 import modal
+from rich.console import Console
 
+from spindle import deploy_wizard
+from spindle.configuration import BaseConfig
 from spindle.deployments import (
     DeploymentConfig,
     config_path,
@@ -33,9 +36,32 @@ from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
 
 
+NO_CONFIGS = (
+    "No configs given. Run `spindle deploy` in a terminal to pick models interactively, "
+    "pass config files or bundled config names (e.g. `spindle deploy qwen35-9b-lora-16k`), "
+    "or pass --all to deploy every bundled config."
+)
+
+
 def compile_configs(paths):
     recipes = [load(path) for path in paths]
     return [DeploymentConfig.create(recipe) for recipe in recipes]
+
+
+def config_file(arg):
+    """A config file path, or the name of a bundled config."""
+    if arg.endswith(".py"):
+        return Path(arg)
+    path = config_path(arg)
+    if not path.is_file():
+        raise ValueError(
+            f"unknown config {arg!r}; run `spindle deploy` to pick from the bundled models"
+        )
+    return path
+
+
+def interactive():
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def app_is_missing(app_name, environment):
@@ -144,8 +170,11 @@ def parser():
         help="Deploy the complete active Python config set behind one frontend",
     )
     apply.add_argument(
-        "files", nargs="*", help="Python configs (default: all bundled configs)"
+        "files",
+        nargs="*",
+        help="Python config files or bundled config names (none: pick interactively)",
     )
+    apply.add_argument("--all", action="store_true", help="Deploy every bundled config")
     apply.add_argument("--app")
     apply.add_argument("--env")
     apply.add_argument("--region")
@@ -184,9 +213,19 @@ def main(argv=None):
                     f"Validated {len(recipes)} deployment(s). Backend integration settings are checked when preparing trainers and pools; native options are checked at engine startup."
                 )
         elif args.command == "deploy":
-            paths = args.files or sorted(
-                Path(__file__).with_name("configs").glob("[!_]*.py")
-            )
+            console = Console()
+            frontend = args.app or BaseConfig.platform["frontend"]
+            environment = args.env or os.environ.get("MODAL_ENVIRONMENT")
+            chosen = []
+            if args.files:
+                paths = [config_file(arg) for arg in args.files]
+            elif args.all:
+                paths = deploy_wizard.bundled_config_paths()
+            elif interactive():
+                chosen = deploy_wizard.choose(console, frontend, environment)
+                paths = [preset.path for preset in chosen]
+            else:
+                raise ValueError(NO_CONFIGS)
             configs = compile_configs(paths)
             for deployment in configs:
                 platform = deployment.recipe.platform
@@ -201,10 +240,14 @@ def main(argv=None):
                 refresh_trainers=args.refresh_trainer,
                 refresh_inference=args.refresh_inference,
             )
+            if chosen:
+                deploy_wizard.show_next_steps(console, chosen, frontend, environment)
         else:
             modal.Function.from_name(
                 args.frontend, "clear_deployment_failure", environment_name=args.env
             ).remote(args.definition_id)
+    except deploy_wizard.Cancelled:
+        cli.exit(1, "Deploy cancelled.\n")
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         cli.exit(1, f"{exc}\n")
 

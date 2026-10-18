@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import modal
 import pytest
 
+from spindle import deploy_wizard
 from spindle import deployment_cli as cli
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal.deployment_configs import (
@@ -92,13 +93,64 @@ def deployed(monkeypatch):
     return state
 
 
-def test_deploy_defaults_to_bundled_configs(tmp_path, monkeypatch, deployed):
+def test_deploy_all_deploys_bundled_configs(tmp_path, monkeypatch, deployed):
     bundled = config_path("qwen35-9b-lora-16k").parent.glob("[!_]*.py")
     expected = {load(path).name for path in bundled}
     monkeypatch.chdir(tmp_path)
-    cli.main(["deploy"])
+    cli.main(["deploy", "--all"])
     assert len(expected) > 1
     assert {row["recipe"]["name"] for row in deployed.configs} == expected
+
+
+def test_deploy_accepts_bundled_config_names(deployed):
+    cli.main(["deploy", "qwen35-9b-lora-16k", "qwen3-8b-lora-32k"])
+    assert [row["recipe"]["name"] for row in deployed.configs] == [
+        "qwen35-9b-lora-16k",
+        "qwen3-8b-lora-32k",
+    ]
+
+
+def test_deploy_rejects_unknown_config_names(deployed, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["deploy", "not-a-model"])
+    assert "unknown config 'not-a-model'" in capsys.readouterr().err
+    assert deployed.calls == []
+
+
+def test_bare_deploy_without_a_terminal_deploys_nothing(monkeypatch, deployed, capsys):
+    monkeypatch.setattr(cli, "interactive", lambda: False)
+    with pytest.raises(SystemExit):
+        cli.main(["deploy"])
+    assert "--all" in capsys.readouterr().err
+    assert deployed.calls == []
+
+
+def test_bare_deploy_in_a_terminal_deploys_the_picked_models(monkeypatch, deployed):
+    presets = deploy_wizard.bundled_presets()
+    picked = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 32_768)]
+    shown = []
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    monkeypatch.setattr(deploy_wizard, "choose", lambda *args: picked)
+    monkeypatch.setattr(
+        deploy_wizard,
+        "show_next_steps",
+        lambda console, chosen, *args: shown.append(chosen),
+    )
+    cli.main(["deploy"])
+    assert [row["recipe"]["name"] for row in deployed.configs] == ["qwen35-9b-lora-64k"]
+    assert shown == [picked]
+
+
+def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
+    def cancel(*args):
+        raise deploy_wizard.Cancelled
+
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    monkeypatch.setattr(deploy_wizard, "choose", cancel)
+    with pytest.raises(SystemExit):
+        cli.main(["deploy"])
+    assert "cancelled" in capsys.readouterr().err
+    assert deployed.calls == []
 
 
 def test_deploy_reuses_unchanged_apps(deployed):
