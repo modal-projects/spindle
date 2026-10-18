@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -550,6 +551,29 @@ def test_model_creation_reuses_released_slot_at_trainer_cap() -> None:
         assert await engines.client(instance.instance_id).model_ids() == (
             creations[1].model.model_id,
             creations[2].model.model_id,
+        )
+
+    asyncio.run(run())
+
+
+def test_pending_creation_explains_trainer_startup() -> None:
+    async def run() -> None:
+        plane, session_id = await session_and_plane(max_models=1)
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        spec = {"base_model": "Qwen/Qwen3-4B"}
+        first = await plane.create_model(
+            session_id=session_id, model_seq_id=0, definition_id=DEFINITION, spec=spec
+        )
+        assert (await plane.retrieve(first.request_id)).reason is None
+        overflow = await plane.create_model(
+            session_id=session_id, model_seq_id=1, definition_id=DEFINITION, spec=spec
+        )
+        now[0] += 75
+        resolution = await plane.retrieve(overflow.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            "starting a trainer for Qwen/Qwen3-4B (1m 15s so far)"
         )
 
     asyncio.run(run())

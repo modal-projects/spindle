@@ -38,6 +38,7 @@ from .keys import (
     placement_claim_key,
     placement_key,
     sample_task_key,
+    sampler_warm_key,
     sampler_artifact_key,
     sampler_export_result_key,
     sampler_export_submission_key,
@@ -102,6 +103,18 @@ class FutureResolutionStatus(StrEnum):
     RETRYABLE = "retryable"
 
 
+SAMPLER_STARTING_AFTER_S = 30
+
+
+def starting_reason(role: str, model: str, waited: float) -> str:
+    minutes, seconds = divmod(int(waited), 60)
+    so_far = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+    return (
+        f"starting a {role} for {model} ({so_far} so far). The first request for a "
+        "model starts GPUs and loads weights, which can take several minutes"
+    )
+
+
 @dataclass(frozen=True)
 class FutureResolution:
     request_id: str
@@ -109,6 +122,7 @@ class FutureResolution:
     result: object | None = None
     error: str | None = None
     category: str = "server"
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +173,7 @@ class ControlPlane:
         self.creation_error = creation_error
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
+        self._warm_samplers: set[str] = set()
 
     async def create_session(
         self,
@@ -1118,7 +1133,11 @@ class ControlPlane:
         if record.request_id != request_id:
             raise RecordNotFound("future", request_id)
         if record.task_id is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if self.sampling_tasks is None:
             return FutureResolution(
                 request_id,
@@ -1133,8 +1152,13 @@ class ControlPlane:
                 error="sampling task was lost",
             )
         if state.status == SamplingTaskStatus.PENDING:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if state.status == SamplingTaskStatus.COMPLETE:
+            await self._mark_sampler_warm(session)
             return FutureResolution(
                 request_id,
                 FutureResolutionStatus.COMPLETE,
@@ -1144,6 +1168,32 @@ class ControlPlane:
             request_id,
             FutureResolutionStatus.FAILED,
             error=state.error,
+        )
+
+    async def _sampler_starting(
+        self, session: SamplingSessionRecord, record: SampleTaskRecord
+    ) -> str | None:
+        """Explain a slow first sample; a session that has sampled once is warm."""
+        if self.clock() - record.created_at < SAMPLER_STARTING_AFTER_S:
+            return None
+        sampler = session.sampling_session_id
+        if sampler in self._warm_samplers:
+            return None
+        store = self._sampling_task_store(session.session_id)
+        if await store.get(sampler_warm_key(sampler)) is not None:
+            self._warm_samplers.add(sampler)
+            return None
+        return starting_reason(
+            "sampler", session.base_model, self.clock() - record.created_at
+        )
+
+    async def _mark_sampler_warm(self, session: SamplingSessionRecord) -> None:
+        sampler = session.sampling_session_id
+        if sampler in self._warm_samplers:
+            return
+        self._warm_samplers.add(sampler)
+        await self._sampling_task_store(session.session_id).put(
+            sampler_warm_key(sampler), {"warm_at": self.clock()}
         )
 
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
@@ -1182,7 +1232,15 @@ class ControlPlane:
                 category="user",
             )
         if placement is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=starting_reason(
+                    "trainer",
+                    str(model.spec.get("base_model") or model.engine_definition_id),
+                    self.clock() - model.created_at,
+                ),
+            )
         try:
             await self._live_instance(placement)
         except ModelLost:

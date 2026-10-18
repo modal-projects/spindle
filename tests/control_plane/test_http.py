@@ -720,3 +720,41 @@ def test_result_negotiation_constructs_one_response_before_timing(
             ]
 
     asyncio.run(run())
+
+
+def test_pending_future_with_a_reason_reports_a_starting_queue_state() -> None:
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+        )
+
+        async def retrieve(request_id: str, timeout: float = 0.0) -> FutureResolution:
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason="starting a sampler for Qwen/Qwen3-4B (45s so far)",
+            )
+
+        plane.retrieve = retrieve
+        app = create_control_plane_app(
+            plane, DEFINITIONS, api_key="tml-test", retrieve_window=1.0
+        )
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            headers={"X-API-Key": "tml-test"},
+            transport=httpx.ASGITransport(app=app),
+        )
+        retrieved = await client.post(
+            "/api/v1/retrieve_future", json={"request_id": "sample-abc:0"}
+        )
+        assert retrieved.status_code == 408
+        assert retrieved.json() == {
+            "type": "try_again",
+            "request_id": "sample-abc:0",
+            "queue_state": "starting",
+            "queue_state_reason": "starting a sampler for Qwen/Qwen3-4B (45s so far)",
+        }
+        await client.aclose()
+
+    asyncio.run(run())

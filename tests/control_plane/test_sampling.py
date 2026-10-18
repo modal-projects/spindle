@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -278,5 +279,39 @@ def test_submit_sample_checks_the_session_once_and_records_the_touch() -> None:
         await plane.close_session(session.session_id, "done")
         with pytest.raises(RecordUnavailable):
             await plane.submit_sample(sample_request(sampling.sampling_session_id, 1))
+
+    asyncio.run(run())
+
+
+def test_first_sample_explains_sampler_startup_until_one_completes() -> None:
+    async def run() -> None:
+        gates = {0: asyncio.Event(), 1: asyncio.Event()}
+
+        async def gated(task: SamplingTask) -> object:
+            await gates[task.payload["seq_id"]].wait()
+            return {"type": "sample", "sequences": []}
+
+        plane, _, _, sampling_session_id = await sampling_plane(gated)
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        first = await plane.submit_sample(sample_request(sampling_session_id, 0))
+        assert (await plane.retrieve(first)).reason is None
+        now[0] += 45
+        pending = await plane.retrieve(first)
+        assert pending.status == FutureResolutionStatus.PENDING
+        assert pending.reason.startswith(
+            f"starting a sampler for {BASE_MODEL} (45s so far)"
+        )
+
+        gates[0].set()
+        resolution = await plane.retrieve(first, timeout=5)
+        assert resolution.status == FutureResolutionStatus.COMPLETE
+
+        second = await plane.submit_sample(sample_request(sampling_session_id, 1))
+        now[0] += 45
+        warm = await plane.retrieve(second)
+        assert warm.status == FutureResolutionStatus.PENDING
+        assert warm.reason is None
+        gates[1].set()
 
     asyncio.run(run())
