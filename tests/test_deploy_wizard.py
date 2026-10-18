@@ -112,3 +112,9 @@ def test_progress_reports_the_total_deploy_time():
 def test_format_duration():
     assert deploy_wizard.format_duration(8.4) == "8s"
     assert deploy_wizard.format_duration(125) == "2m 05s"
+
+
+def test_model_titles_drop_the_provider_prefix():
+    presets = deploy_wizard.bundled_presets()
+    title = deploy_wizard.model_title(presets, "Qwen/Qwen3.5-9B", width=12)
+    assert title.startswith("Qwen3.5-9B  ")

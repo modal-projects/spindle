@@ -153,7 +153,11 @@ def model_title(presets: list[Preset], model: str, width: int) -> str:
     modes = ", ".join(MODE_LABELS[mode] for mode in modes_for(presets, model))
     longest = format_context(max(p.context for p in own))
     smallest = min(own, key=lambda p: p.trainer_gpu_count)
-    return f"{model:<{width}}  {modes} · up to {longest} · from {smallest.trainer}"
+    return f"{short_name(model):<{width}}  {modes} · up to {longest} · from {smallest.trainer}"
+
+
+def short_name(model: str) -> str:
+    return model.split("/", 1)[-1]
 
 
 def secret_problem(
@@ -239,18 +243,17 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
             "[bold]Welcome to Spindle[/bold], the API for training on Modal.\n\n"
             "Pick the models you want to post-train. Spindle deploys only those,\n"
             "and GPUs start when your first training request arrives.",
-            subtitle=f"environment: {environment or 'default'}",
             border_style="green",
         )
     )
     check_setup(console, environment)
 
     models = models_by_provider(presets)
-    width = max(len(model) for model in models)
+    width = max(len(short_name(model)) for model in models)
     choices = []
     for index, model in enumerate(models):
-        if index and provider(model) != provider(models[index - 1]):
-            choices.append(questionary.Separator(" "))
+        if index == 0 or provider(model) != provider(models[index - 1]):
+            choices.append(questionary.Separator(f"── {provider(model)} ──"))
         choices.append(
             questionary.Choice(
                 model_title(presets, model, width),
