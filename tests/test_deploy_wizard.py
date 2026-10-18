@@ -1,5 +1,7 @@
 from concurrent.futures import Future
 
+import modal
+import pytest
 from rich.console import Console
 
 from spindle import deploy_wizard
@@ -123,3 +125,48 @@ def test_unresponsive_frontend_names_the_app_to_stop():
     )
     assert "modal app stop spindle -e dev" in console.export_text()
     assert deploy_wizard.stop_command("spindle", None) == "modal app stop spindle"
+
+
+def test_setup_check_lists_every_missing_secret_with_a_fix(monkeypatch):
+    present = {"spindle-api": {"TINKER_API_KEY"}, "huggingface-secret": {"OTHER"}}
+
+    class FakeSecret:
+        def __init__(self, name, keys):
+            self.name, self.keys = name, keys
+
+        def hydrate(self):
+            if self.name not in present:
+                raise modal.exception.NotFoundError("missing")
+            missing = set(self.keys) - present[self.name]
+            if missing:
+                raise modal.exception.ConflictError(
+                    f"Secret is missing key(s): {', '.join(sorted(missing))}"
+                )
+
+    monkeypatch.setattr(
+        modal.Secret,
+        "from_name",
+        lambda name, environment_name=None, required_keys=(): FakeSecret(
+            name, required_keys
+        ),
+    )
+    console = Console(record=True, width=160)
+    with pytest.raises(deploy_wizard.SetupIncomplete):
+        deploy_wizard.check_setup(console, "dev")
+    output = console.export_text()
+    assert "spindle-proxy · MODAL_PROXY_TOKEN_ID, MODAL_PROXY_TOKEN_SECRET" in output
+    assert "(not found)" in output
+    assert "missing key(s): HF_TOKEN" in output
+    assert "modal secret create huggingface-secret HF_TOKEN=hf_..." in output
+    assert "modal secret create spindle-api" not in output
+
+
+def test_setup_check_passes_when_every_secret_exists(monkeypatch):
+    class PresentSecret:
+        def hydrate(self):
+            pass
+
+    monkeypatch.setattr(modal.Secret, "from_name", lambda *a, **k: PresentSecret())
+    console = Console(record=True, width=160)
+    deploy_wizard.check_setup(console, None)
+    assert "✗" not in console.export_text()
