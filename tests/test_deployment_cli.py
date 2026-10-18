@@ -2,12 +2,14 @@ import json
 import subprocess
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import modal
 import pytest
+from rich.console import Console
 
 from spindle import deploy_wizard
 from spindle import deployment_cli as cli
@@ -51,7 +53,7 @@ def deployed(monkeypatch):
         if name not in state.apps:
             raise modal.exception.NotFoundError("not deployed")
 
-    def run(command, *, env, check):
+    def run(command, *, env, check, **kwargs):
         state.calls.append("frontend")
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
@@ -138,7 +140,29 @@ def test_bare_deploy_in_a_terminal_deploys_the_picked_models(monkeypatch, deploy
     )
     cli.main(["deploy"])
     assert [row["recipe"]["name"] for row in deployed.configs] == ["qwen35-9b-lora-64k"]
+    assert deployed.calls == ["trainer", "inference", "frontend"]
     assert shown == [picked]
+
+
+def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deployed):
+    console = Console(record=True, width=120)
+    presets = deploy_wizard.bundled_presets()
+    picked = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 16_384)]
+    deployed.fail = "inference"
+    with pytest.raises(RuntimeError):
+        cli.deploy(
+            cli.compile_configs([preset.path for preset in picked]),
+            run_steps=partial(
+                deploy_wizard.deploy_with_progress,
+                console,
+                retry_command=deploy_wizard.deploy_command(picked),
+            ),
+        )
+    output = console.export_text()
+    assert "Trainer    qwen35-9b-lora-16k" in output
+    assert "Inference  qwen35-9b-lora-16k failed" in output
+    assert "spindle deploy qwen35-9b-lora-16k" in output
+    assert deployed.calls == ["trainer", "inference"]
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):

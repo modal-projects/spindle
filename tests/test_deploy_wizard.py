@@ -24,13 +24,27 @@ def test_pick_uses_the_shortest_context_that_fits():
     )
 
 
-def test_models_are_listed_smallest_trainer_first():
+def test_models_are_grouped_by_provider_smallest_trainer_first():
     presets = deploy_wizard.bundled_presets()
-    smallest = [
-        min(p.trainer_gpu_count for p in presets if p.model == model)
-        for model in deploy_wizard.models_by_size(presets)
-    ]
-    assert smallest == sorted(smallest)
+    models = deploy_wizard.models_by_provider(presets)
+    providers = list(dict.fromkeys(deploy_wizard.provider(model) for model in models))
+    assert providers == list(deploy_wizard.PROVIDER_ORDER)
+    for name in providers:
+        smallest = [
+            min(p.trainer_gpu_count for p in presets if p.model == model)
+            for model in models
+            if deploy_wizard.provider(model) == name
+        ]
+        assert smallest == sorted(smallest)
+
+
+def test_default_selection_deploys_one_small_qwen_lora():
+    presets = deploy_wizard.bundled_presets()
+    assert deploy_wizard.modes_for(presets, deploy_wizard.DEFAULT_MODEL)[0] == "lora"
+    preset = deploy_wizard.pick(
+        presets, deploy_wizard.DEFAULT_MODEL, "lora", deploy_wizard.DEFAULT_CONTEXT
+    )
+    assert preset.name == "qwen35-9b-instruct-lora-16k"
 
 
 def test_models_with_lora_and_full_offer_both_modes():

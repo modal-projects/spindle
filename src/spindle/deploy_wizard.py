@@ -9,6 +9,7 @@ import modal
 import questionary
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from spindle.configuration import BaseConfig
@@ -17,7 +18,9 @@ from spindle.deployments import DeploymentConfig, load
 CONFIG_DIR = Path(__file__).with_name("configs")
 SERVED_TIMEOUT_S = 20
 CONTEXT_CHOICES = (2_048, 16_384, 32_768, 65_536, 131_072, 262_144)
-DEFAULT_CONTEXT = 32_768
+DEFAULT_CONTEXT = 16_384
+DEFAULT_MODEL = "Qwen/Qwen3.5-9B"
+PROVIDER_ORDER = ("Qwen", "openai", "nvidia", "deepseek-ai", "zai-org", "moonshotai")
 MODE_LABELS = {"lora": "LoRA", "full": "Full fine-tune"}
 
 
@@ -70,14 +73,29 @@ def bundled_presets() -> list[Preset]:
     return list(presets.values())
 
 
-def models_by_size(presets: list[Preset]) -> list[str]:
+def provider(model: str) -> str:
+    return model.split("/")[0]
+
+
+def models_by_provider(presets: list[Preset]) -> list[str]:
+    """Providers in PROVIDER_ORDER (unlisted ones last), smallest trainer first within each."""
     smallest = {}
     for preset in presets:
         smallest[preset.model] = min(
             smallest.get(preset.model, preset.trainer_gpu_count),
             preset.trainer_gpu_count,
         )
-    return sorted(smallest, key=lambda model: (smallest[model], model.lower()))
+
+    def rank(model):
+        name = provider(model)
+        order = (
+            PROVIDER_ORDER.index(name)
+            if name in PROVIDER_ORDER
+            else len(PROVIDER_ORDER)
+        )
+        return order, name.lower(), smallest[model], model.lower()
+
+    return sorted(smallest, key=rank)
 
 
 def modes_for(presets: list[Preset], model: str) -> list[str]:
@@ -152,15 +170,23 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
         )
     )
 
-    models = models_by_size(presets)
+    models = models_by_provider(presets)
     width = max(len(model) for model in models)
+    choices = []
+    for index, model in enumerate(models):
+        if index == 0 or provider(model) != provider(models[index - 1]):
+            choices.append(questionary.Separator(f"── {provider(model)} ──"))
+        choices.append(
+            questionary.Choice(
+                model_title(presets, model, width),
+                value=model,
+                checked=model == DEFAULT_MODEL,
+            )
+        )
     selected = ask(
         questionary.checkbox(
             "Which models would you like to post-train?",
-            choices=[
-                questionary.Choice(model_title(presets, model, width), value=model)
-                for model in models
-            ],
+            choices=choices,
             instruction="(space to select, enter to confirm)",
             validate=lambda picked: bool(picked) or "Pick at least one model.",
         )
@@ -198,7 +224,7 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
                 for tokens in CONTEXT_CHOICES
             ],
             default=DEFAULT_CONTEXT,
-            instruction="(not sure? 32K covers most RL and SFT runs)",
+            instruction="(not sure? start with 16K; pick longer for long reasoning traces)",
         )
     )
 
@@ -217,6 +243,10 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
     ):
         raise Cancelled
     return chosen
+
+
+def deploy_command(chosen: list[Preset]) -> str:
+    return "spindle deploy " + " ".join(preset.name for preset in chosen)
 
 
 def show_plan(
@@ -249,9 +279,37 @@ def show_plan(
             "not picked here will stop being served.[/yellow]"
         )
     console.print(
-        "Skip these prompts next time with:\n"
-        f"  [bold]spindle deploy {' '.join(preset.name for preset in chosen)}[/bold]\n"
+        f"Skip these prompts next time with:\n  [bold]{deploy_command(chosen)}[/bold]\n"
     )
+
+
+def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
+    """Run deploy steps with one progress row per app instead of Modal's object tree."""
+    console.print(
+        "[dim]The first deploy in a workspace builds GPU images, which can take several minutes.[/dim]"
+    )
+    progress = Progress(
+        SpinnerColumn(finished_text="[green]✓[/green]"),
+        TextColumn("{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    )
+    with progress:
+        tasks = [progress.add_task(label, total=1, start=False) for label, _ in steps]
+        for task, (label, step) in zip(tasks, steps):
+            progress.start_task(task)
+            try:
+                step()
+            except Exception as exc:
+                progress.update(task, description=f"[red]{label} failed[/red]")
+                output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
+                if output:
+                    console.print(output)
+                console.print(
+                    f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
+                )
+                raise
+            progress.update(task, completed=1)
 
 
 def show_next_steps(

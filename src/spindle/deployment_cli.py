@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import modal
@@ -90,8 +91,11 @@ def apps_to_publish(configs, current_configs, environment, trainers, inference):
     return trainers, inference
 
 
-def deploy(configs, *, refresh_trainers=(), refresh_inference=()):
-    """Deploy missing or changed trainer and inference apps, then the frontend."""
+def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None):
+    """Deploy missing or changed trainer and inference apps, then the frontend.
+
+    `run_steps` receives (label, step) pairs in order; by default they run with Modal's output.
+    """
     if sys.version_info[:2] != (3, 12):
         raise ValueError(
             "Python deployment requires Python 3.12 to match the serialized GPU runtime images"
@@ -118,43 +122,63 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=()):
     )
     pools = deployed_pools(platform["frontend"], environment) if inference else []
 
+    def deploy_trainer(deployment):
+        build_trainer_app(deployment, platform)[0].deploy(environment_name=environment)
+
+    def deploy_inference(deployment):
+        build_inference_app(deployment, platform)[0].deploy(
+            environment_name=environment
+        )
+        for record in pools:
+            if record["definition_id"] != deployment.definition_id:
+                continue
+            pool = (
+                LoraPoolSpec.from_dict(record)
+                if deployment.parameterization == "lora"
+                else FFTPoolSpec.from_dict(record)
+            )
+            if not app_is_missing(pool.app_name, environment):
+                build_rollout_app(deployment, pool, platform)[0].deploy(
+                    environment_name=environment
+                )
+
+    def deploy_frontend():
+        command = [sys.executable, "-m", "modal", "deploy"]
+        if environment:
+            command += ["--env", environment]
+        captured = {"capture_output": True, "text": True} if run_steps else {}
+        subprocess.run(
+            [*command, "-m", "spindle.providers.modal.app"],
+            check=True,
+            env={
+                **os.environ,
+                CONFIGS_ENV: json.dumps(
+                    [deployment.model_dump(mode="json") for deployment in configs]
+                ),
+                PLATFORM_ENV: json.dumps(platform),
+                "SPINDLE_APP_NAME": platform["frontend"],
+            },
+            **captured,
+        )
+
+    steps = []
+    for deployment in configs:
+        if deployment.name in trainers:
+            steps.append(
+                (f"Trainer    {deployment.name}", partial(deploy_trainer, deployment))
+            )
+        if deployment.name in inference:
+            steps.append(
+                (f"Inference  {deployment.name}", partial(deploy_inference, deployment))
+            )
+    steps.append(("API server", deploy_frontend))
+    if run_steps is not None:
+        run_steps(steps)
+        return
     with modal.enable_output():
-        for deployment in configs:
-            if deployment.name in trainers:
-                build_trainer_app(deployment, platform)[0].deploy(
-                    environment_name=environment
-                )
-            if deployment.name in inference:
-                build_inference_app(deployment, platform)[0].deploy(
-                    environment_name=environment
-                )
-                for record in pools:
-                    if record["definition_id"] != deployment.definition_id:
-                        continue
-                    pool = (
-                        LoraPoolSpec.from_dict(record)
-                        if deployment.parameterization == "lora"
-                        else FFTPoolSpec.from_dict(record)
-                    )
-                    if not app_is_missing(pool.app_name, environment):
-                        build_rollout_app(deployment, pool, platform)[0].deploy(
-                            environment_name=environment
-                        )
-    command = [sys.executable, "-m", "modal", "deploy"]
-    if environment:
-        command += ["--env", environment]
-    subprocess.run(
-        [*command, "-m", "spindle.providers.modal.app"],
-        check=True,
-        env={
-            **os.environ,
-            CONFIGS_ENV: json.dumps(
-                [deployment.model_dump(mode="json") for deployment in configs]
-            ),
-            PLATFORM_ENV: json.dumps(platform),
-            "SPINDLE_APP_NAME": platform["frontend"],
-        },
-    )
+        for _, step in steps[:-1]:
+            step()
+    deploy_frontend()
 
 
 def parser():
@@ -239,6 +263,13 @@ def main(argv=None):
                 configs,
                 refresh_trainers=args.refresh_trainer,
                 refresh_inference=args.refresh_inference,
+                run_steps=partial(
+                    deploy_wizard.deploy_with_progress,
+                    console,
+                    retry_command=deploy_wizard.deploy_command(chosen),
+                )
+                if chosen
+                else None,
             )
             if chosen:
                 deploy_wizard.show_next_steps(console, chosen, frontend, environment)
