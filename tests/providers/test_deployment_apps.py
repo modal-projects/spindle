@@ -138,6 +138,7 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     monkeypatch.setattr(
         subprocess, "Popen", lambda argv, **kw: commands.append(argv) or process
     )
+    monkeypatch.setattr(deployment_apps, "log_scheduled_gpus", lambda role: None)
     monkeypatch.setattr(deployment_apps, "wait_http", lambda *args: None)
     monkeypatch.setattr(deployment_apps, "supervise_children", lambda *args: None)
     monkeypatch.setattr(
@@ -426,6 +427,47 @@ def test_declared_compute_settings_reach_modal(builders):
     )
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
     assert server["ephemeral_disk"] == 550_000
+
+
+def test_gpu_type_lists_become_modal_fallbacks(builders):
+    row = deployment("qwen36-35b-a3b-lora-32k")
+    row.recipe.trainer_gpu = ["H200", "B300"]
+    row.recipe.inference_gpu = ["H200", "B200"]
+    trainer_app, _ = deployment_apps.build_trainer_app(row, image="test")
+    pool_app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert trainer_app.functions["trainer"][0]["gpu"] == ["H200:8", "B300:8"]
+    assert pool_app.servers["Server"][0]["gpu"] == ["H200:2", "B200:2"]
+
+
+def test_gpu_type_lists_survive_saved_config_round_trip():
+    recipe = load(config_path("qwen36-35b-a3b-lora-32k"))
+    recipe.trainer_gpu = ("H200", "B300")
+    saved = DeploymentConfig.model_validate_json(
+        DeploymentConfig.create(recipe).model_dump_json()
+    )
+    assert saved.recipe.trainer_gpu == ["H200", "B300"]
+    assert (
+        saved.trainer_identity() == DeploymentConfig.create(recipe).trainer_identity()
+    )
+
+
+def test_scheduled_gpus_are_logged(monkeypatch, capsys):
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="NVIDIA B300\n" * 8),
+    )
+    deployment_apps.log_scheduled_gpus("trainer")
+    assert capsys.readouterr().out == "spindle trainer scheduled on 8x NVIDIA B300\n"
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("nvidia-smi")
+
+    monkeypatch.setattr(subprocess, "run", missing)
+    deployment_apps.log_scheduled_gpus("sampler")
+    assert capsys.readouterr().out == ""
 
 
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
