@@ -12,6 +12,8 @@ from spindle.engine.http import HttpEngineClient, create_engine_app
 from spindle.providers.local import InMemoryKeyValueStore
 from tests.support import SingleEnginePlatform, TinkerStubExecutor, serve
 
+pytestmark = pytest.mark.usefixtures("sdk_garbage_collected_off_loop")
+
 BASE_MODEL = "Qwen/Qwen3-8B"
 DEFINITION = "qwen3_8b"
 DEFINITIONS = (

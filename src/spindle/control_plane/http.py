@@ -428,10 +428,17 @@ def create_control_plane_app(
         if body.cache_affinity_key is None:
             request.pop("cache_affinity_key")
         request_id = await control_plane.submit_sample(request)
-        samples = int(request.get("num_samples") or 1)
+        # Return one sequence id per sample, derived from the idempotent request
+        # id so a resubmitted sample gets the same ids. Tinker SDK 0.26 and
+        # later require them.
+        num_samples = request.get("num_samples", 1)
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int):
+            num_samples = 1
         return {
             "request_id": request_id,
-            "sample_sequence_ids": [f"{request_id}:{i}" for i in range(samples)],
+            "sample_sequence_ids": [
+                f"{request_id}:{index}" for index in range(max(num_samples, 0))
+            ],
         }
 
     @app.get("/api/v1/samplers/{sampling_session_id}")

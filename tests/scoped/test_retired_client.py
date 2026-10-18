@@ -8,6 +8,8 @@ import pytest
 import tinker
 from tinker import types
 
+pytestmark = pytest.mark.usefixtures("sdk_garbage_collected_off_loop")
+
 
 def test_retired_sampler_410_is_terminal_without_content_length():
     requests = []
