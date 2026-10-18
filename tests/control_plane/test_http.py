@@ -362,6 +362,32 @@ def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
     asyncio.run(run())
 
 
+def test_sample_endpoint_returns_one_sequence_id_per_requested_sample() -> None:
+    class CaptureControlPlane:
+        async def submit_sample(self, request):
+            return "request-a"
+
+    async def run() -> None:
+        app = create_control_plane_app(CaptureControlPlane(), DEFINITIONS, api_key=None)
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            transport=httpx.ASGITransport(app=app),
+        )
+
+        response = await client.post(
+            "/api/v1/asample",
+            json={"sampling_session_id": "sample-a", "seq_id": 0, "num_samples": 3},
+        )
+
+        assert response.json() == {
+            "request_id": "request-a",
+            "sample_sequence_ids": ["request-a:0", "request-a:1", "request-a:2"],
+        }
+        await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_full_model_info_is_not_lora() -> None:
     async def run() -> None:
         client = http_client()

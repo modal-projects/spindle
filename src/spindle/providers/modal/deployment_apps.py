@@ -98,6 +98,27 @@ def server_placement(region):
     return {"routing_region": region, "compute_region": region}
 
 
+def gpu_request(gpu: str | list[str], count: int) -> str | list[str]:
+    """Modal tries list entries in order and schedules the first type with capacity."""
+    if isinstance(gpu, str):
+        return f"{gpu}:{count}"
+    return [f"{name}:{count}" for name in gpu]
+
+
+def log_scheduled_gpus(role: str) -> None:
+    try:
+        names = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        logging.getLogger(__name__).exception("query scheduled GPUs")
+        return
+    print(f"spindle {role} scheduled on {len(names)}x {', '.join(sorted(set(names)))}")
+
+
 def deployment_env(values):
     """Keep user environment overrides separate from Spindle's deployment wiring."""
     if any(key.startswith("SPINDLE_") for key in values):
@@ -123,6 +144,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         if saved.name != trainer_name:
             raise ValueError("trainer settings do not match the deployed app")
         os.environ["SPINDLE_FRONTEND_APP_ID"] = frontend_app_id
+        log_scheduled_gpus("trainer")
         run_trainer(saved, instance_id, platform)
 
     if recipe.trainer_nodes > 1:
@@ -135,7 +157,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
             if image is not None
             else image_for(recipe.backend, recipe.trainer_image)
         ),
-        gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
+        gpu=gpu_request(recipe.trainer_gpu, recipe.trainer_gpus_per_node),
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
@@ -244,7 +266,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         name="Server",
         serialized=True,
         image=image if image is not None else image_for("sglang"),
-        gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
+        gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
         ephemeral_disk=recipe.inference_disk_mib or None,
@@ -265,6 +287,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         def start(self):
             self.sidecar = None
             self.sglang = None
+            log_scheduled_gpus("sampler")
 
             self.sglang = subprocess.Popen(
                 [
