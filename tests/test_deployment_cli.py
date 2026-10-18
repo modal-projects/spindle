@@ -11,8 +11,9 @@ import pytest
 
 from spindle import deployment_cli as cli
 from spindle.deployments import DeploymentConfig, config_path, load
+from spindle.providers.modal import deployment_configs
 from spindle.providers.modal.deployment_configs import (
-    CONFIGS_ENV,
+    CONFIGS_FILE_ENV,
     PLATFORM_ENV,
     deployed_configs,
 )
@@ -54,8 +55,9 @@ def deployed(monkeypatch):
         state.calls.append("frontend")
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
-        state.configs = json.loads(env[CONFIGS_ENV])
+        state.configs = json.loads(Path(env[CONFIGS_FILE_ENV]).read_text())
         state.platform = json.loads(env[PLATFORM_ENV])
+        state.env = env
 
     monkeypatch.setattr(cli, "deployed_configs", read_configs)
     monkeypatch.setattr(cli, "deployed_pools", lambda *args: state.pools)
@@ -99,6 +101,27 @@ def test_deploy_defaults_to_bundled_configs(tmp_path, monkeypatch, deployed):
     cli.main(["deploy"])
     assert len(expected) > 1
     assert {row["recipe"]["name"] for row in deployed.configs} == expected
+    assert max(len(value) for value in deployed.env.values()) < 131_072
+
+
+def test_unresponsive_frontend_fails_fast(monkeypatch):
+    cancelled = []
+
+    class Call:
+        def get(self, timeout):
+            raise TimeoutError
+
+        def cancel(self):
+            cancelled.append(True)
+
+    class Function:
+        def spawn(self):
+            return Call()
+
+    monkeypatch.setattr(modal.Function, "from_name", lambda *a, **k: Function())
+    with pytest.raises(ValueError, match="modal app stop spindle"):
+        deployment_configs.deployed_configs("spindle", "dev")
+    assert cancelled == [True]
 
 
 def test_deploy_reuses_unchanged_apps(deployed):
@@ -209,14 +232,16 @@ def test_existing_frontend_without_deployment_metadata_can_be_updated(deployed):
 
 
 def test_read_configs_from_deployed_function(monkeypatch):
-    function = SimpleNamespace(remote=Mock(return_value=[{"configuration": "saved"}]))
+    call = SimpleNamespace(get=Mock(return_value=[{"configuration": "saved"}]))
+    function = SimpleNamespace(spawn=Mock(return_value=call))
     lookup = Mock(return_value=function)
     monkeypatch.setattr(modal.Function, "from_name", lookup)
     assert deployed_configs("my-app", "dev") == [{"configuration": "saved"}]
     lookup.assert_called_once_with("my-app", "deployed_configs", environment_name="dev")
-    function.remote.side_effect = modal.exception.NotFoundError("no function")
+    function.spawn.side_effect = modal.exception.NotFoundError("no function")
     assert deployed_configs("my-app", "dev") == []
-    function.remote.side_effect = RuntimeError("frontend failed")
+    function.spawn.side_effect = None
+    call.get.side_effect = RuntimeError("frontend failed")
     with pytest.raises(RuntimeError, match="frontend failed"):
         deployed_configs("my-app", "dev")
 

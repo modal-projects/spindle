@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import modal
@@ -23,7 +24,7 @@ from spindle.providers.modal.deployment_apps import (
     build_trainer_app,
 )
 from spindle.providers.modal.deployment_configs import (
-    CONFIGS_ENV,
+    CONFIGS_FILE_ENV,
     PLATFORM_ENV,
     deployed_configs,
     deployed_platform,
@@ -117,18 +118,21 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=()):
     command = [sys.executable, "-m", "modal", "deploy"]
     if environment:
         command += ["--env", environment]
-    subprocess.run(
-        [*command, "-m", "spindle.providers.modal.app"],
-        check=True,
-        env={
-            **os.environ,
-            CONFIGS_ENV: json.dumps(
-                [deployment.model_dump(mode="json") for deployment in configs]
-            ),
-            PLATFORM_ENV: json.dumps(platform),
-            "SPINDLE_APP_NAME": platform["frontend"],
-        },
-    )
+    with tempfile.TemporaryDirectory() as directory:
+        configs_file = Path(directory, "deployment_configs.json")
+        configs_file.write_text(
+            json.dumps([deployment.model_dump(mode="json") for deployment in configs])
+        )
+        subprocess.run(
+            [*command, "-m", "spindle.providers.modal.app"],
+            check=True,
+            env={
+                **os.environ,
+                CONFIGS_FILE_ENV: str(configs_file),
+                PLATFORM_ENV: json.dumps(platform),
+                "SPINDLE_APP_NAME": platform["frontend"],
+            },
+        )
 
 
 def parser():

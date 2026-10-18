@@ -2,23 +2,26 @@
 
 import json
 import os
+from pathlib import Path
 
 import modal
 
 from spindle.deployments import DeploymentConfig
 
-CONFIGS_ENV = "SPINDLE_DEPLOYMENT_CONFIGS"
+CONFIGS_FILE_ENV = "SPINDLE_DEPLOYMENT_CONFIGS_FILE"
+CONFIGS_IMAGE_PATH = "/root/spindle_deployment_configs.json"
 PLATFORM_ENV = "SPINDLE_PLATFORM"
 POOL_CONFIG_ENV = "SPINDLE_POOL_DEPLOYMENT"
+FRONTEND_TIMEOUT_S = 60
 
 
 def configs_from_env():
-    data = os.environ.get(CONFIGS_ENV)
-    if not data:
+    path = os.environ.get(CONFIGS_FILE_ENV)
+    if not path:
         raise ValueError(
             "Missing deployment configs. Use spindle deploy with your Python config files."
         )
-    rows = json.loads(data)
+    rows = json.loads(Path(path).read_text())
     if not isinstance(rows, list) or not rows:
         raise ValueError("Deployment configs must be a nonempty list")
     return [DeploymentConfig.model_validate(row) for row in rows]
@@ -31,33 +34,37 @@ def platform_from_env():
     return json.loads(data)
 
 
+def _ask_frontend(frontend, name, environment, missing):
+    try:
+        call = modal.Function.from_name(
+            frontend, name, environment_name=environment
+        ).spawn()
+    except modal.exception.NotFoundError:
+        return missing
+    try:
+        return call.get(timeout=FRONTEND_TIMEOUT_S)
+    except (TimeoutError, modal.exception.TimeoutError):
+        call.cancel()
+        raise ValueError(
+            f"The deployed {frontend!r} frontend did not answer within "
+            f"{FRONTEND_TIMEOUT_S}s. If its containers fail to start "
+            f"(see `modal app logs {frontend}`), stop it with "
+            f"`modal app stop {frontend}` and deploy again."
+        ) from None
+
+
 def deployed_configs(frontend, environment=None):
     """Read the configuration carried by the currently deployed frontend."""
-    try:
-        return modal.Function.from_name(
-            frontend, "deployed_configs", environment_name=environment
-        ).remote()
-    except modal.exception.NotFoundError:
-        return []
+    return _ask_frontend(frontend, "deployed_configs", environment, [])
 
 
 def deployed_pools(frontend, environment=None):
     """Read pools owned by this frontend before updating its inference settings."""
-    try:
-        return modal.Function.from_name(
-            frontend, "deployed_pools", environment_name=environment
-        ).remote()
-    except modal.exception.NotFoundError:
-        return []
+    return _ask_frontend(frontend, "deployed_pools", environment, [])
 
 
 def deployed_platform(frontend, environment=None):
-    try:
-        return modal.Function.from_name(
-            frontend, "deployed_platform", environment_name=environment
-        ).remote()
-    except modal.exception.NotFoundError:
-        return None
+    return _ask_frontend(frontend, "deployed_platform", environment, None)
 
 
 def pool_config(definition_id):
