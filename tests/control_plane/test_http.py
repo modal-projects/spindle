@@ -6,6 +6,7 @@ import pytest
 import zstandard
 from tinker.proto.response_conv import deserialize_forward_backward_output
 
+import spindle
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane import http as control_http
 from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
@@ -252,7 +253,9 @@ def test_pending_future_returns_try_again_408() -> None:
     asyncio.run(run())
 
 
-def test_service_endpoints() -> None:
+def test_service_endpoints(monkeypatch) -> None:
+    monkeypatch.setenv("SPINDLE_COMMIT", "abc123")
+
     async def run() -> None:
         client = http_client()
         assert (await client.get("/api/v1/healthz")).json() == {"status": "ok"}
@@ -261,6 +264,8 @@ def test_service_endpoints() -> None:
             "supported_models": [
                 {"model_name": BASE_MODEL, "max_context_length": 16_384}
             ],
+            "spindle_version": spindle.__version__,
+            "spindle_commit": "abc123",
         }
         config = await client.post("/api/v1/client/config", json={})
         assert config.json()["use_pyqwest_transport"] is False
