@@ -21,7 +21,7 @@ from spindle.providers.contracts import (
 )
 from spindle.telemetry.otlp import sample_trace
 
-from .app_tags import app_tags, revision_env
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -96,7 +96,6 @@ checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
 )
 TRAINER_DEPLOYMENT_ENV = {
-    **revision_env(),
     **trainer_deployment_env(),
     CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),

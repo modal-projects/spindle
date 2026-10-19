@@ -396,10 +396,7 @@ def test_provisioner_rejects_wrong_settings_and_uses_saved_config(
     assert app.name == row.inference_app_name
     assert app.tags["_modal_source"] == "spindle"
     assert app.tags["spindle_role"] == "inference-provisioner"
-    assert (
-        app.functions["provision"][0]["env"]["SPINDLE_REVISION"]
-        == app.tags["spindle_rev"]
-    )
+
     calls = []
     monkeypatch.setattr(
         deployment_apps,

@@ -26,7 +26,7 @@ from spindle.inference.serving import (
     wait_http,
 )
 
-from .app_tags import app_tags, revision_env
+from .app_tags import app_tags
 from .deployment import trainer_deployment_env
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
@@ -344,9 +344,7 @@ def build_inference_app(deployment, platform=None, *, image=None):
     )
     inference_name = deployment.name
 
-    @app.function(
-        name="provision", image=image, serialized=True, timeout=1800, env=revision_env()
-    )
+    @app.function(name="provision", image=image, serialized=True, timeout=1800)
     def provision(config_json: str, pool_data: dict):
         saved = DeploymentConfig.model_validate_json(config_json)
         if saved.name != inference_name:

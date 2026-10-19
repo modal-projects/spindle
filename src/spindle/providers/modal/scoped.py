@@ -29,7 +29,7 @@ from spindle.inference.serving import (
 from spindle.providers.modal.scoped_pool import set_minimum
 from spindle.telemetry.otlp import sample_trace
 
-from .app_tags import app_tags, revision_env
+from .app_tags import app_tags
 from .checkpoint_storage import ModalCheckpointStorage
 from .engines import ModalEnginePlatform
 from .fft_pool import proxy_auth_headers
@@ -57,7 +57,6 @@ def control_image(*extra_packages):
             "huggingface-hub",
             *extra_packages,
         )
-        .env(revision_env())
         .add_local_python_source("spindle")
     )
 

@@ -98,15 +98,40 @@ before running a larger workload.
 
 ### App attribution
 
-Spindle-created Modal apps carry `_modal_source=spindle`, `spindle_rev`, and
-`spindle_role` tags for usage reporting. Roles distinguish frontend, trainer,
-inference, inference-provisioner, and combined scoped apps.
+Spindle-created Modal apps carry `_modal_source=spindle` and `spindle_role` tags
+for usage reporting. Roles distinguish frontend, trainer, inference,
+inference-provisioner, and combined scoped apps. No environment variables are
+needed to set these tags.
 
-The revision is the Spindle checkout's HEAD or the commit recorded by a Git-based
-package install. Provisioning containers preserve it for dynamically created
-apps. For distributions without Git metadata, set `SPINDLE_REVISION` at launch;
-otherwise the revision is `unknown`. Local uncommitted changes are not represented
-by the commit tag.
+Read the tags of a deployed app with the Modal SDK:
+
+```python
+import modal
+
+app = modal.App.lookup("spindle", environment_name="your-environment")
+print(app.get_tags())
+```
+
+To discover deployed Spindle apps in an environment with Modal 1.5, list apps and
+filter their tags (the app-list API does not offer a tag filter):
+
+```python
+import json
+import subprocess
+import sys
+
+import modal
+
+environment = "your-environment"
+rows = json.loads(subprocess.check_output([
+    sys.executable, "-m", "modal", "app", "list", "--env", environment, "--json",
+], text=True))
+for row in rows:
+    if row["state"] == "deployed":
+        app = modal.App.lookup(row["description"], environment_name=environment)
+        if app.get_tags().get("_modal_source") == "spindle":
+            print(app.app_id, row["description"])
+```
 
 ## Run a Tinker script
 
