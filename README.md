@@ -96,6 +96,18 @@ GPUs are allocated on demand upon the first training/inference requests, so the 
 [cold starts and capacity configuration](docs/full-fine-tunes.md#performance-and-behavior-considerations)
 before running a larger workload.
 
+### App attribution
+
+Spindle-created Modal apps carry `_modal_source=spindle`, `spindle_rev`, and
+`spindle_role` tags for usage reporting. Roles distinguish frontend, trainer,
+inference, inference-provisioner, and combined scoped apps.
+
+The revision is the Spindle checkout's HEAD or the commit recorded by a Git-based
+package install. Provisioning containers preserve it for dynamically created
+apps. For distributions without Git metadata, set `SPINDLE_REVISION` at launch;
+otherwise the revision is `unknown`. Local uncommitted changes are not represented
+by the commit tag.
+
 ## Run a Tinker script
 
 Any Tinker-compatible script can be run out of the box against a Spindle server just by changing the base URL and API key.

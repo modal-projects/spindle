@@ -37,7 +37,13 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
         registrations.append(kwargs)
         return server
 
-    monkeypatch.setattr(modal, "App", lambda _: child)
+    def create_app(name, *, tags):
+        assert tags["_modal_source"] == "spindle"
+        assert tags["spindle_role"] == "inference"
+        assert tags["spindle_rev"]
+        return child
+
+    monkeypatch.setattr(modal, "App", create_app)
     monkeypatch.setattr(modal.Image, "from_id", lambda _: image)
     monkeypatch.setattr(modal.Volume, "from_name", lambda *a, **k: object())
     monkeypatch.setattr(scoped, "register_sampler", register)

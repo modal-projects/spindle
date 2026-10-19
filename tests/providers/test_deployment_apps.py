@@ -37,7 +37,8 @@ def write_configs(tmp_path, rows):
 
 
 class App:
-    def __init__(self, name):
+    def __init__(self, name, *, tags):
+        self.tags = tags
         self.name = name
         self.functions = {}
         self.servers = {}
@@ -79,6 +80,7 @@ def test_trainer_declaration_and_executor_configuration(
     platform["storage"]["checkpoints"] = "test-custom-checkpoints"
     image = object()
     app, trainer = deployment_apps.build_trainer_app(row, platform, image=image)
+    assert app.tags["spindle_role"] == "trainer"
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
     assert declaration["region"] is None
@@ -129,6 +131,7 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
         )
     )
     app, server = deployment_apps.build_rollout_app(row, pool, image="test-image")
+    assert app.tags["spindle_role"] == "inference"
     settings, _ = app.servers["Server"]
     assert app.name == pool.app_name
     assert (
@@ -391,6 +394,12 @@ def test_provisioner_rejects_wrong_settings_and_uses_saved_config(
     row = deployment()
     app, provision = deployment_apps.build_inference_app(row, image="test")
     assert app.name == row.inference_app_name
+    assert app.tags["_modal_source"] == "spindle"
+    assert app.tags["spindle_role"] == "inference-provisioner"
+    assert (
+        app.functions["provision"][0]["env"]["SPINDLE_REVISION"]
+        == app.tags["spindle_rev"]
+    )
     calls = []
     monkeypatch.setattr(
         deployment_apps,

@@ -26,6 +26,7 @@ from spindle.inference.serving import (
     wait_http,
 )
 
+from .app_tags import app_tags, revision_env
 from .deployment import trainer_deployment_env
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
@@ -122,7 +123,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         platform = deployment.recipe.platform
     recipe = deployment.recipe
     trainer_name = recipe.name
-    app = modal.App(deployment.trainer_app_name)
+    app = modal.App(deployment.trainer_app_name, tags=app_tags("trainer"))
 
     env = {
         **trainer_deployment_env(),
@@ -238,7 +239,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     lora = recipe.parameterization == "lora"
     if pool.definition_id != deployment.definition_id:
         raise ValueError("pool does not match deployment")
-    app = modal.App(pool.app_name)
+    app = modal.App(pool.app_name, tags=app_tags("inference"))
     options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
     maximum = recipe.inference_max_replicas
@@ -338,10 +339,14 @@ def build_inference_app(deployment, platform=None, *, image=None):
             )
             .add_local_python_source("spindle", copy=True, ignore=ignore_config_source)
         )
-    app = modal.App(deployment.inference_app_name)
+    app = modal.App(
+        deployment.inference_app_name, tags=app_tags("inference-provisioner")
+    )
     inference_name = deployment.name
 
-    @app.function(name="provision", image=image, serialized=True, timeout=1800)
+    @app.function(
+        name="provision", image=image, serialized=True, timeout=1800, env=revision_env()
+    )
     def provision(config_json: str, pool_data: dict):
         saved = DeploymentConfig.model_validate_json(config_json)
         if saved.name != inference_name:
