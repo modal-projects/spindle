@@ -103,6 +103,21 @@ for usage reporting. Roles distinguish frontend, trainer, inference,
 inference-provisioner, and combined scoped apps. No environment variables are
 needed to set these tags.
 
+Apps also expose reporting metadata:
+
+| App role | `_modal_job_type` | `_modal_framework` |
+| --- | --- | --- |
+| Frontend | `control-plane` | omitted |
+| Trainer | `training_spindle` | recipe backend (`miles` / `megatron`) |
+| Inference provisioner | `serving` | omitted |
+| Rollout pool / pinned sampler | `serving` | `sglang` |
+| Scoped | `training_spindle` | omitted |
+
+Model-specific apps set `_modal_model_name` to the lowercased model basename
+(e.g. `Qwen/Qwen3.6-35B-A3B` becomes `qwen3.6-35b-a3b`). The frontend can serve
+multiple models, so it omits that tag. `training_spindle` avoids matching the
+Dojo report's source-independent `training` filter.
+
 Read the tags of a deployed app with the Modal SDK:
 
 ```python

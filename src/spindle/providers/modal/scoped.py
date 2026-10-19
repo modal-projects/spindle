@@ -160,7 +160,7 @@ def build_app(
             or "/assets/" + engine.model.rsplit("/", 1)[-1],
         ),
     )
-    app = modal.App(name, tags=app_tags("scoped"))
+    app = modal.App(name, tags=app_tags("scoped", model=engine.model))
     image = control_image()
     trainer_image = engine.trainer_image or default_trainer_image
     sampler_image = engine.sampler_image or default_sampler_image

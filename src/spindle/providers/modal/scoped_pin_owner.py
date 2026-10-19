@@ -108,7 +108,7 @@ async def open_pinned_app(
     model_id, version = model_and_version.rsplit(":", 1)
     child = modal.App(
         name + "-pin-" + hashlib.sha256(key.encode()).hexdigest()[:12],
-        tags=app_tags("inference"),
+        tags=app_tags("inference", model=engine.model, framework="sglang"),
     )
     server = register_sampler(
         child,
