@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import tinker
 from tinker import types
 
@@ -15,6 +16,8 @@ from spindle.providers.local import (
 )
 from spindle.replay import capture_replay
 from tests.support import TinkerStubExecutor, serve
+
+pytestmark = pytest.mark.usefixtures("sdk_garbage_collected_off_loop")
 
 
 def test_sdk_replay_roundtrip():

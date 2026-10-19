@@ -8,7 +8,7 @@ from math import isfinite, prod
 from typing import Any
 
 import numpy as np
-from tinker.proto import tinker_public_pb2 as pb
+from spindle.proto import tinker_public_pb2 as pb
 
 PROTOBUF_MEDIA_TYPE = "application/x-protobuf"
 
@@ -168,10 +168,10 @@ def encode_result(result: dict[str, Any]) -> bytes | None:
                 for j, (token, logprob) in enumerate(row or ()):
                     tokens[i, j], logprobs[i, j] = token, logprob
             message.topk_prompt_logprobs.CopyFrom(
-                pb.TopkPromptLogprobs(
+                pb.TopkLogprobs(
                     token_ids=tokens.tobytes(),
                     logprobs=logprobs.tobytes(),
-                    prompt_length=len(rows),
+                    length=len(rows),
                     k=k,
                 )
             )
