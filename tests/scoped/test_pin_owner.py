@@ -15,7 +15,7 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
     from spindle.providers.modal import scoped
     from spindle.providers.modal.scoped_pin_owner import open_pinned_app
 
-    lifecycle, registrations = [], []
+    lifecycle, registrations, app_tags = [], [], []
 
     @asynccontextmanager
     async def run():
@@ -37,7 +37,11 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
         registrations.append(kwargs)
         return server
 
-    monkeypatch.setattr(modal, "App", lambda _: child)
+    def app(_, tags):
+        app_tags.append(tags)
+        return child
+
+    monkeypatch.setattr(modal, "App", app)
     monkeypatch.setattr(modal.Image, "from_id", lambda _: image)
     monkeypatch.setattr(modal.Volume, "from_name", lambda *a, **k: object())
     monkeypatch.setattr(scoped, "register_sampler", register)
@@ -45,7 +49,7 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
     async def check():
         async with open_pinned_app(
             f"pinned:{model_id}:7",
-            engine=object(),
+            engine=SimpleNamespace(model="org/Model-A"),
             name="test",
             image_id="im-test",
             registry_name="registry",
@@ -62,6 +66,8 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
     assert registrations[0]["model_id"] == model_id
     assert registrations[0]["version"] == 7
     assert lifecycle == ["opened", "closed"]
+    assert app_tags[0]["_modal_source"] == "spindle"
+    assert app_tags[0]["_modal_model_name"] == "model-a"
 
 
 async def until(predicate):

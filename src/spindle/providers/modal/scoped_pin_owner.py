@@ -99,12 +99,16 @@ async def open_pinned_app(
 
     import modal
 
+    from .app_tags import app_tags
     from .scoped import register_sampler
 
     # SDK checkpoint-created models use IDs such as "<session>:train:1".
     _, model_and_version = key.split(":", 1)
     model_id, version = model_and_version.rsplit(":", 1)
-    child = modal.App(name + "-pin-" + hashlib.sha256(key.encode()).hexdigest()[:12])
+    child = modal.App(
+        name + "-pin-" + hashlib.sha256(key.encode()).hexdigest()[:12],
+        tags=app_tags("serving", framework="sglang", model=engine.model),
+    )
     server = register_sampler(
         child,
         engine=engine,

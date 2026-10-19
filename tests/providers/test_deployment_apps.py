@@ -438,7 +438,7 @@ def test_gpu_type_lists_become_modal_fallbacks(builders):
     assert pool_app.servers["Server"][0]["gpu"] == ["H200:2", "B200:2"]
 
 
-def test_deployed_apps_carry_version_tags(builders, monkeypatch):
+def test_deployed_apps_carry_source_role_model_and_version_tags(builders, monkeypatch):
     monkeypatch.setenv("SPINDLE_COMMIT", "abc123")
     row = deployment()
     apps = [
@@ -448,8 +448,22 @@ def test_deployed_apps_carry_version_tags(builders, monkeypatch):
             row, LoraPoolSpec(row.definition_id), image="test"
         )[0],
     ]
-    expected = {"spindle_version": spindle.__version__, "spindle_commit": "abc123"}
-    assert [app.tags for app in apps] == [expected] * 3
+    common = {
+        "_modal_source": "spindle",
+        "_modal_model_name": row.recipe.model.rsplit("/", 1)[-1].lower(),
+        "spindle_version": spindle.__version__,
+        "spindle_commit": "abc123",
+    }
+    assert [app.tags for app in apps] == [
+        {
+            **common,
+            "_modal_job_type": "training",
+            "_modal_framework": row.recipe.backend,
+        },
+        {**common, "_modal_job_type": "serving"},
+        {**common, "_modal_job_type": "serving", "_modal_framework": "sglang"},
+    ]
+    assert all(len(app.tags) <= 8 for app in apps)
 
 
 def test_gpu_type_lists_survive_saved_config_round_trip():

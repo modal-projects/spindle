@@ -20,8 +20,9 @@ from spindle.providers.contracts import (
     SamplingTask,
 )
 from spindle.telemetry.otlp import sample_trace
-from spindle.version import COMMIT_ENV, source_commit, version_tags
+from spindle.version import COMMIT_ENV, source_commit
 
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -101,7 +102,7 @@ TRAINER_DEPLOYMENT_ENV = {
     "SPINDLE_APP_NAME": APP_NAME,
     COMMIT_ENV: source_commit() or "",
 }
-app = modal.App(APP_NAME, tags=version_tags())
+app = modal.App(APP_NAME, tags=app_tags("control-plane"))
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
