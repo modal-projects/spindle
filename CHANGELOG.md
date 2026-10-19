@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- Every Modal app Spindle creates is tagged `_modal_source=spindle`, with `_modal_job_type`, `_modal_framework`, and `_modal_model_name` describing its role, engine, and model (#98).
+
 ## 0.2.0 - 2026-10-18
 
 The first versioned release. Deployments made before it report `0.1.0`.
