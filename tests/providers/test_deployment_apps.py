@@ -118,32 +118,12 @@ def test_trainer_declaration_and_executor_configuration(
 
 def test_model_placement_enables_native_catalog_only_for_lora_pool(builders):
     row = deployment("qwen35-9b-lora-16k")
-    row.recipe.inference_lora_routing = "joint"
+    row.recipe.inference_lora_routing = "cache_wait"
     app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test-image"
     )
     settings, _ = app.servers["Server"]
-    assert settings["env"]["SGLANG_SPINDLE_MODEL_ROUTING"] == "1"
-
-
-@pytest.mark.parametrize("optimized", [False, True])
-def test_split_k_image_follows_pool_configuration(builders, monkeypatch, optimized):
-    row = deployment("qwen35-9b-lora-16k")
-    row.recipe.inference_env = (
-        {"SGLANG_ENABLE_LORA_CSGMV_SPLIT_K": "1"} if optimized else {}
-    )
-    baseline, patched = object(), object()
-    monkeypatch.setattr(deployment_apps, "image_for", lambda backend: baseline)
-    monkeypatch.setattr(deployment_apps, "split_k_image", patched)
-    app, _ = deployment_apps.build_rollout_app(row, LoraPoolSpec(row.definition_id))
-    settings, _ = app.servers["Server"]
-    assert settings["image"] is (patched if optimized else baseline)
-    override = object()
-    app, _ = deployment_apps.build_rollout_app(
-        row, LoraPoolSpec(row.definition_id), image=override
-    )
-    settings, _ = app.servers["Server"]
-    assert settings["image"] is override
+    assert settings["env"]["SGLANG_SPINDLE_ROUTING_OBSERVATIONS"] == "1"
 
 
 @pytest.mark.parametrize("kind", ["lora", "base", "latest", "pinned"])
@@ -169,7 +149,7 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     assert settings["target_concurrency"] == 16
     assert "compute_region" not in settings
     assert "routing_region" not in settings
-    assert "SGLANG_SPINDLE_MODEL_ROUTING" not in settings["env"]
+    assert "SGLANG_SPINDLE_ROUTING_OBSERVATIONS" not in settings["env"]
 
     calls, commands, stops = [], [], []
     process = object()

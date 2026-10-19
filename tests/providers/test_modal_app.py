@@ -42,7 +42,7 @@ def test_definitions_come_only_from_the_configured_records() -> None:
     }
 
 
-@pytest.mark.parametrize("policy", ["affinity", "joint"])
+@pytest.mark.parametrize("policy", ["affinity", "cache_wait"])
 def test_lora_sampling_shares_router_across_models_only_when_enabled(
     monkeypatch, policy
 ):
@@ -67,9 +67,10 @@ def test_lora_sampling_shares_router_across_models_only_when_enabled(
             )
 
     asyncio.run(scenario())
-    assert factory.call_count == (1 if policy == "joint" else 0)
+    assert factory.call_count == (1 if policy == "cache_wait" else 0)
     assert all(
-        call.kwargs["router"] is (factory.return_value if policy == "joint" else None)
+        call.kwargs["router"]
+        is (factory.return_value if policy == "cache_wait" else None)
         for call in sample.await_args_list
     )
 

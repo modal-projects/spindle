@@ -7,7 +7,6 @@ Enable explicitly with SGLANG_SPINDLE_ROUTING_OBSERVATIONS=1.
 """
 
 from array import array
-from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -25,38 +24,6 @@ writer = None
 last_snapshot = 0.0
 sequence = 0
 hashes = {}
-counters = Counter()
-seen_requests = set()
-
-
-def loaded(before, after, seconds):
-    counters["gpu_loads"] += len((after - before) - {None})
-    counters["gpu_evictions"] += len((before - after) - {None})
-    if (after - before) - {None}:
-        counters["load_host_seconds"] += seconds
-
-
-def batch(batch, manager):
-    if batch.forward_mode.is_extend():
-        resident = manager.memory_pool.uid_to_buffer_id
-        for req in batch.reqs:
-            if req.rid not in seen_requests:
-                seen_requests.add(req.rid)
-                if req.lora_id is None:
-                    counters["base_request_admissions"] += 1
-                    continue
-                counters[
-                    "request_lora_hits"
-                    if req.lora_id in resident
-                    else "request_lora_misses"
-                ] += 1
-    if batch.forward_mode.is_decode():
-        adapters = Counter(r.lora_id for r in batch.reqs)
-        counters["decode_steps"] += 1
-        counters["decode_batch_sequences"] += len(batch.reqs)
-        counters["decode_batch_distinct_adapters"] += len(adapters)
-        counters["decode_batch_dominant_sequences"] += max(adapters.values(), default=0)
-        counters["decode_batch_size_" + str(len(batch.reqs))] += 1
 
 
 class PrefixCatalog:
@@ -287,7 +254,6 @@ def snapshot(scheduler, running_batch, last_batch):
         ],
         snapshot_seconds=time.monotonic() - now,
         cache_kind=type(scheduler.tree_cache).__name__,
-        counters=dict(counters),
         running_requests=len(running_batch.reqs) if running_batch is not None else 0,
         waiting_requests=len(scheduler.waiting_queue),
     )

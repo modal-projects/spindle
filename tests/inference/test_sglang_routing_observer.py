@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from collections import Counter
 
 from spindle.inference import sglang_routing_observer as observer
 from spindle.inference.sglang_routing_observer import rust_prefixes
@@ -52,32 +51,6 @@ def test_rust_observation_hashes_across_unaligned_node_splits():
     ]
     expected = token_prefixes("model/7", list(range(129)))[-1][0]
     assert rust_prefixes(cache(rows), {"uid": "model/7"}) == [expected]
-
-
-def test_lora_admissions_exclude_base_probes_and_count_chunked_requests_once(
-    monkeypatch,
-):
-    monkeypatch.setattr(observer, "counters", Counter())
-    monkeypatch.setattr(observer, "seen_requests", set())
-    batch = SimpleNamespace(
-        forward_mode=SimpleNamespace(is_extend=lambda: True, is_decode=lambda: False),
-        reqs=[
-            SimpleNamespace(rid="probe", lora_id=None),
-            SimpleNamespace(rid="first", lora_id="hot"),
-            SimpleNamespace(rid="second", lora_id="cold"),
-        ],
-    )
-    manager = SimpleNamespace(
-        memory_pool=SimpleNamespace(uid_to_buffer_id={None: 0, "hot": 1})
-    )
-    observer.batch(batch, manager)
-    manager.memory_pool.uid_to_buffer_id["cold"] = 2
-    observer.batch(batch, manager)
-    assert observer.counters == {
-        "base_request_admissions": 1,
-        "request_lora_hits": 1,
-        "request_lora_misses": 1,
-    }
 
 
 def test_catalog_preserves_structural_hybrid_ancestry_across_unaligned_splits():

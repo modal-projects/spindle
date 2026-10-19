@@ -7,7 +7,7 @@ import json
 import os
 import time
 import uuid
-from collections import Counter, deque
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -43,8 +43,6 @@ def create_app(
         app.state.adapter_resolutions = {}
         app.state.routing_requests = {}
         app.state.request_work = {}
-        app.state.measurements = Counter()
-        app.state.completions = deque(maxlen=4096)
         app.state.routing_catalog = {}
         app.state.routing_read_at = 0.0
         try:
@@ -110,16 +108,6 @@ def create_app(
             "work": work,
         }
 
-    @app.get("/benchmark-state")
-    async def benchmark_state(after: float = 0):
-        state = await routing_state()
-        return {
-            **state,
-            "gpu_lora": app.state.routing_catalog.get("counters", {}),
-            "measurements": dict(app.state.measurements),
-            "completions": [r for r in app.state.completions if r["finished"] > after],
-        }
-
     @app.get("/health")
     async def health() -> Response:
         response = await app.state.client.get("/health")
@@ -141,65 +129,16 @@ def create_app(
                 if run_id is not None and constraint.exact_version is not None
                 else payload.get("lora_path", "base")
             )
-        start = time.time()
-        app.state.request_work[rid] = dict(
-            rid=rid,
-            adapter=app.state.routing_requests.get(rid, "base"),
-            prefill_tokens=len(payload.get("input_ids", ())),
-            decode_tokens=payload.get("sampling_params", {}).get("max_new_tokens", 1),
-        )
-        app.state.measurements["arrivals"] += 1
-        app.state.measurements[
-            "route_" + request.headers.get("x-spindle-benchmark-route", "unknown")
-        ] += 1
+            app.state.request_work[rid] = dict(
+                rid=rid,
+                adapter=app.state.routing_requests.get(rid, "base"),
+                prefill_tokens=len(payload.get("input_ids", ())),
+                decode_tokens=payload.get("sampling_params", {}).get(
+                    "max_new_tokens", 1
+                ),
+            )
         try:
             response = await generate_response(request, payload)
-            app.state.measurements["http_" + str(response.status_code)] += 1
-            if response.status_code == 200:
-                body = json.loads(response.body)
-                meta = body.get("meta_info", {})
-                record = dict(
-                    rid=rid,
-                    adapter=app.state.routing_requests.get(rid),
-                    started=start,
-                    finished=time.time(),
-                    prompt_tokens=len(payload.get("input_ids", ())),
-                    output_tokens=meta.get("completion_tokens", 0),
-                    cached_tokens=meta.get("cached_tokens", 0),
-                    backend={
-                        k: v for k, v in meta.items() if isinstance(v, (int, float))
-                    },
-                )
-                record["group"] = request.headers.get("x-spindle-benchmark-group")
-                # Diagnostics must never turn a successful generation into an error.
-                try:
-                    decision = json.loads(
-                        request.headers.get("x-spindle-benchmark-decision", "null")
-                    )
-                    if isinstance(decision, dict):
-                        record["routing"] = {
-                            k: v
-                            for k, v in decision.items()
-                            if k
-                            in {
-                                "policy",
-                                "reason",
-                                "available_replicas",
-                                "best_cached_tokens",
-                                "cached_tokens",
-                                "wait_s",
-                                "backlog_seconds",
-                                "prefill_seconds",
-                                "adapter_seconds",
-                            }
-                            and isinstance(v, (str, int, float))
-                        }
-                except (ValueError, TypeError):
-                    pass
-                app.state.completions.append(record)
-                for key in ("prompt_tokens", "output_tokens", "cached_tokens"):
-                    app.state.measurements[key] += record[key]
-                app.state.measurements["completed"] += 1
             response.headers["x-spindle-replica"] = os.environ.get(
                 "MODAL_TASK_ID", "local"
             )
@@ -305,7 +244,6 @@ async def _prepare_adapter(
                     if resolved.identity in app.state.registered_adapters:
                         return resolved, None
                     path = await asyncio.to_thread(bulletin.resolve, resolved)
-                registration_start = time.monotonic()
                 response = await app.state.client.post(
                     "/load_lora_adapter",
                     json={
@@ -316,10 +254,6 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
-                app.state.measurements["adapter_registrations"] += 1
-                app.state.measurements["adapter_registration_seconds"] += (
-                    time.monotonic() - registration_start
-                )
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 

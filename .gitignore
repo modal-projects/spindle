@@ -11,3 +11,4 @@ scripts/results/
 
 /rust/router/target/
 /rust/router/dist/
+/src/spindle_router*.so

@@ -57,7 +57,6 @@ class Router:
                     snapshot = await asyncio.to_thread(
                         Snapshot,
                         json.dumps(rows),
-                        self.policy in {"lora_radix", "cache_aware", "cache_wait"},
                     )
                     self.scheduler.install_snapshot(snapshot)
                 except Exception:

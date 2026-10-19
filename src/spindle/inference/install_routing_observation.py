@@ -1,4 +1,4 @@
-"""Read-only native cache export and CPU counters for all three experiment arms."""
+"""Install read-only native cache export for LoRA routing."""
 
 from pathlib import Path
 import sys
@@ -15,7 +15,7 @@ def install(root, spindle):
     replace(
         rust / "unified_tree_core.rs",
         "    pub fn root_node_handle(&self, _extra_key: Option<&str>) -> NodeId {",
-        """    // Benchmark observation only: no access updates, splits, or tensor reads.
+        """    // Read-only routing observation: no access updates, splits, or tensor reads.
     pub fn routing_snapshot(&self) -> Vec<(usize, usize, Option<String>, Vec<i64>, bool, i64)> {
         self.collect_all_nodes_().into_iter().filter_map(|idx| {
             let node = self.arena.node(idx);
@@ -45,29 +45,7 @@ def install(root, spindle):
     from spindle.inference.sglang_routing_observer import install as observer_install
 
     observer_install(engine, modern=True)
-    manager = engine / "srt/lora/lora_manager.py"
-    replace(
-        manager,
-        "import logging\n",
-        "import logging\nimport time\nfrom sglang.srt import spindle_routing_observer as routing_observer\n",
-    )
-    replace(
-        manager,
-        "        self.memory_pool.prepare_lora_batch(\n",
-        "        routing_before = set(self.memory_pool.uid_to_buffer_id)\n        routing_started = time.perf_counter()\n        self.memory_pool.prepare_lora_batch(\n",
-    )
-    replace(
-        manager,
-        "        if new_uids:\n",
-        "        routing_observer.loaded(routing_before, set(self.memory_pool.uid_to_buffer_id), time.perf_counter() - routing_started)\n        if new_uids:\n",
-    )
-    scheduler = engine / "srt/managers/scheduler.py"
-    replace(
-        scheduler,
-        '        """Run a batch."""\n',
-        '        """Run a batch."""\n        if self.enable_lora:\n            spindle_routing_observer.batch(batch, self.tp_worker.model_runner.lora_manager)\n',
-    )
 
 
 if __name__ == "__main__":
-    install(Path("/sgl-workspace/sglang"), Path("/opt/rl-measurement/spindle"))
+    install(Path("/sgl-workspace/sglang"), Path("/opt/spindle-routing/spindle"))

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import hashlib
 import random
 import socket
@@ -37,9 +36,7 @@ GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 
 
 def keepalive_transport() -> httpx.AsyncHTTPTransport:
-    return httpx.AsyncHTTPTransport(
-        socket_options=list(TCP_KEEPALIVE_OPTIONS),
-    )
+    return httpx.AsyncHTTPTransport(socket_options=list(TCP_KEEPALIVE_OPTIONS))
 
 
 async def sample_task(
@@ -359,18 +356,6 @@ async def _sample_one(
                     prefill_seconds=decision.prefill_seconds,
                     adapter_seconds=decision.adapter_seconds,
                 ),
-            )
-        headers["x-spindle-benchmark-route"] = (
-            router.policy if router is not None else "flash"
-        )
-        headers["x-spindle-benchmark-group"] = str(request_id)
-        if router is not None:
-            headers["x-spindle-benchmark-decision"] = json.dumps(
-                {
-                    **observation.attrs["routing"],
-                    "wait_s": routing_wait,
-                },
-                separators=(",", ":"),
             )
         body["rid"] = observation.id
         attempt_result = observation.attrs

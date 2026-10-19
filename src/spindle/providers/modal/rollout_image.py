@@ -29,14 +29,8 @@ base_image = (
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")
     .add_local_file(
-        Path(__file__).resolve().parents[2] / "inference/sglang_adapter_observer.py",
-        "/opt/spindle-adapter-observer.py",
-        copy=True,
-    )
-    .run_commands("python /opt/spindle-adapter-observer.py")
-    .add_local_file(
         Path(__file__).resolve().parents[2] / "inference/sglang_routing_observer.py",
-        "/opt/rl-measurement/spindle/inference/sglang_routing_observer.py",
+        "/opt/spindle-routing/spindle/inference/sglang_routing_observer.py",
         copy=True,
     )
     .add_local_file(
@@ -61,15 +55,4 @@ base_image = (
     )
 )
 
-# Benchmark-only backport of upstream PR41951 onto the identical pinned fork.
-# The original image above remains the no-optimization control.
-split_k_base_image = base_image.add_local_file(
-    Path(__file__).resolve().parents[2] / "inference/install_split_k.py",
-    "/opt/install-split-k.py",
-    copy=True,
-).run_commands("python /opt/install-split-k.py")
-
 image = base_image.add_local_python_source("spindle", ignore=ignore_config_source)
-split_k_image = split_k_base_image.add_local_python_source(
-    "spindle", ignore=ignore_config_source
-)

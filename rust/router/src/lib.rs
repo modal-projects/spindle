@@ -1,9 +1,7 @@
 //! One scheduler per frontend process and inference pool. No network I/O here.
 mod cache_wait;
-mod policy;
 mod radix;
 
-use policy::{CacheAware, Joint, LeastLoad, LoraRadix, Policy};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde::Deserialize;
@@ -15,7 +13,6 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 #[derive(Deserialize)]
 struct Work {
     age_seconds: f64,
-    prefixes: HashSet<String>,
     #[serde(default)]
     prefix_nodes: Vec<radix::Row>,
     cpu_adapters: HashSet<String>,
@@ -39,7 +36,6 @@ pub struct Request {
     affinity: String,
     prompt_tokens: usize,
     output_tokens: usize,
-    prefixes: Vec<(String, usize)>,
     hashes: Vec<u128>,
     preferred: Mutex<Option<String>>,
     pending_prefix: Mutex<Option<PendingPrefix>>,
@@ -67,12 +63,12 @@ impl Request {
         let mut hasher = Xxh3::new();
         hasher.update(adapter.as_bytes());
         hasher.update(&[0]);
-        let mut prefixes = Vec::new();
+        let mut hashes = Vec::new();
         for (i, token) in tokens.iter().enumerate() {
             hasher.update(&token.to_le_bytes());
             // The final prompt token must be evaluated to obtain logits.
             if (i + 1) % 64 == 0 && i + 1 < tokens.len() {
-                prefixes.push((format!("{:032x}", hasher.digest128()), i + 1));
+                hashes.push(hasher.digest128());
             }
         }
         Ok(Self {
@@ -80,11 +76,7 @@ impl Request {
             affinity,
             prompt_tokens: tokens.len(),
             output_tokens,
-            hashes: prefixes
-                .iter()
-                .map(|(h, _)| u128::from_str_radix(h, 16).unwrap())
-                .collect(),
-            prefixes,
+            hashes,
             preferred: Mutex::new(None),
             pending_prefix: Mutex::new(None),
         })
@@ -149,7 +141,7 @@ pub struct Snapshot {
     observed: Instant,
 }
 impl Snapshot {
-    fn build(json: &str, use_radix: bool) -> PyResult<Self> {
+    fn build(json: &str) -> PyResult<Self> {
         let observed = Instant::now();
         let replicas: Vec<Replica> = serde_json::from_str(json)
             .map_err(|e| PyValueError::new_err(format!("invalid routing snapshot: {e}")))?;
@@ -162,12 +154,10 @@ impl Snapshot {
             ));
         }
         let mut radix = radix::Index::default();
-        if use_radix {
-            for (i, r) in replicas.iter().enumerate() {
-                radix
-                    .add(i, &r.work.prefix_nodes)
-                    .map_err(PyValueError::new_err)?;
-            }
+        for (i, r) in replicas.iter().enumerate() {
+            radix
+                .add(i, &r.work.prefix_nodes)
+                .map_err(PyValueError::new_err)?;
         }
         Ok(Self {
             replicas: Arc::new(replicas),
@@ -179,18 +169,16 @@ impl Snapshot {
 #[pymethods]
 impl Snapshot {
     #[new]
-    fn new(py: Python<'_>, json: String, use_radix: bool) -> PyResult<Self> {
-        py.detach(move || Self::build(&json, use_radix))
+    fn new(py: Python<'_>, json: String) -> PyResult<Self> {
+        py.detach(move || Self::build(&json))
     }
 }
 
 #[pyclass]
 pub struct Router {
-    policy: Box<dyn Policy>,
     replicas: Arc<Vec<Replica>>,
     radix: Arc<radix::Index>,
-    use_radix: bool,
-    wait_policy: Option<cache_wait::CacheWait>,
+    wait_policy: cache_wait::CacheWait,
     reservations: HashMap<String, Reservation>,
     busy_until: HashMap<String, f64>,
     failed_until: HashMap<String, f64>,
@@ -205,6 +193,7 @@ pub struct Router {
 #[pymethods]
 impl Router {
     #[new]
+    #[allow(clippy::too_many_arguments)] // Flat Python configuration boundary.
     #[pyo3(signature = (policy, capacity, prefill_rate, decode_rate, gpu_load_seconds, registration_seconds, balance_absolute=4, balance_relative=1.25, cache_threshold=0.5))]
     fn new(
         policy: &str,
@@ -217,7 +206,9 @@ impl Router {
         balance_relative: f64,
         cache_threshold: f64,
     ) -> PyResult<Self> {
-        let use_radix = matches!(policy, "lora_radix" | "cache_aware" | "cache_wait");
+        if policy != "cache_wait" {
+            return Err(PyValueError::new_err("unknown routing policy"));
+        }
         if !balance_relative.is_finite() || balance_relative < 1.0 {
             return Err(PyValueError::new_err(
                 "balance_relative must be finite and >= 1",
@@ -228,25 +219,10 @@ impl Router {
                 "cache_threshold must be between 0 and 1",
             ));
         }
-        let wait_policy = (policy == "cache_wait").then_some(cache_wait::CacheWait {
+        let wait_policy = cache_wait::CacheWait {
             absolute: balance_absolute,
             relative: balance_relative,
             threshold: cache_threshold,
-        });
-        let policy: Box<dyn Policy> = match policy {
-            "joint" => Box::new(Joint),
-            "least_load" => Box::new(LeastLoad { sticky: true }),
-            "load_balanced" => Box::new(LeastLoad { sticky: false }),
-            "lora_radix" => Box::new(LoraRadix {
-                absolute: balance_absolute,
-                relative: balance_relative,
-            }),
-            "cache_aware" | "cache_wait" => Box::new(CacheAware {
-                absolute: balance_absolute,
-                relative: balance_relative,
-                cache_threshold,
-            }),
-            _ => return Err(PyValueError::new_err("unknown routing policy")),
         };
         if capacity == 0
             || [prefill_rate, decode_rate]
@@ -259,10 +235,8 @@ impl Router {
             return Err(PyValueError::new_err("invalid capacity or service rates"));
         }
         Ok(Self {
-            policy,
             replicas: Arc::new(vec![]),
             radix: Arc::new(radix::Index::default()),
-            use_radix,
             wait_policy,
             reservations: HashMap::new(),
             busy_until: HashMap::new(),
@@ -279,7 +253,7 @@ impl Router {
 
     /// Replace a complete observation, not an incremental request-path lookup.
     fn update_snapshot(&mut self, json: &str) -> PyResult<()> {
-        let snapshot = Snapshot::build(json, self.use_radix)?;
+        let snapshot = Snapshot::build(json)?;
         self.install_snapshot(&snapshot);
         Ok(())
     }
@@ -309,7 +283,6 @@ impl Router {
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
         let mut candidates = Vec::new();
-        let mut max_active = 0;
         let hits = self
             .radix
             .matches(&request.adapter, &request.hashes, self.replicas.len());
@@ -337,17 +310,7 @@ impl Router {
                 .map(|(_, r)| r)
                 .collect();
             let active = replica.active + unobserved.len();
-            max_active = max_active.max(active);
-            let hit = if self.use_radix {
-                hits[i]
-            } else {
-                request
-                    .prefixes
-                    .iter()
-                    .rev()
-                    .find(|(hash, _)| w.prefixes.contains(hash))
-                    .map_or(0, |(_, n)| *n)
-            };
+            let hit = hits[i];
             let mut pending = w.pending_adapters.clone();
             for r in &unobserved {
                 pending.insert(r.adapter.clone());
@@ -404,8 +367,9 @@ impl Router {
             .collect();
         let available = candidates.len();
         let best_cached = all.iter().map(|c| c.cached_tokens).max().unwrap_or(0);
-        let mut reason = "policy";
-        let selected = if let Some(policy) = &self.wait_policy {
+        let reason;
+        let selected = {
+            let policy = &self.wait_policy;
             let pending = request.pending_prefix.lock().unwrap();
             let pending = pending
                 .as_ref()
@@ -432,9 +396,6 @@ impl Router {
                     index
                 }
             }
-        } else {
-            self.policy
-                .select(&candidates, max_active, request.prompt_tokens)
         };
         let Some(selected) = selected else {
             return Ok(Decision::wait(if fresh { "wait" } else { "unavailable" }));
@@ -443,7 +404,7 @@ impl Router {
         let i = c.replica_index;
         let replica = &self.replicas[i];
         *request.preferred.lock().unwrap() = Some(replica.replica.clone());
-        if self.wait_policy.is_some() {
+        {
             let mut pending = request.pending_prefix.lock().unwrap();
             // One leader per live group; retries may replace a failed leader.
             if pending
@@ -532,55 +493,8 @@ mod tests {
             "pending_adapters":[],"request_ids":[],"prefill_tokens":0,"decode_tokens":0}})
     }
     #[test]
-    fn joint_prices_kv_and_lora_together() {
-        let mut r = router("joint", 2);
-        let q = request("m/v1");
-        // A hot adapter saves 1.1s, exceeding 0.96s of cache reuse on a cold host.
-        r.update_snapshot(
-            &json!([
-                replica("hot", 0, vec!["m/v1"], vec![]),
-                replica(
-                    "cache",
-                    0,
-                    vec![],
-                    q.prefixes.iter().map(|p| p.0.clone()).collect()
-                )
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            r.select_destination(&q, "1".into(), 0.0)
-                .unwrap()
-                .replica
-                .as_deref(),
-            Some("hot")
-        );
-        let q = request("m/v1");
-        r.update_snapshot(
-            &json!([
-                replica("hot", 0, vec!["m/v1"], vec![]),
-                replica(
-                    "cache",
-                    0,
-                    vec!["m/v1"],
-                    q.prefixes.iter().map(|p| p.0.clone()).collect()
-                )
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            r.select_destination(&q, "2".into(), 0.0)
-                .unwrap()
-                .replica
-                .as_deref(),
-            Some("cache")
-        );
-    }
-    #[test]
     fn reservations_bound_admission_and_busy_is_not_health_failure() {
-        let mut r = router("joint", 1);
+        let mut r = router("cache_wait", 1);
         let q = request("m/v1");
         r.update_snapshot(&json!([replica("a", 0, vec![], vec![])]).to_string())
             .unwrap();
@@ -601,7 +515,7 @@ mod tests {
         );
         r.busy_until.clear();
         assert_eq!(
-            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "2".into(), 2.01).unwrap().status,
             "route"
         );
         r.complete("2", "cancelled").unwrap();
@@ -609,7 +523,7 @@ mod tests {
     }
     #[test]
     fn snapshot_does_not_double_count_our_request() {
-        let mut r = router("least_load", 2);
+        let mut r = router("cache_wait", 2);
         let q = request("m/v1");
         let mut a = replica("a", 0, vec![], vec![]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
@@ -618,31 +532,13 @@ mod tests {
         a["work"]["request_ids"] = json!(["1"]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "2".into(), 2.01).unwrap().status,
             "route"
         );
     }
     #[test]
-    fn groups_reuse_a_destination_but_split_when_full() {
-        let mut r = router("least_load", 2);
-        let q = request("m/v1");
-        r.update_snapshot(
-            &json!([
-                replica("a", 0, vec![], vec![]),
-                replica("b", 0, vec![], vec![])
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        let one = r.select_destination(&q, "1".into(), 0.0).unwrap();
-        let two = r.select_destination(&q, "2".into(), 0.0).unwrap();
-        let three = r.select_destination(&q, "3".into(), 0.0).unwrap();
-        assert_eq!(one.replica, two.replica);
-        assert_ne!(one.replica, three.replica);
-    }
-    #[test]
     fn stale_or_missing_observations_never_route() {
-        let mut r = router("joint", 1);
+        let mut r = router("cache_wait", 1);
         let q = request("m/v1");
         assert_eq!(
             r.select_destination(&q, "1".into(), 0.0).unwrap().status,
@@ -660,7 +556,7 @@ mod tests {
     fn adapter_versions_have_distinct_prefixes() {
         let a = request("m/v1");
         let b = request("m/v2");
-        assert_ne!(a.prefixes, b.prefixes);
-        assert_eq!(a.prefixes.last().unwrap().1, 960);
+        assert_ne!(a.hashes, b.hashes);
+        assert_eq!(a.hashes.len() * 64, 960);
     }
 }

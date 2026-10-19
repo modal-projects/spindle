@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -295,28 +294,7 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
 async def execute_sample(task: dict) -> dict:
     stats: dict = {}
     with sample_trace(task, stats):
-        result = await _execute_sample(task, stats)
-    if (
-        module_for(str(task["engine_definition_id"])).recipe.inference_env.get(
-            "SGLANG_SPINDLE_ROUTING_OBSERVATIONS"
-        )
-        == "1"
-    ):
-        print(
-            json.dumps(
-                {
-                    "event": "benchmark_sample",
-                    "request_id": task["request_id"],
-                    "model_id": task.get("model_id"),
-                    "version": task.get("publish_version"),
-                    "accepted_at": task.get("accepted_at"),
-                    "completed_at": time.time(),
-                    **stats,
-                }
-            ),
-            flush=True,
-        )
-    return result
+        return await _execute_sample(task, stats)
 
 
 async def _execute_sample(task: dict, stats: dict) -> dict:
@@ -335,29 +313,10 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         policy = definition.recipe.inference_lora_routing
-        if policy not in {
-            "affinity",
-            "joint",
-            "least_load",
-            "load_balanced",
-            "lora_radix",
-            "cache_aware",
-            "cache_wait",
-        }:
+        if policy not in {"affinity", "cache_wait"}:
             raise ValueError(f"unknown LoRA routing policy: {policy}")
         router = None
-        if (
-            policy
-            in {
-                "joint",
-                "least_load",
-                "load_balanced",
-                "lora_radix",
-                "cache_aware",
-                "cache_wait",
-            }
-            and task.get("model_id") is not None
-        ):
+        if policy == "cache_wait" and task.get("model_id") is not None:
             if spec.app_name not in _routers:
                 _routers[spec.app_name] = create_router(
                     spec.app_name,

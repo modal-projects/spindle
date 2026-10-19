@@ -2,8 +2,7 @@
 use crate::{Candidate, PendingPrefix, Replica, Request};
 use std::cmp::Reverse;
 
-// Experimental caps: one observer period plus polling/transport grace, not a
-// claim that waiting two seconds is profitable for every workload.
+// Bound affinity delays to one observer period plus polling/transport grace.
 const PREFIX_GRACE: f64 = 2.0;
 const MAX_CACHE_WAIT: f64 = 2.0;
 
