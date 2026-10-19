@@ -143,9 +143,10 @@ def test_backend_read_timeout_fences_engine() -> None:
         ),
     ),
 )
-def test_optim_step_rejects_non_adam_params(payload, message) -> None:
+def test_optim_step_rejects_non_adam_params(payload, message, caplog) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         parse_operation_payload(OperationKind.OPTIM_STEP, payload)
+    assert "rejected unsupported optimizer: dimuon" in caplog.text
 
 
 def test_backend_batches_cross_http() -> None:
