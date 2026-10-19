@@ -340,6 +340,9 @@ def create_control_plane_app(
         if body.optimizer_config is not None:
             family = body.optimizer_config.get("type")
             if family != "adamw":
+                logging.getLogger(__name__).warning(
+                    "rejected unsupported optimizer: %s", family
+                )
                 raise ValueError(f"optimizer family {family} is not supported")
         if body.parameterization is None:
             parameterization: Parameterization | None = (

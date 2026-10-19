@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any, TypeAlias
 
@@ -15,6 +16,8 @@ from tinker.types.forward_backward_input import ForwardBackwardInput
 from spindle.backends.contract import LossFn, ModelSpec
 
 from .api import OperationKind
+
+log = logging.getLogger(__name__)
 
 
 class ForwardBackwardInputModel(TinkerForwardBackwardInputModel):
@@ -166,6 +169,7 @@ def _reject_non_adam_params(raw: Mapping[str, Any]) -> None:
             if isinstance(optimizer_params, Mapping)
             else None
         )
+        log.warning("rejected unsupported optimizer: %s", family or "unknown")
         raise ValueError(
             f"optimizer family {family or 'unknown'} is not supported; "
             "optim_step accepts only adam_params"
@@ -177,6 +181,7 @@ def _reject_non_adam_params(raw: Mapping[str, Any]) -> None:
             if key.endswith("_params") and value is not None
         )
         if other:
+            log.warning("rejected unsupported optimizer: %s", ",".join(other))
             raise ValueError(
                 f"optim_step parameters {other} are not supported; "
                 "optim_step accepts only adam_params"
