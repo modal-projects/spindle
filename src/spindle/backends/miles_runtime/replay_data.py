@@ -7,6 +7,7 @@ from math import prod
 import numpy as np
 
 from spindle.replay import REPLAY_FIELDS
+from spindle.score_centering import SCORE_CENTERING_FIELDS
 
 _replay_builder = None
 
@@ -137,3 +138,13 @@ def install_bridge_replay(runtime) -> None:
 
     _replay_builder = build
     runtime._build_train_data = build
+
+
+def install_score_centering_bridge(runtime):
+    for name, reference in zip(
+        SCORE_CENTERING_FIELDS, ("target_tokens", "rollout_log_probs"), strict=True
+    ):
+        runtime.DATUM_TO_BATCH_KEYS[name] = name
+        runtime.ROLLOUT_DATA_VALUE_SPEC[name] = runtime.ROLLOUT_DATA_VALUE_SPEC[
+            reference
+        ]

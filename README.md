@@ -235,6 +235,9 @@ updated = (
 print("After update:", tokenizer.decode(updated.tokens, skip_special_tokens=True))
 ```
 
+For an optional sampler-mismatch correction, see [score-centering loss](docs/score-centering.md).
+
+
 ## Full-parameter training
 
 For a dedicated full-parameter fine-tuning (FFT) run, use a scoped run, which brings up a single-tenant

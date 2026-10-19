@@ -71,6 +71,18 @@ async def sample_task(
         if type(value) is not bool:
             raise ValueError(f"{key} must be a boolean")
         replay_flags[key] = value
+    score_centering_topk = request.get("score_centering_topk", 0)
+    if type(score_centering_topk) is not int or not 0 <= score_centering_topk <= 128:
+        raise ValueError("score_centering_topk must be an integer between 0 and 128")
+    if score_centering_topk and (
+        params.get("temperature", 1.0) != 1.0
+        or params.get("top_p", 1.0) != 1.0
+        or params.get("top_k", -1) != -1
+        or replay_flags["return_sampling_mask"]
+    ):
+        raise ValueError(
+            "score-centering capture requires temperature=1, top_p=1, top_k=-1 and no sampling-mask replay"
+        )
     model_id = task.get("model_id")
     version = task.get("publish_version")
     latest = bool(task.get("latest"))
@@ -149,6 +161,7 @@ async def sample_task(
                     replay_flags=replay_flags,
                     prompt_logprobs=prompt_logprobs and index == 0,
                     topk_prompt_logprobs=(topk_prompt_logprobs if index == 0 else 0),
+                    score_centering_topk=score_centering_topk,
                     retry_timeout=retry_timeout,
                     gateway=gateway,
                     on_wait=on_wait,
@@ -163,7 +176,7 @@ async def sample_task(
         )
 
     sequences = [_sequence(output) for output in outputs]
-    if any(replay_flags.values()):
+    if any(replay_flags.values()) or score_centering_topk:
         for sequence, output in zip(sequences, outputs, strict=True):
             sequence["replay"] = capture_replay(
                 output.get("meta_info") or {},
@@ -172,6 +185,7 @@ async def sample_task(
                 temperature=params.get("temperature", 1.0),
                 routes=replay_flags["return_routed_experts"],
                 mask=replay_flags["return_sampling_mask"],
+                topk=score_centering_topk,
             )
     if stats is not None:
         meta = outputs[0].get("meta_info") or {}
@@ -224,6 +238,7 @@ async def _sample_one(
     trace_attrs: dict | None = None,
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
+    score_centering_topk: int = 0,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -238,8 +253,8 @@ async def _sample_one(
         body["session_id"] = cache_affinity_id
     if prompt_logprobs or topk_prompt_logprobs:
         body["logprob_start_len"] = 0
-    if topk_prompt_logprobs:
-        body["top_logprobs_num"] = topk_prompt_logprobs
+    if topk_prompt_logprobs or score_centering_topk:
+        body["top_logprobs_num"] = max(topk_prompt_logprobs, score_centering_topk)
     if params.get("seed") is not None:
         body["sampling_params"].pop("seed")
         body["sampling_params"]["sampling_seed"] = int(params["seed"]) + index

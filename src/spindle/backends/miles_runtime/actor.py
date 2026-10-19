@@ -29,6 +29,7 @@ from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volu
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
+from .score_centering import install_score_centering_hooks
 
 
 def _pad_local_shard(
@@ -179,6 +180,13 @@ install_replay_hooks(
     tinker_losses=tinker_losses,
     fill_replay_data=fill_replay_data,
     manager=routing_replay_manager,
+)
+
+install_score_centering_hooks(
+    megatron_model=megatron_model,
+    tinker_losses=tinker_losses,
+    logit_processors=logit_processors,
+    get_parallel_state=get_parallel_state,
 )
 
 install_qwen3_vl_cp_position_ids(

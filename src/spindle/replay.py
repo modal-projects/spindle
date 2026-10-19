@@ -25,8 +25,12 @@ class SamplingReplay(BaseModel):
     sampling_mask_ids: list[int] | None = None
     sampling_mask_offsets: list[int] | None = None
     sampling_logprobs: list[float] | None = None
+    sampling_topk_token_ids: list[list[int]] | None = None
+    sampling_topk_logprobs: list[list[float]] | None = None
 
     def loss_fn_config(self) -> dict[str, float]:
+        if self.sampling_topk_token_ids is not None:
+            return {}
         # Greedy capture has singleton supports, whose normalized logprob is zero.
         return {"sampling_temperature": self.temperature or 1.0}
 
@@ -89,6 +93,41 @@ class SamplingReplay(BaseModel):
                 dtype="float32",
                 shape=[n],
             )
+        if self.sampling_topk_token_ids is not None:
+            ids, logprobs = self.sampling_topk_token_ids, self.sampling_topk_logprobs
+            if (
+                len(ids) != response_tokens
+                or logprobs is None
+                or len(logprobs) != response_tokens
+            ):
+                raise ValueError(
+                    "score-centering capture length does not match generated tokens"
+                )
+            if (
+                self.sampling_logprobs is None
+                or len(self.sampling_logprobs) != response_tokens
+            ):
+                raise ValueError("score-centering capture needs sampled-token logprobs")
+            result["logprobs"] = types.TensorData(
+                data=[0.0] * (self.prompt_tokens - 1) + self.sampling_logprobs,
+                dtype="float32",
+                shape=[n],
+            )
+            k = len(ids[0])
+            for name, rows, dtype, filler in (
+                ("sampling_topk_token_ids", ids, "int64", -1),
+                ("sampling_topk_logprobs", logprobs, "float32", 0.0),
+            ):
+                if k < 1 or any(len(row) != k for row in rows):
+                    raise ValueError(
+                        "score-centering capture must have a fixed top-k width"
+                    )
+                result[name] = types.TensorData(
+                    data=[filler] * ((self.prompt_tokens - 1) * k)
+                    + [v for row in rows for v in row],
+                    dtype=dtype,
+                    shape=[n, k],
+                )
         return result
 
 
@@ -116,13 +155,14 @@ def sample_with_replay(
     num_samples: int = 1,
     return_routed_experts: bool = False,
     return_sampling_mask: bool = False,
+    score_centering_topk: int = 0,
 ) -> AwaitableConcurrentFuture[ReplaySampleResponse]:
     """Like SamplingClient.sample(), with a .replay object on every sequence.
 
     Returns a future supporting result() and result_async(). Ordinary Tinker
     sampling decoders do not preserve these additional response fields.
     """
-    if not (return_routed_experts or return_sampling_mask):
+    if not (return_routed_experts or return_sampling_mask or score_centering_topk):
         raise ValueError("request at least one replay type")
 
     async def sample():
@@ -147,6 +187,7 @@ def sample_with_replay(
                         **request.model_dump(exclude_none=True, mode="json"),
                         "return_routed_experts": return_routed_experts,
                         "return_sampling_mask": return_sampling_mask,
+                        "score_centering_topk": score_centering_topk,
                     },
                     cast_to=types.UntypedAPIFuture,
                 )
@@ -170,6 +211,7 @@ def capture_replay(
     temperature: float,
     routes: bool,
     mask: bool,
+    topk: int = 0,
 ) -> dict:
     """Validate requested capture instead of silently training without replay."""
     replay = SamplingReplay(prompt_tokens=prompt_tokens, temperature=temperature)
@@ -215,4 +257,51 @@ def capture_replay(
             raise ValueError("invalid sampling logprobs")
         replay.sampling_mask_ids, replay.sampling_mask_offsets = ids, offsets
         replay.sampling_logprobs = logprobs
+    if topk:
+        rows = meta.get("output_top_logprobs")
+        if not isinstance(rows, list) or len(rows) != len(tokens):
+            raise ValueError(
+                "sampler did not return token-aligned top-k logprobs for score centering"
+            )
+        ids, logprobs = [], []
+        for row in rows:
+            if not isinstance(row, list) or len(row) < topk:
+                raise ValueError("sampler returned fewer top-k logprobs than requested")
+            head = row[:topk]
+            if any(
+                len(entry) < 2
+                or type(entry[1]) is not int
+                or entry[1] < 0
+                or not math.isfinite(entry[0])
+                or entry[0] > 0
+                for entry in head
+            ):
+                raise ValueError("invalid sampler top-k logprobs")
+            row_ids = [entry[1] for entry in head]
+            row_logprobs = [float(entry[0]) for entry in head]
+            if (
+                len(set(row_ids)) != topk
+                or sum(math.exp(v) for v in row_logprobs) > 1 + 1e-5
+            ):
+                raise ValueError("invalid sampler top-k probability distribution")
+            ids.append(row_ids)
+            logprobs.append(row_logprobs)
+        sampled = meta.get("output_token_logprobs")
+        if (
+            not isinstance(sampled, list)
+            or len(sampled) != len(tokens)
+            or any(
+                len(entry) < 2
+                or entry[1] != token
+                or not math.isfinite(entry[0])
+                or entry[0] > 0
+                for entry, token in zip(sampled, tokens, strict=True)
+            )
+        ):
+            raise ValueError(
+                "score-centering capture needs aligned sampled-token logprobs"
+            )
+        replay.sampling_logprobs = [float(entry[0]) for entry in sampled]
+        replay.sampling_topk_token_ids = ids
+        replay.sampling_topk_logprobs = logprobs
     return replay.model_dump(exclude_none=True)

@@ -6,10 +6,15 @@ from typing import Any
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.backends.contract import ForwardBatch
+from spindle.score_centering import (
+    SCORE_CENTERING_FIELDS,
+    score_centering_config,
+    score_centering_inputs,
+)
 from .replay_data import replay_row
 
 SUPPORTED_LOSSES = frozenset(
-    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro", "score_centering"}
 )
 _RL_LOSSES = SUPPORTED_LOSSES - {"cross_entropy"}
 
@@ -50,6 +55,9 @@ def pad_slot_rows(
     if "sampling_mask_ids" in last:
         pad["sampling_mask_ids"] = []
         pad["sampling_mask_offsets"] = [0, 0]
+    if "sampling_topk_token_ids" in last:
+        for name, filler in zip(SCORE_CENTERING_FIELDS, (-1, 0.0), strict=True):
+            pad[name] = [[filler] * len(last[name][0])]
     n_pad = -len(slot_rows) % multiple
     return (*slot_rows, *((slot, dict(pad)) for _ in range(n_pad)))
 
@@ -61,6 +69,8 @@ def prepare_batch(
 ) -> PreparedBatch:
     if batch.loss_fn not in SUPPORTED_LOSSES:
         raise ValueError(f"Miles does not support loss {batch.loss_fn!r}")
+    if batch.loss_fn == "score_centering":
+        score_centering_config(batch.loss_fn_config)
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
@@ -102,6 +112,9 @@ def _align_row(row: dict[str, Any], multiple: int) -> None:
         values = row.get(key)
         if values is not None:
             row[key] = [*values, *([0.0] * pad)]
+    if "sampling_topk_token_ids" in row:
+        for name, filler in zip(SCORE_CENTERING_FIELDS, (-1, 0.0), strict=True):
+            row[name] = [*row[name], *([[filler] * len(row[name][0])] * pad)]
     if "routed_experts" in row:
         route = row["routed_experts"]
         width = route["shape"][1] * route["shape"][2]
@@ -224,6 +237,21 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
         if missing:
             raise ValueError(
                 f"datum {datum_index}: {', '.join(missing)} required for {loss_fn}"
+            )
+    if loss_fn == "score_centering":
+        if "sampling_mask_ids" in inputs:
+            raise ValueError("score_centering does not support sampling-mask replay")
+        active = [advantage != 0 for advantage in row["advantages"]]
+        row.update(
+            {
+                key: value.tolist()
+                for key, value in score_centering_inputs(inputs, active).items()
+            }
+        )
+        # Miles' RL losses use advantages for client-side weighting.
+        if "weights" in inputs:
+            raise ValueError(
+                "score_centering on Miles uses advantages for weighting; omit weights"
             )
     row.update(replay_row(inputs, targets))
     return row

@@ -180,6 +180,9 @@ def _load_actor(monkeypatch):
         monkeypatch, "spindle.backends.miles_runtime.replay"
     ).install_replay_hooks = lambda **kwargs: None
     _module(
+        monkeypatch, "spindle.backends.miles_runtime.score_centering"
+    ).install_score_centering_hooks = lambda **kwargs: None
+    _module(
         monkeypatch, "spindle.backends.miles_runtime.qwen3_vl_cp"
     ).install_qwen3_vl_cp_position_ids = lambda **kwargs: None
     _module(
