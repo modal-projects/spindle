@@ -21,6 +21,7 @@ from spindle.providers.contracts import (
 )
 from spindle.telemetry.otlp import sample_trace
 
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -100,7 +101,7 @@ TRAINER_DEPLOYMENT_ENV = {
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
 }
-app = modal.App(APP_NAME)
+app = modal.App(APP_NAME, tags=app_tags("frontend"))
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
