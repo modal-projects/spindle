@@ -67,7 +67,9 @@ def test_checkouts_fall_back_to_git(monkeypatch):
 
 
 def test_unknown_commit_without_git(monkeypatch):
-    monkeypatch.setattr(spindle_version, "distribution", lambda name: Distribution(None))
+    monkeypatch.setattr(
+        spindle_version, "distribution", lambda name: Distribution(None)
+    )
 
     def no_git(*args, **kwargs):
         raise FileNotFoundError("git")
