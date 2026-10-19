@@ -10,6 +10,12 @@ import torch
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.replay import REPLAY_FIELDS
+from spindle.score_centering import (
+    SCORE_CENTERING_FIELDS,
+    score_centering_config,
+    score_centering_inputs,
+)
+from spindle.backends.score_centering import score_centering_loss, selected_logprobs
 from spindle.telemetry import backend as telemetry
 
 from ...contract import ForwardBatch
@@ -81,6 +87,8 @@ def _packed_seq_idx(
 
 
 def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
+    if loss_name == "score_centering":
+        return score_centering_config(config)
     allowed = {
         "cross_entropy": frozenset(),
         "importance_sampling": frozenset(),
@@ -117,7 +125,9 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
     return values
 
 
-RL_LOSSES = frozenset({"importance_sampling", "ppo", "cispo", "dro", "dppo"})
+RL_LOSSES = frozenset(
+    {"importance_sampling", "ppo", "cispo", "dro", "dppo", "score_centering"}
+)
 
 
 def build_sequence_batches(
@@ -217,6 +227,21 @@ def build_sequence_batches(
                 "loss_name": loss_name,
                 "loss_config": loss_config,
             }
+            if loss_name == "score_centering":
+                active = [
+                    label != -100 and weight != 0 and advantage != 0
+                    for label, weight, advantage in zip(
+                        labels, weights, advantages, strict=True
+                    )
+                ]
+                sequence.update(
+                    {
+                        key: torch.from_numpy(value)
+                        for key, value in score_centering_inputs(
+                            datum.loss_fn_inputs, active
+                        ).items()
+                    }
+                )
             if slot is not None:
                 adapter_token_counts = [0] * max_slots
                 adapter_token_counts[slot] = len(input_ids)
@@ -339,6 +364,22 @@ def pack_microbatches(
             "cu_seqlens": torch.tensor(padded_offsets, dtype=torch.int32),
             "max_seqlen": max(*padded_lengths, total_padding),
         }
+        if items[0]["loss_name"] == "score_centering":
+            k = max(item[SCORE_CENTERING_FIELDS[0]].shape[1] for item in items)
+            for key, filler in zip(SCORE_CENTERING_FIELDS, (-1, 0.0), strict=True):
+                rows = [
+                    F.pad(
+                        item[key],
+                        (0, k - item[key].shape[1], 0, padded_length - length),
+                        value=filler,
+                    )
+                    for item, length, padded_length in zip(
+                        items, lengths, padded_lengths, strict=True
+                    )
+                ]
+                if total_padding:
+                    rows.append(rows[0].new_full((total_padding, k), filler))
+                batch[key] = torch.cat(rows)
         if adapter_token_counts is not None:
             batch["adapter_token_counts"] = adapter_token_counts
         packed.append(batch)
@@ -395,11 +436,23 @@ def _vocab_parallel_logprobs(
 def _loss(
     logprobs: torch.Tensor,
     batch: dict[str, Any],
+    head_logprobs: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     mask = batch["loss_mask"].to(logprobs.device).reshape(-1)
     loss_name = batch["loss_name"]
     if loss_name == "cross_entropy":
         loss = -(logprobs * mask).sum()
+    elif loss_name == "score_centering":
+        per_token = score_centering_loss(
+            logprobs,
+            head_logprobs,
+            batch["sampling_logprobs"].to(logprobs.device),
+            batch["sampling_topk_logprobs"].to(logprobs.device),
+            batch["sampling_topk_token_ids"].to(logprobs.device) >= 0,
+            batch["advantages"].to(logprobs.device),
+            batch["loss_config"],
+        )
+        loss = (per_token * mask).sum()
     elif loss_name in RL_LOSSES:
         sampling_logprobs = batch["sampling_logprobs"].to(logprobs.device).reshape(-1)
         advantages = batch["advantages"].to(logprobs.device).reshape(-1)
@@ -500,6 +553,8 @@ def make_forward_step(
                 "position_ids",
                 "token_indices",
             )
+            if batch["loss_name"] == "score_centering":
+                keys = (*keys, *SCORE_CENTERING_FIELDS)
             if hasattr(model_config, "mrope_section"):
                 keys = tuple(
                     key for key in keys if key not in ("tokens", "position_ids")
@@ -530,8 +585,23 @@ def make_forward_step(
         )
 
         def loss_func(output):
-            logprobs = _vocab_parallel_logprobs(output, batch["labels"])
-            loss, token_count = _loss(logprobs, batch)
+            head_logprobs = None
+            if batch["loss_name"] == "score_centering":
+                ids = torch.cat(
+                    [batch["labels"].unsqueeze(-1), batch["sampling_topk_token_ids"]],
+                    dim=-1,
+                )
+                selected = selected_logprobs(
+                    output,
+                    ids,
+                    group=parallel_state.get_tensor_model_parallel_group(),
+                    rank=parallel_state.get_tensor_model_parallel_rank(),
+                    size=parallel_state.get_tensor_model_parallel_world_size(),
+                )
+                logprobs, head_logprobs = selected[:, 0], selected[:, 1:]
+            else:
+                logprobs = _vocab_parallel_logprobs(output, batch["labels"])
+            loss, token_count = _loss(logprobs, batch, head_logprobs)
             positions = batch["token_indices"].reshape(-1)
             for job_id, output_index, start, length, is_dummy in zip(
                 batch["job_ids"],
@@ -557,9 +627,14 @@ def make_forward_step(
                     "sampling_logprobs": batch["sampling_logprobs"][selected],
                     "advantages": batch["advantages"][selected],
                 }
+                if head_logprobs is not None:
+                    sequence_batch.update(
+                        {key: batch[key][selected] for key in SCORE_CENTERING_FIELDS}
+                    )
                 sequence_loss, sequence_tokens = _loss(
                     logprobs[selected],
                     sequence_batch,
+                    head_logprobs[selected] if head_logprobs is not None else None,
                 )
                 metrics = metric_collector.setdefault(
                     job_id,
@@ -732,6 +807,7 @@ def build_outputs(
                     "cispo": "MegatronCISPOLoss",
                     "dro": "MegatronDROLoss",
                     "dppo": "MegatronDPPOLoss",
+                    "score_centering": "MegatronScoreCenteringLoss",
                 }[str(batch.loss_fn)],
                 loss_fn_outputs=loss_outputs,
                 metrics={
