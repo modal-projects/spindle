@@ -368,6 +368,8 @@ spindle deploy config.py
 
 ## Upgrade Spindle
 
+Check your current version with `uv run spindle --version`. Installs older than 0.2.0 don't have that flag; `uv pip freeze | grep modal-spindle` shows the commit they were installed from.
+
 Read the [CHANGELOG.md](CHANGELOG.md) sections between your version and the new one; minor releases can change config defaults. Then point the dependency at the new tag and redeploy:
 
 ```bash

@@ -33,9 +33,11 @@ def _local_commit() -> str | None:
     try:
         # A tracked version.py means a Spindle checkout, not a project that vendors an install.
         _git(source.parent, "ls-files", "--error-unmatch", source.name)
-        return _git(source.parent, "rev-parse", "HEAD")
+        commit = _git(source.parent, "rev-parse", "HEAD")
+        edited = _git(source.parent, "status", "--porcelain", "--untracked-files=no")
     except (OSError, subprocess.CalledProcessError):
         return None
+    return f"{commit}-dirty" if edited else commit
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -45,8 +47,5 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def version_tags() -> dict[str, str]:
-    commit = source_commit()
-    return {
-        "spindle_version": __version__,
-        "spindle_commit": commit[:7] if commit else "unknown",
-    }
+    sha, dirty, _ = (source_commit() or "unknown").partition("-dirty")
+    return {"spindle_version": __version__, "spindle_commit": sha[:7] + dirty}

@@ -1,7 +1,6 @@
 import json
 import subprocess
-from importlib.metadata import PackageNotFoundError, version
-from types import SimpleNamespace
+from importlib.metadata import version
 
 import pytest
 
@@ -53,19 +52,6 @@ def test_git_installs_report_the_locked_commit(monkeypatch):
     assert spindle_version.source_commit() == "370f5f2"
 
 
-def test_checkouts_fall_back_to_git(monkeypatch):
-    def missing(name):
-        raise PackageNotFoundError(name)
-
-    monkeypatch.setattr(spindle_version, "distribution", missing)
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(stdout="def456\n"),
-    )
-    assert spindle_version.source_commit() == "def456"
-
-
 def git(cwd, *args):
     return subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
@@ -103,7 +89,13 @@ def test_spindle_checkouts_report_head(project_repo, monkeypatch):
     git(project_repo, "add", "src")
     git(project_repo, "commit", "-qm", "spindle")
     monkeypatch.setattr(spindle_version, "__file__", str(source))
-    assert spindle_version.source_commit() == git(project_repo, "rev-parse", "HEAD")
+    head = git(project_repo, "rev-parse", "HEAD")
+    assert spindle_version.source_commit() == head
+
+    source.write_text("edited")
+    spindle_version._local_commit.cache_clear()
+    assert spindle_version.source_commit() == f"{head}-dirty"
+    assert spindle_version.version_tags()["spindle_commit"] == f"{head[:7]}-dirty"
 
 
 def test_unknown_commit_without_git(monkeypatch):
