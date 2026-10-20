@@ -36,6 +36,7 @@ from spindle.providers.modal.deployment_configs import (
     deployed_configs,
     deployed_platform,
     deployed_pools,
+    start_weights_download,
 )
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
@@ -167,6 +168,17 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
                 **captured,
             )
 
+    def start_weights(deployment):
+        try:
+            downloading = start_weights_download(
+                platform["frontend"], environment, deployment.definition_id
+            )
+        except Exception as exc:
+            return f"not started ({exc}); the first request starts the download"
+        if downloading is None:
+            return "not started; the first request starts the download"
+        return "downloading in the background" if downloading else "ready"
+
     steps = []
     for deployment in configs:
         if deployment.name in trainers:
@@ -178,14 +190,20 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
                 (f"Inference  {deployment.name}", partial(deploy_inference, deployment))
             )
     steps.append(("API server", deploy_frontend))
+    for deployment in configs:
+        steps.append(
+            (f"Weights    {deployment.name}", partial(start_weights, deployment))
+        )
     build_image = partial(build_sampler_image, platform["frontend"], environment)
     if run_steps is not None:
         run_steps(steps, [("Sampler image", in_background(build_image))])
         return
     with modal.enable_output():
         building = in_background(build_image)
-        for _, step in steps:
-            step()
+        for label, step in steps:
+            note = step()
+            if note:
+                print(f"{' '.join(label.split())}: {note}")
         try:
             building.result()
         except Exception as exc:

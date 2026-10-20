@@ -155,8 +155,10 @@ sampler topology.
 
 ### Expect cold starts
 
-The first model creation may need to download model assets, initialize the
-distributed trainer, and compile kernels. Rollout replicas separately load and
+`spindle deploy` starts downloading each model's weights in the background.
+Until that download finishes, model creation and base-model sampling wait for it
+and report its progress to the client. The first model creation may also need to
+initialize the distributed trainer and compile kernels. Rollout replicas separately load and
 compile the sampling model. Model creation starts the latest pool
 asynchronously, but does not guarantee that rollout replicas are ready.
 

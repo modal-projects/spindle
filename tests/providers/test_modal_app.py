@@ -31,6 +31,13 @@ def reset_lora_pool_cache(monkeypatch):
     modal_app = importlib.import_module("spindle.providers.modal.app")
     monkeypatch.setattr(modal_app, "_lora_pool_gateways", {})
     monkeypatch.setattr(modal_app, "_lora_pool_checks", {})
+    monkeypatch.setattr(modal_app, "_weights_ready", set())
+    monkeypatch.setattr(modal_app, "_weights_starts", {})
+
+
+def weights_ready(monkeypatch, *definitions):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    monkeypatch.setattr(modal_app, "_weights_ready", set(definitions))
 
 
 def test_definitions_come_only_from_the_configured_records() -> None:
@@ -82,25 +89,17 @@ def test_transitional_trainer_at_cap_keeps_capacity_pending(
 def test_ensure_pool_deploys_pinned_base_pool(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     registry = InMemoryKeyValueStore()
-    prepared = []
     deployed = []
-
-    async def prepare(definition_id: str) -> None:
-        prepared.append(definition_id)
 
     async def ensure(spec: dict) -> str:
         deployed.append(spec)
         await registry.put(f"fft_pool:{FFTPoolSpec(**spec).app_name}", spec)
         return "https://gateway"
 
+    weights_ready(monkeypatch, FULL_DEFINITION)
     monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "fft_pool_kv", lambda: registry)
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
-    monkeypatch.setattr(
-        modal_app,
-        "prepare_model_assets",
-        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
-    )
     monkeypatch.setattr(
         modal_app,
         "ensure_fft_pool",
@@ -120,7 +119,6 @@ def test_ensure_pool_deploys_pinned_base_pool(monkeypatch) -> None:
 
     asyncio.run(run())
     base = FFTPoolSpec.base(FULL_DEFINITION)
-    assert prepared == [FULL_DEFINITION]
     assert deployed == [base.as_dict()]
     assert base.version == 0 and not base.latest
     touch = asyncio.run(registry.get(f"fft_pool_touch:{base.app_name}"))
@@ -129,23 +127,15 @@ def test_ensure_pool_deploys_pinned_base_pool(monkeypatch) -> None:
 
 def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    prepared = []
     spawned = []
-
-    async def prepare(definition_id: str) -> None:
-        prepared.append(definition_id)
 
     async def spawn(spec: dict) -> None:
         spawned.append(spec)
 
+    weights_ready(monkeypatch, FULL_DEFINITION)
     monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
-    monkeypatch.setattr(
-        modal_app,
-        "prepare_model_assets",
-        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
-    )
     monkeypatch.setattr(
         modal_app,
         "ensure_fft_pool",
@@ -169,7 +159,6 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
         await plane.prepare_model(model(FULL_DEFINITION, {}))
 
     asyncio.run(run())
-    assert prepared == [FULL_DEFINITION, FULL_DEFINITION]
     assert spawned == [
         FFTPoolSpec(
             FULL_DEFINITION,
@@ -194,19 +183,12 @@ def test_prepare_model_leaves_lora_pool_to_trainer_boot(
     registry = InMemoryKeyValueStore()
     spawned = []
 
-    async def prepare(definition_id: str) -> None:
-        return None
-
     async def spawn(spec: dict) -> None:
         spawned.append(spec)
 
+    weights_ready(monkeypatch, LORA_DEFINITION)
     monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
-    monkeypatch.setattr(
-        modal_app,
-        "prepare_model_assets",
-        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
-    )
     monkeypatch.setattr(
         modal_app,
         "ensure_lora_pool",
@@ -237,55 +219,239 @@ def test_prepare_model_leaves_lora_pool_to_trainer_boot(
     assert spawned == ([pool] if spawns_pool else [])
 
 
-def test_prepare_model_downloads_assets_once_per_definition(monkeypatch) -> None:
+def weight_downloads(monkeypatch, registry, calls):
+    """Stub the detached download; `calls[call_id]` is False once done, or its error."""
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    registry = InMemoryKeyValueStore()
-    prepared = []
+    spawned = []
 
-    async def prepare(definition_id: str) -> None:
-        prepared.append(definition_id)
+    async def spawn(definition_id: str):
+        spawned.append(definition_id)
+        return SimpleNamespace(object_id=f"fc-{len(spawned)}")
+
+    async def running(call_id: str) -> bool:
+        state = calls.get(call_id, True)
+        if isinstance(state, Exception):
+            raise state
+        return state
 
     monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
     monkeypatch.setattr(
         modal_app,
         "prepare_model_assets",
-        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+        SimpleNamespace(spawn=SimpleNamespace(aio=spawn)),
+    )
+    monkeypatch.setattr(modal_app, "_call_running", running)
+    return spawned
+
+
+def test_requests_join_the_running_weight_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    spawned = weight_downloads(monkeypatch, InMemoryKeyValueStore(), {})
+    pools = []
+
+    async def deploy(spec: dict) -> str:
+        pools.append(spec)
+        return "https://gateway"
+
+    async def missing(spec):
+        raise modal_app.modal.exception.NotFoundError("no pool")
+
+    deploy_stub = SimpleNamespace(
+        spawn=SimpleNamespace(aio=deploy), remote=SimpleNamespace(aio=deploy)
+    )
+    monkeypatch.setattr(modal_app, "ensure_lora_pool", deploy_stub)
+    monkeypatch.setattr(modal_app, "ensure_fft_pool", deploy_stub)
+    monkeypatch.setattr(modal_app, "lora_pool_gateway", missing)
+
+    async def run() -> None:
+        plane = modal_app._plane()
+        for definition in (LORA_DEFINITION, FULL_DEFINITION):
+            model = SimpleNamespace(
+                engine_definition_id=definition, model_id="s:train:0", spec={}
+            )
+            await plane.prepare_model(model)
+            await plane.prepare_model(model)
+            await plane.ensure_sampling_pool(base_session(definition))
+        assert await modal_app._weights_download(LORA_DEFINITION) is not None
+
+    asyncio.run(run())
+    assert spawned == [LORA_DEFINITION, FULL_DEFINITION]
+    assert pools == []
+
+
+def base_session(definition):
+    return SimpleNamespace(
+        engine_definition_id=definition,
+        model_id=None,
+        publish_version=None,
+        latest=False,
+    )
+
+
+def test_ready_weights_skip_the_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = weight_downloads(monkeypatch, registry, {})
+
+    async def run() -> None:
+        await registry.put(f"model_assets_ready:{LORA_DEFINITION}", 1.0)
+        assert await modal_app._start_weights_download(LORA_DEFINITION) is None
+        assert await modal_app._weights_download(LORA_DEFINITION) is None
+
+    asyncio.run(run())
+    assert spawned == []
+
+
+def test_failed_weight_download_is_reported_and_restarted(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    calls = {}
+    spawned = weight_downloads(monkeypatch, InMemoryKeyValueStore(), calls)
+
+    async def run() -> None:
+        await modal_app._start_weights_download(LORA_DEFINITION)
+        calls["fc-1"] = RuntimeError("401 Unauthorized")
+        with pytest.raises(modal_app.WeightsDownloadFailed, match="401 Unauthorized"):
+            await modal_app._weights_download(LORA_DEFINITION)
+        assert await modal_app._start_weights_download(LORA_DEFINITION) is not None
+        assert await modal_app._weights_download(LORA_DEFINITION) is not None
+
+    asyncio.run(run())
+    assert spawned == [LORA_DEFINITION, LORA_DEFINITION]
+
+
+def test_concurrent_requests_start_one_weight_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    spawned = weight_downloads(monkeypatch, InMemoryKeyValueStore(), {})
+
+    async def run() -> None:
+        await asyncio.gather(
+            *(modal_app._start_weights_download(LORA_DEFINITION) for _ in range(8))
+        )
+
+    asyncio.run(run())
+    assert spawned == [LORA_DEFINITION]
+
+
+def test_trainers_wait_for_the_weight_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    weight_downloads(monkeypatch, InMemoryKeyValueStore(), {})
+    reconciled = []
+    completed = []
+
+    async def pending():
+        return {LORA_DEFINITION: "token"}
+
+    async def reconcile(*args, **kwargs):
+        reconciled.append(args[2])
+
+    async def complete(definition_id, token):
+        completed.append(definition_id)
+
+    async def nothing(*args):
+        return {}
+
+    monkeypatch.setattr(modal_app.modal, "current_function_call_id", lambda: "fc-r")
+    monkeypatch.setattr(modal_app, "pending_reconciliations", pending)
+    monkeypatch.setattr(modal_app, "reconcile_trainers", reconcile)
+    monkeypatch.setattr(modal_app, "complete_reconcile", complete)
+    monkeypatch.setattr(modal_app, "release_reconcile_call", nothing)
+    monkeypatch.setattr(modal_app, "kick_trainer_reconciler", nothing)
+
+    asyncio.run(modal_app.trainer_reconciler.local())
+    assert (reconciled, completed) == ([], [LORA_DEFINITION])
+    weights_ready(monkeypatch, LORA_DEFINITION)
+    asyncio.run(modal_app.trainer_reconciler.local())
+    assert reconciled == [LORA_DEFINITION]
+
+
+def test_execute_sample_waits_for_the_weight_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    downloads = [100.0, 100.0, None]
+    events = []
+
+    async def download(definition_id: str) -> float | None:
+        events.append("poll")
+        return downloads.pop(0)
+
+    async def ensure(spec: dict) -> str:
+        events.append("deploy")
+        return "https://gateway"
+
+    async def gateway(spec: FFTPoolSpec) -> str:
+        return "https://gateway"
+
+    async def sample(task, gateway, **_):
+        events.append("sample")
+        return {}
+
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
+    monkeypatch.setattr(modal_app, "WEIGHTS_POLL_INTERVAL", 0)
+    monkeypatch.setattr(modal_app, "_weights_download", download)
+    monkeypatch.setattr(
+        modal_app,
+        "ensure_fft_pool",
+        SimpleNamespace(remote=SimpleNamespace(aio=ensure)),
+    )
+    monkeypatch.setattr(modal_app, "pool_gateway", gateway)
+    monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "sample_task", sample)
+    asyncio.run(modal_app.execute_sample.local(base_task(FULL_DEFINITION)))
+    assert events == ["poll", "poll", "poll", "deploy", "sample"]
+
+
+def base_task(definition):
+    return {
+        "engine_definition_id": definition,
+        "model_id": None,
+        "publish_version": None,
+        "latest": False,
+    }
+
+
+def test_execute_sample_fails_when_the_weight_download_failed(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    weight_downloads(
+        monkeypatch, InMemoryKeyValueStore(), {"fc-1": RuntimeError("gone")}
     )
 
     async def run() -> None:
-        model = SimpleNamespace(
-            engine_definition_id=LORA_DEFINITION, model_id="session:train:0", spec={}
-        )
-        await modal_app._plane().prepare_model(model)
-        await modal_app._plane().prepare_model(model)
-        assert await registry.get(f"model_assets_ready:{LORA_DEFINITION}") is not None
+        await modal_app._start_weights_download(LORA_DEFINITION)
+        await modal_app.execute_sample.local(base_task(LORA_DEFINITION))
 
-    asyncio.run(run())
-    assert prepared == [LORA_DEFINITION]
+    with pytest.raises(modal_app.WeightsDownloadFailed, match="gone"):
+        asyncio.run(run())
 
 
-def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
+def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
     events = []
 
     def download(*, repo_id: str, local_dir: str) -> None:
         events.append(("download", repo_id, local_dir))
 
+    async def commit() -> None:
+        events.append(("commit",))
+
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
     monkeypatch.setattr(
         modal_app,
         "model_assets",
-        SimpleNamespace(commit=lambda: events.append(("commit",))),
+        SimpleNamespace(commit=SimpleNamespace(aio=commit)),
     )
 
-    modal_app.prepare_model_assets.local(FULL_DEFINITION)
+    asyncio.run(modal_app.prepare_model_assets.local(FULL_DEFINITION))
 
     definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
         ("download", definition.model, definition.asset_path),
         ("commit",),
     ]
+    assert asyncio.run(registry.get(f"model_assets_ready:{FULL_DEFINITION}"))
 
 
 def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) -> None:
@@ -354,6 +520,7 @@ def test_execute_sample_routes_base_session_without_version(monkeypatch) -> None
 
     monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
     monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
+    weights_ready(monkeypatch, FULL_DEFINITION)
     monkeypatch.setattr(modal_app, "pool_gateway", gateway)
     monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "sample_task", sample)
