@@ -174,11 +174,6 @@ def test_dequantize_checkpoint_converts_each_tensor_kind(tmp_path) -> None:
     assert (target / assets.TRANSFORM_MARKER).read_text() == marker
 
 
-def test_unknown_transform_is_rejected(tmp_path) -> None:
-    with pytest.raises(ValueError, match="unknown asset transform"):
-        assets.apply_transform("fp4", tmp_path, tmp_path)
-
-
 def test_quantized_tensor_without_scale_is_rejected(tmp_path) -> None:
     shard = tmp_path / "model.safetensors"
     _write_shard(

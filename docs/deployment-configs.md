@@ -76,10 +76,6 @@ Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/
 
 Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size` (set it to `false` for attention layouts such as `bshd` that take one sequence per micro-batch).
 
-### Disk and asset conversion
-
-`trainer_disk_mib` and `inference_disk_mib` request Modal ephemeral disk for trainers and samplers; leave them at 0 for the default disk, since Modal's smallest request is 524288 MiB. `asset_transform = "dequantize_bf16"` converts an FP8/FP4 release such as DeepSeek-V4.1-Flash into a BF16 checkpoint while preparing assets, keeping the Engram tables in FP8 and dropping multi-token-prediction and vision tensors; the recipe's `model` name stays the released repo. Converted assets are kept, so preparing them again skips the conversion.
-
 ## Prepare and launch
 
 ~~~text
