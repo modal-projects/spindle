@@ -23,13 +23,15 @@ from spindle.providers.contracts import (
 )
 from spindle.telemetry.otlp import sample_trace
 
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
 )
 from .deployment import trainer_deployment_env
 from .deployment_configs import (
-    CONFIGS_ENV,
+    CONFIGS_FILE_ENV,
+    CONFIGS_IMAGE_PATH,
     PLATFORM_ENV,
     configs_from_env,
     platform_from_env,
@@ -97,11 +99,11 @@ checkpoint_volume = modal.Volume.from_name(
 )
 TRAINER_DEPLOYMENT_ENV = {
     **trainer_deployment_env(),
-    CONFIGS_ENV: os.environ[CONFIGS_ENV],
+    CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
 }
-app = modal.App(APP_NAME)
+app = modal.App(APP_NAME, tags=app_tags("frontend"))
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
@@ -127,6 +129,7 @@ image = (
     .apt_install("git")
     .pip_install(*CORE_PACKAGES, TINKER_PACKAGE)
     .pip_install(STITCH_PACKAGE, "huggingface-hub")
+    .add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
     .env(TRAINER_DEPLOYMENT_ENV)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )

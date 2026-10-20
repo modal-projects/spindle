@@ -37,7 +37,15 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
         registrations.append(kwargs)
         return server
 
-    monkeypatch.setattr(modal, "App", lambda _: child)
+    def create_app(name, *, tags):
+        assert tags["_modal_source"] == "spindle"
+        assert tags["spindle_role"] == "inference"
+        assert tags["_modal_job_type"] == "serving"
+        assert tags["_modal_framework"] == "sglang"
+        assert tags["_modal_model_name"] == "qwen3.6-35b-a3b"
+        return child
+
+    monkeypatch.setattr(modal, "App", create_app)
     monkeypatch.setattr(modal.Image, "from_id", lambda _: image)
     monkeypatch.setattr(modal.Volume, "from_name", lambda *a, **k: object())
     monkeypatch.setattr(scoped, "register_sampler", register)
@@ -45,7 +53,7 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
     async def check():
         async with open_pinned_app(
             f"pinned:{model_id}:7",
-            engine=object(),
+            engine=SimpleNamespace(model="Qwen/Qwen3.6-35B-A3B"),
             name="test",
             image_id="im-test",
             registry_name="registry",
