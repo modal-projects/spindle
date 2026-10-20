@@ -168,9 +168,7 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
     presets = bundled_presets()
     console.print(
         Panel.fit(
-            "[bold]Welcome to Spindle[/bold], the API for training on Modal.\n\n"
-            "Pick the models you want to post-train. Spindle deploys only those,\n"
-            "and GPUs start when your first training request arrives.",
+            "[bold]Welcome to Spindle[/bold], Modal's Training API.",
             border_style="green",
         )
     )
@@ -238,7 +236,13 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
         for model in selected
         for mode in modes[model]
     ]
-    show_plan(console, chosen, context, served_configs(console, served))
+    show_plan(
+        console,
+        chosen,
+        context,
+        served_configs(console, served),
+        stop_command(frontend, environment),
+    )
     if not ask(
         questionary.confirm(
             f"Deploy {len(chosen)} config{'s' if len(chosen) != 1 else ''} "
@@ -254,8 +258,16 @@ def deploy_command(chosen: list[Preset]) -> str:
     return "spindle deploy " + " ".join(preset.name for preset in chosen)
 
 
+def stop_command(frontend: str, environment: str | None) -> str:
+    return f"modal app stop {frontend}" + (f" -e {environment}" if environment else "")
+
+
 def show_plan(
-    console: Console, chosen: list[Preset], context: int, served: list[str] | None
+    console: Console,
+    chosen: list[Preset],
+    context: int,
+    served: list[str] | None,
+    stop: str,
 ) -> None:
     console.print()
     table = Table(title="Deployment plan", title_justify="left")
@@ -274,8 +286,8 @@ def show_plan(
     console.print(table)
     if served is None:
         console.print(
-            "[yellow]The current Spindle frontend in this environment didn't respond. "
-            "If it's broken, stop it with `modal app stop` before deploying.[/yellow]"
+            "[yellow]The Spindle frontend already deployed here didn't respond. "
+            f"If it's broken, stop it with `{stop}`, then run spindle deploy again.[/yellow]"
         )
         served = []
     dropped = sorted(set(served) - {preset.name for preset in chosen})
@@ -291,7 +303,7 @@ def show_plan(
 
 def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
     console.print(
-        "[dim]The first deploy in a workspace builds GPU images, which can take several minutes.[/dim]"
+        "[dim]The first deploy in a workspace builds container images, which can take several minutes.[/dim]"
     )
     progress = Progress(
         SpinnerColumn(finished_text="[green]✓[/green]"),
@@ -344,9 +356,7 @@ def show_next_steps(
             "[bold green]Spindle is live.[/bold green] Point any Tinker script at it:\n\n"
             f"  export TINKER_BASE_URL={url}\n"
             "  export TINKER_API_KEY=<the key in your spindle-api secret>\n\n"
-            f"  {client}\n\n"
-            "[dim]The first request for each model starts GPUs and loads weights,\n"
-            "which can take 10+ minutes.[/dim]",
+            f"  {client}",
             border_style="green",
         )
     )

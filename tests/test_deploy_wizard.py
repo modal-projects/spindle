@@ -71,3 +71,14 @@ def test_model_titles_drop_the_provider_prefix():
     presets = deploy_wizard.bundled_presets()
     title = deploy_wizard.model_title(presets, "Qwen/Qwen3.5-9B", width=12)
     assert title.startswith("Qwen3.5-9B  ")
+
+
+def test_unresponsive_frontend_names_the_app_to_stop():
+    console = Console(record=True, width=160)
+    presets = deploy_wizard.bundled_presets()
+    chosen = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 16_384)]
+    deploy_wizard.show_plan(
+        console, chosen, 16_384, None, deploy_wizard.stop_command("spindle", "dev")
+    )
+    assert "modal app stop spindle -e dev" in console.export_text()
+    assert deploy_wizard.stop_command("spindle", None) == "modal app stop spindle"
