@@ -247,3 +247,50 @@ def test_sparse_row_pointers_must_cover_values():
     )
     with pytest.raises(ValueError, match="row pointers"):
         prepare_batch(batch, {"a": 0})
+
+
+@pytest.mark.parametrize(
+    "crow,columns,values",
+    [
+        ([0, 1, 1, 1], [2], [1.0]),
+        ([0, 1, 1, 1], [-1], [1.0]),
+        ([0, 2, 1, 2], [0, 1], [1.0, 2.0]),
+        ([0, 1, 1, 1], [0, 1], [1.0]),
+    ],
+)
+def test_invalid_csr_cannot_silently_move_values_between_rows(crow, columns, values):
+    value = datum([[2, 4], [3, 5], [4, 6]])
+    value.loss_fn_inputs["weights"] = TensorData(
+        data=values,
+        dtype="float32",
+        shape=[3, 2],
+        sparse_crow_indices=crow,
+        sparse_col_indices=columns,
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    with pytest.raises(ValueError, match="CSR TensorData"):
+        prepare_batch(batch, {"a": 0})
+
+
+def test_csr_duplicate_columns_follow_tensor_densification():
+    sparse = torch.sparse_csr_tensor(
+        torch.tensor([0, 2, 2, 3]),
+        torch.tensor([1, 1, 0]),
+        torch.tensor([0.25, 0.5, 1.0]),
+        size=(3, 2),
+    )
+    value = datum([[2, 4], [3, 5], [4, 6]])
+    value.loss_fn_inputs["weights"] = TensorData(
+        data=sparse.values().tolist(),
+        dtype="float32",
+        shape=[3, 2],
+        sparse_crow_indices=sparse.crow_indices().tolist(),
+        sparse_col_indices=sparse.col_indices().tolist(),
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    _, row = prepare_batch(batch, {"a": 0}).slot_rows[0]
+    assert row["weights"] == sparse.to_dense().tolist()

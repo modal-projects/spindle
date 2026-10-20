@@ -276,13 +276,17 @@ def _tensor_values(tensor) -> list[Any]:
         or len(crow) != rows + 1
         or crow[0] != 0
         or crow[-1] != len(values)
+        or len(columns) != len(values)
+        or any(start > end for start, end in zip(crow, crow[1:], strict=False))
     ):
         raise ValueError(
             "CSR TensorData must have shape [sequence] or [sequence, choices] "
             "with row pointers covering its values"
         )
+    if any(column < 0 or column >= width for column in columns):
+        raise ValueError("CSR TensorData column indices must be within the row width")
     dense: list[Any] = [0] * (rows * width)
     for row, (start, end) in enumerate(zip(crow, crow[1:], strict=False)):
         for column, value in zip(columns[start:end], values[start:end], strict=True):
-            dense[row * width + int(column)] = value
+            dense[row * width + int(column)] += value
     return dense
