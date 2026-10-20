@@ -11,7 +11,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
-from spindle.assets import TRANSFORMS
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
 
@@ -45,8 +44,6 @@ class DeploymentConfig(BaseModel):
     def create(cls, recipe: BaseConfig) -> DeploymentConfig:
         """Copy the recipe and attach backend settings."""
         pinned = BaseConfig(**_jsonable(vars(recipe)))
-        if pinned.asset_transform and pinned.asset_transform not in TRANSFORMS:
-            raise ValueError(f"unknown asset_transform: {pinned.asset_transform!r}")
         for field in ("trainer_disk_mib", "inference_disk_mib"):
             disk = getattr(pinned, field)
             if disk and disk < MIN_EPHEMERAL_DISK_MIB:
@@ -99,10 +96,6 @@ class DeploymentConfig(BaseModel):
         return f"/assets/{self.weights_repo}"
 
     @property
-    def asset_transform(self) -> str:
-        return self.recipe.asset_transform
-
-    @property
     def rollout_tensor_parallel_size(self) -> int:
         serving = self.inference_settings
         return serving.get("tp_size", self.recipe.inference_gpus_per_node) // (
@@ -115,7 +108,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
-            recipe.asset_transform,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -141,7 +134,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
-            recipe.asset_transform,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
