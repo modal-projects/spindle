@@ -6,7 +6,9 @@ class Config(BaseConfig):
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
-    asset_transform = "dequantize_bf16"
+    # The release is FP8/FP4; training and serving both use exact BF16 weights.
+    model_weights = "PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
+    weights_revision = "60a77a60c81e63f197c33e0b427c67f26ab27147"
     max_context_length = 8192
     backend = "miles"
     trainer_image = "miles-dsv41-lora"
@@ -94,6 +96,8 @@ class Config(BaseConfig):
         "max_loaded_loras": 8,
         "max_loras_per_batch": 4,
         "lora_strict_loading": True,
+        # Serve the text model only; the checkpoint also carries vision and MTP weights.
+        "json_model_override_args": '{"vision_n_layers": 0, "num_nextn_predict_layers": 0}',
     }
 
 
