@@ -29,16 +29,19 @@ def _local_commit() -> str | None:
         commit = json.loads(direct_url).get("vcs_info", {}).get("commit_id")
         if commit:
             return commit
+    source = Path(__file__)
     try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).parent,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
+        # A tracked version.py means a Spindle checkout, not a project that vendors an install.
+        _git(source.parent, "ls-files", "--error-unmatch", source.name)
+        return _git(source.parent, "rev-parse", "HEAD")
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
 
 def version_tags() -> dict[str, str]:

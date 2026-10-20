@@ -66,6 +66,46 @@ def test_checkouts_fall_back_to_git(monkeypatch):
     assert spindle_version.source_commit() == "def456"
 
 
+def git(cwd, *args):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def project_repo(tmp_path, monkeypatch):
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "config", "user.email", "test@example.com")
+    git(tmp_path, "config", "user.name", "test")
+    (tmp_path / ".gitignore").write_text(".venv/\n")
+    git(tmp_path, "add", ".gitignore")
+    git(tmp_path, "commit", "-qm", "project")
+    monkeypatch.setattr(
+        spindle_version, "distribution", lambda name: Distribution(None)
+    )
+    return tmp_path
+
+
+def test_installs_inside_another_repo_do_not_report_its_commit(
+    project_repo, monkeypatch
+):
+    installed = project_repo / ".venv" / "site-packages" / "spindle" / "version.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("")
+    monkeypatch.setattr(spindle_version, "__file__", str(installed))
+    assert spindle_version.source_commit() is None
+
+
+def test_spindle_checkouts_report_head(project_repo, monkeypatch):
+    source = project_repo / "src" / "spindle" / "version.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("")
+    git(project_repo, "add", "src")
+    git(project_repo, "commit", "-qm", "spindle")
+    monkeypatch.setattr(spindle_version, "__file__", str(source))
+    assert spindle_version.source_commit() == git(project_repo, "rev-parse", "HEAD")
+
+
 def test_unknown_commit_without_git(monkeypatch):
     monkeypatch.setattr(
         spindle_version, "distribution", lambda name: Distribution(None)
