@@ -259,18 +259,47 @@ def test_prepare_model_downloads_assets_once_per_definition(monkeypatch) -> None
         )
         await modal_app._plane().prepare_model(model)
         await modal_app._plane().prepare_model(model)
-        assert await registry.get(f"model_assets_ready:{LORA_DEFINITION}") is not None
 
     asyncio.run(run())
     assert prepared == [LORA_DEFINITION]
+
+
+def test_prepare_model_downloads_assets_again_for_new_weights(monkeypatch) -> None:
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    prepared = []
+    original = modal_app.module_for(LORA_DEFINITION)
+    definition = original
+
+    async def prepare(definition_id: str) -> None:
+        prepared.append(definition.recipe.weights_revision)
+
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    definition = DeploymentConfig.create(
+        BaseConfig(**{**vars(original.recipe), "weights_revision": "abc123"})
+    )
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    assert prepared == ["", "abc123"]
 
 
 def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     events = []
 
-    def download(*, repo_id: str, local_dir: str) -> None:
-        events.append(("download", repo_id, local_dir))
+    def download(*, repo_id: str, revision: str | None, local_dir: str) -> None:
+        events.append(("download", repo_id, revision, local_dir))
 
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
     monkeypatch.setattr(
@@ -283,7 +312,7 @@ def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> N
 
     definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
-        ("download", definition.model, definition.asset_path),
+        ("download", definition.model, None, definition.asset_path),
         ("commit",),
     ]
 
@@ -999,96 +1028,3 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
-
-
-def test_prepare_model_assets_applies_the_recipe_transform(monkeypatch) -> None:
-    from spindle.configuration import BaseConfig
-    from spindle.deployments import DeploymentConfig
-
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    original = modal_app.module_for(FULL_DEFINITION)
-    definition = DeploymentConfig.create(
-        BaseConfig(**{**vars(original.recipe), "asset_transform": "dequantize_bf16"})
-    )
-    events = []
-    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
-    monkeypatch.setattr(
-        "spindle.providers.modal.app.snapshot_download",
-        lambda *, repo_id, local_dir: events.append(("download", repo_id, local_dir)),
-    )
-    monkeypatch.setattr(
-        modal_app,
-        "apply_transform",
-        lambda name, source, target: events.append(
-            ("transform", name, str(source), str(target))
-        ),
-    )
-    monkeypatch.setattr(
-        modal_app,
-        "model_assets",
-        SimpleNamespace(commit=lambda: events.append(("commit",))),
-    )
-
-    modal_app.prepare_model_assets.local(FULL_DEFINITION)
-
-    assert events == [
-        ("download", definition.model, f"{definition.asset_path}.release"),
-        ("commit",),
-        (
-            "transform",
-            "dequantize_bf16",
-            f"{definition.asset_path}.release",
-            definition.asset_path,
-        ),
-        ("commit",),
-    ]
-
-
-def test_prepare_model_assets_keeps_converted_assets(monkeypatch, tmp_path) -> None:
-    from spindle.assets import TRANSFORM_MARKER
-    from spindle.configuration import BaseConfig
-    from spindle.deployments import DeploymentConfig
-
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    original = modal_app.module_for(FULL_DEFINITION)
-    definition = DeploymentConfig.create(
-        BaseConfig(**{**vars(original.recipe), "asset_transform": "dequantize_bf16"})
-    )
-    events = []
-    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
-    monkeypatch.setattr(modal_app, "MODEL_ASSET_ROOT", str(tmp_path))
-    monkeypatch.setattr(
-        type(definition), "asset_path", property(lambda self: str(tmp_path / "model"))
-    )
-    (tmp_path / "model").mkdir()
-    (tmp_path / "model" / TRANSFORM_MARKER).write_text("{}")
-    monkeypatch.setattr(
-        "spindle.providers.modal.app.snapshot_download",
-        lambda *, repo_id, local_dir: events.append(("download", repo_id, local_dir)),
-    )
-    monkeypatch.setattr(
-        modal_app,
-        "apply_transform",
-        lambda name, source, target: events.append(("transform", name)),
-    )
-    monkeypatch.setattr(
-        modal_app,
-        "model_assets",
-        SimpleNamespace(commit=lambda: events.append(("commit",))),
-    )
-
-    modal_app.prepare_model_assets.local(FULL_DEFINITION)
-
-    assert events == [("commit",)]
-
-
-def test_unknown_asset_transform_is_rejected_at_creation() -> None:
-    from spindle.configuration import BaseConfig
-    from spindle.deployments import DeploymentConfig
-
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    original = modal_app.module_for(FULL_DEFINITION)
-    with pytest.raises(ValueError, match="asset_transform"):
-        DeploymentConfig.create(
-            BaseConfig(**{**vars(original.recipe), "asset_transform": "fp4"})
-        )
