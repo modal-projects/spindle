@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import prod
 from typing import Any
 
 from tinker import ForwardBackwardOutput, TensorData
@@ -96,12 +97,19 @@ def _align_row(row: dict[str, Any], multiple: int) -> None:
         return
     filler = row["tokens"][-1]
     row["tokens"] = [*row["tokens"], *([filler] * pad)]
-    row["target_tokens"] = [*row["target_tokens"], *([filler] * pad)]
+    width = (
+        len(row["target_tokens"][0])
+        if isinstance(row["target_tokens"][0], list)
+        else None
+    )
+    target_filler = [filler] * width if width is not None else filler
+    row["target_tokens"] = [*row["target_tokens"], *([target_filler] * pad)]
     row["target_len"] = len(row["target_tokens"])
     for key in ("weights", "advantages", "sampling_logprobs"):
         values = row.get(key)
         if values is not None:
-            row[key] = [*values, *([0.0] * pad)]
+            zero = [0.0] * width if width is not None else 0.0
+            row[key] = [*values, *([zero] * pad)]
     if "routed_experts" in row:
         route = row["routed_experts"]
         width = route["shape"][1] * route["shape"][2]
@@ -129,10 +137,23 @@ def build_outputs(
         prepared.locations, raw_outputs, prepared.target_lengths, strict=True
     ):
         item_index, datum_index = location
-        logprobs = [float(value) for value in output["logprobs"]][:target_length]
+        shape = list(
+            batch.items[item_index]
+            .data[datum_index]
+            .loss_fn_inputs["target_tokens"]
+            .shape
+            or [target_length]
+        )
+        values = output["logprobs"][:target_length]
+        logprobs = (
+            [float(value) for row in values for value in row]
+            if len(shape) == 2
+            else [float(value) for value in values]
+        )
         grouped[item_index][datum_index] = {
             "loss": float(output["loss"]),
             "logprobs": logprobs,
+            "shape": shape,
         }
 
     results = []
@@ -141,7 +162,7 @@ def build_outputs(
             raise RuntimeError("Miles omitted one or more datum outputs")
         complete = [record for record in records if record is not None]
         loss = sum(record["loss"] for record in complete)
-        tokens = sum(len(record["logprobs"]) for record in complete)
+        tokens = sum(record["shape"][0] for record in complete)
         results.append(
             ForwardBackwardOutput(
                 loss_fn_output_type="ArrayRecord",
@@ -155,7 +176,7 @@ def build_outputs(
                         "logprobs": TensorData(
                             data=record["logprobs"],
                             dtype="float32",
-                            shape=[len(record["logprobs"])],
+                            shape=record["shape"],
                         ),
                     }
                     for record in complete
@@ -180,20 +201,23 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     target = inputs.get("target_tokens")
     if target is None:
         raise ValueError(f"datum {datum_index}: target_tokens is required")
-    targets = [int(token) for token in _tensor_values(target)]
-    if len(targets) != len(input_tokens):
+    shape = list(target.shape or [len(target.data)])
+    if len(shape) not in (1, 2) or any(size < 1 for size in shape):
         raise ValueError(
-            f"datum {datum_index}: target_tokens length {len(targets)} "
+            f"datum {datum_index}: target_tokens must have shape [sequence] or [sequence, choices]"
+        )
+    if shape[0] != len(input_tokens):
+        raise ValueError(
+            f"datum {datum_index}: target_tokens length {shape[0]} "
             f"does not match model_input length {len(input_tokens)}"
         )
-    if targets[:-1] != input_tokens[1:]:
-        raise ValueError(
-            f"datum {datum_index}: target_tokens must be model_input shifted by one"
-        )
-
+    targets = _shaped_values(target, shape, int, datum_index, "target_tokens")
+    # The final token is a placeholder after the last input position. Labels
+    # are gathered separately and must never replace the actual model inputs.
+    final_target = targets[-1][0] if len(shape) == 2 else targets[-1]
     row: dict[str, Any] = {
-        "tokens": [*input_tokens, targets[-1]],
-        "target_len": len(targets),
+        "tokens": [*input_tokens, final_target],
+        "target_len": shape[0],
         "target_tokens": targets,
     }
     # Miles derives batch fields from its first datum. Forward only the fields
@@ -207,16 +231,11 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     for source, destination in fields:
         value = inputs.get(source)
         if value is not None:
-            values = [float(item) for item in _tensor_values(value)]
-            if len(values) != len(targets):
-                raise ValueError(
-                    f"datum {datum_index}: {source} length {len(values)} "
-                    f"does not match target_tokens length {len(targets)}"
-                )
-            row[destination] = values
+            row[destination] = _shaped_values(value, shape, float, datum_index, source)
 
     if loss_fn == "cross_entropy":
-        row.setdefault("weights", [1.0] * len(targets))
+        default_weight = [1.0] * shape[1] if len(shape) == 2 else 1.0
+        row.setdefault("weights", [default_weight for _ in range(shape[0])])
     elif loss_fn in _RL_LOSSES:
         missing = [
             name for name in ("advantages", "sampling_logprobs") if name not in row
@@ -227,6 +246,19 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
             )
     row.update(replay_row(inputs, targets))
     return row
+
+
+def _shaped_values(tensor, shape, cast, datum_index, name):
+    values = [cast(value) for value in _tensor_values(tensor)]
+    actual_shape = list(tensor.shape or [len(values)])
+    if actual_shape != shape or len(values) != prod(shape):
+        raise ValueError(
+            f"datum {datum_index}: {name} must have shape {shape} with matching data"
+        )
+    if len(shape) == 2:
+        width = shape[1]
+        return [values[start : start + width] for start in range(0, len(values), width)]
+    return values
 
 
 def _tensor_values(tensor) -> list[Any]:
