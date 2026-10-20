@@ -208,3 +208,42 @@ def test_sampling_support_requires_all_candidate_targets():
     )
     with pytest.raises(ValueError, match="each sampling support"):
         prepare_batch(batch, {"a": 0})
+
+
+def test_sdk_sparse_encoding_of_mostly_zero_2d_inputs():
+    # The SDK stores 2-D target_tokens and weights as CSR when most entries are
+    # zero, which is the usual shape: unweighted prompt positions.
+    targets = torch.zeros(8, 2, dtype=torch.int64)
+    targets[-1] = torch.tensor([4, 6])
+    weights = torch.zeros(8, 2)
+    weights[-1] = torch.tensor([0.5, 1.0])
+    value = Datum(
+        model_input=ModelInput.from_ints([1] * 8),
+        loss_fn_inputs={"target_tokens": targets, "weights": weights},
+    )
+    assert all(
+        value.loss_fn_inputs[name].sparse_crow_indices is not None
+        for name in ("target_tokens", "weights")
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    _, row = prepare_batch(batch, {"a": 0}).slot_rows[0]
+    assert row["target_tokens"] == targets.tolist()
+    assert row["weights"] == weights.tolist()
+
+
+def test_sparse_row_pointers_must_cover_values():
+    value = datum([2, 3, 4])
+    value.loss_fn_inputs["weights"] = TensorData(
+        data=[1.0],
+        dtype="float32",
+        shape=[3, 2],
+        sparse_crow_indices=[0, 1, 1],
+        sparse_col_indices=[0],
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    with pytest.raises(ValueError, match="row pointers"):
+        prepare_batch(batch, {"a": 0})

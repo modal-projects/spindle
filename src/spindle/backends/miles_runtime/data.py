@@ -262,15 +262,27 @@ def _shaped_values(tensor, shape, cast, datum_index, name):
 
 
 def _tensor_values(tensor) -> list[Any]:
+    """Return row-major values; the SDK sends mostly-zero 2-D tensors as CSR."""
     values = tensor.data
     crow = tensor.sparse_crow_indices
     if crow is None:
         return values
-    shape = list(tensor.shape)
+    shape = list(tensor.shape or [])
     columns = tensor.sparse_col_indices
-    if len(shape) != 1 or columns is None or list(crow) != [0, len(values)]:
-        raise ValueError("only one-dimensional CSR TensorData is supported")
-    dense: list[Any] = [0] * shape[0]
-    for column, value in zip(columns, values, strict=True):
-        dense[int(column)] = value
+    rows, width = (1, shape[0]) if len(shape) == 1 else (shape + [None, None])[:2]
+    if (
+        len(shape) not in (1, 2)
+        or columns is None
+        or len(crow) != rows + 1
+        or crow[0] != 0
+        or crow[-1] != len(values)
+    ):
+        raise ValueError(
+            "CSR TensorData must have shape [sequence] or [sequence, choices] "
+            "with row pointers covering its values"
+        )
+    dense: list[Any] = [0] * (rows * width)
+    for row, (start, end) in enumerate(zip(crow, crow[1:], strict=False)):
+        for column, value in zip(columns[start:end], values[start:end], strict=True):
+            dense[row * width + int(column)] = value
     return dense
