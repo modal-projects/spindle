@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import modal
 import questionary
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
@@ -301,7 +303,10 @@ def show_plan(
     )
 
 
-def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
+def deploy_with_progress(
+    console: Console, steps, background=(), *, retry_command: str
+) -> None:
+    """One row per step, in order; `background` (label, future) rows finish last and only warn."""
     console.print(
         "[dim]The first deploy in a workspace builds container images, which can take several minutes.[/dim]"
     )
@@ -311,23 +316,51 @@ def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
         TimeElapsedColumn(),
         console=console,
     )
+
+    def run(task, label, call):
+        try:
+            call()
+        except Exception as exc:
+            progress.update(task, description=f"[red]{label} failed[/red]")
+            output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
+            if output:
+                console.print(output)
+            console.print(
+                f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
+            )
+            raise
+        progress.update(task, completed=1)
+
+    def mark_done(task, future):
+        if future.exception() is None:
+            progress.update(task, completed=1)
+
+    def finish(task, label, future):
+        try:
+            future.result()
+        except Exception as exc:
+            progress.update(task, description=f"[yellow]{label} skipped[/yellow]")
+            console.print(
+                f"[yellow]{label} failed:[/yellow] {escape(str(exc))}\n"
+                "The first request that needs it builds it instead."
+            )
+
     started = time.monotonic()
     with progress:
-        tasks = [progress.add_task(label, total=1, start=False) for label, _ in steps]
-        for task, (label, step) in zip(tasks, steps):
+        waiting = []
+        for label, future in background:
+            task = progress.add_task(label, total=1)
+            future.add_done_callback(partial(mark_done, task))
+            waiting.append((task, label, future))
+        rows = [
+            (progress.add_task(label, total=1, start=False), label, step)
+            for label, step in steps
+        ]
+        for task, label, step in rows:
             progress.start_task(task)
-            try:
-                step()
-            except Exception as exc:
-                progress.update(task, description=f"[red]{label} failed[/red]")
-                output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
-                if output:
-                    console.print(output)
-                console.print(
-                    f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
-                )
-                raise
-            progress.update(task, completed=1)
+            run(task, label, step)
+        for task, label, future in waiting:
+            finish(task, label, future)
     console.print(
         f"[green]✓[/green] Deployed in {format_duration(time.monotonic() - started)}"
     )

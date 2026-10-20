@@ -1,3 +1,5 @@
+from concurrent.futures import Future
+
 from rich.console import Console
 
 from spindle import deploy_wizard
@@ -60,6 +62,45 @@ def test_progress_reports_the_total_deploy_time():
     steps = [("Trainer    a", lambda: None), ("API server", lambda: None)]
     deploy_wizard.deploy_with_progress(console, steps, retry_command="spindle deploy a")
     assert "Deployed in 0s" in console.export_text()
+
+
+def test_progress_runs_every_step_before_waiting_on_background_work():
+    console = Console(record=True, width=120)
+    order = []
+    building = Future()
+
+    def deploy_frontend():
+        order.append(("frontend", building.done()))
+        building.set_result(None)
+
+    steps = [
+        ("Trainer    a", lambda: order.append("trainer")),
+        ("API server", deploy_frontend),
+    ]
+    deploy_wizard.deploy_with_progress(
+        console, steps, [("Sampler image", building)], retry_command="spindle deploy a"
+    )
+    assert order == ["trainer", ("frontend", False)]
+    assert "Sampler image" in console.export_text()
+
+
+def test_progress_only_warns_when_background_work_fails():
+    console = Console(record=True, width=120)
+    building = Future()
+    building.set_exception(RuntimeError("image build failed"))
+    ran = []
+    steps = [("Trainer    a", lambda: None), ("API server", lambda: ran.append(1))]
+    deploy_wizard.deploy_with_progress(
+        console,
+        steps,
+        [("Sampler image", building)],
+        retry_command="spindle deploy a",
+    )
+    output = console.export_text()
+    assert ran == [1]
+    assert "Sampler image failed: image build failed" in output
+    assert "builds it instead" in output
+    assert "Deployed in" in output
 
 
 def test_format_duration():

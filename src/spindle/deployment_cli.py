@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import Future
 from functools import partial
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from spindle.deployments import (
 from spindle.providers.modal.deployment_apps import (
     build_inference_app,
     build_rollout_app,
+    build_sampler_image,
     build_trainer_app,
 )
 from spindle.providers.modal.deployment_configs import (
@@ -175,13 +178,36 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
                 (f"Inference  {deployment.name}", partial(deploy_inference, deployment))
             )
     steps.append(("API server", deploy_frontend))
+    build_image = partial(build_sampler_image, platform["frontend"], environment)
     if run_steps is not None:
-        run_steps(steps)
+        run_steps(steps, [("Sampler image", in_background(build_image))])
         return
     with modal.enable_output():
-        for _, step in steps[:-1]:
+        building = in_background(build_image)
+        for _, step in steps:
             step()
-    deploy_frontend()
+        try:
+            building.result()
+        except Exception as exc:
+            print(
+                f"Sampler image build failed: {exc}\n"
+                "The first sampling request builds it instead.",
+                file=sys.stderr,
+            )
+
+
+def in_background(step):
+    """Run `step` on a daemon thread so a failed or interrupted deploy exits promptly."""
+    future = Future()
+
+    def run():
+        try:
+            future.set_result(step())
+        except BaseException as exc:
+            future.set_exception(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+    return future
 
 
 def parser():

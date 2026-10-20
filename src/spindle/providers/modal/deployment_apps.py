@@ -55,6 +55,14 @@ def image_for(backend):
     ]
 
 
+def build_sampler_image(frontend, environment):
+    """Build the pool image ahead of the first request; pools reuse the cached build."""
+    app = modal.App.lookup(
+        frontend, environment_name=environment, create_if_missing=True
+    )
+    image_for("sglang").build(app)
+
+
 def volumes_for(platform):
     storage = platform["storage"]
     return {

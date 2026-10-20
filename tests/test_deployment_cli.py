@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -33,7 +34,13 @@ def deployment():
 def deployed(monkeypatch):
     monkeypatch.setattr(cli.sys, "version_info", (3, 12, 0))
     state = SimpleNamespace(
-        apps=set(), configs=[], platform=None, pools=[], calls=[], fail=None
+        apps=set(),
+        configs=[],
+        platform=None,
+        pools=[],
+        calls=[],
+        fail=None,
+        images=[],
     )
 
     class FakeApp:
@@ -89,6 +96,11 @@ def deployed(monkeypatch):
         lambda row, pool, platform: (FakeApp(pool.app_name, "pool"), None),
     )
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(
+        cli,
+        "build_sampler_image",
+        lambda frontend, environment: state.images.append((frontend, environment)),
+    )
     monkeypatch.setattr(
         modal.Dict,
         "from_name",
@@ -186,6 +198,37 @@ def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deploye
     assert "Inference  qwen35-9b-lora-16k failed" in output
     assert "spindle deploy qwen35-9b-lora-16k" in output
     assert deployed.calls == ["trainer", "inference"]
+
+
+def test_sampler_image_failure_still_deploys_the_frontend(
+    monkeypatch, deployed, capsys
+):
+    def broken(frontend, environment):
+        raise RuntimeError("image build failed")
+
+    monkeypatch.setattr(cli, "build_sampler_image", broken)
+    cli.deploy([deployment()])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert "Sampler image build failed: image build failed" in capsys.readouterr().err
+
+
+def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
+    frontend_deployed = threading.Event()
+    deploy_frontend = subprocess.run
+
+    def build(frontend, environment):
+        assert frontend_deployed.wait(timeout=5)
+        deployed.images.append(frontend)
+
+    def run(*args, **kwargs):
+        deploy_frontend(*args, **kwargs)
+        frontend_deployed.set()
+
+    monkeypatch.setattr(cli, "build_sampler_image", build)
+    monkeypatch.setattr(subprocess, "run", run)
+    cli.deploy([deployment()])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.images == ["spindle"]
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
