@@ -34,11 +34,11 @@ def platform_from_env():
     return json.loads(data)
 
 
-def _ask_frontend(frontend, name, environment, missing):
+def _ask_frontend(frontend, name, environment, missing, *args):
     try:
         call = modal.Function.from_name(
             frontend, name, environment_name=environment
-        ).spawn()
+        ).spawn(*args)
     except modal.exception.NotFoundError:
         return missing
     try:
@@ -65,6 +65,13 @@ def deployed_pools(frontend, environment=None):
 
 def deployed_platform(frontend, environment=None):
     return _ask_frontend(frontend, "deployed_platform", environment, None)
+
+
+def start_weights_download(frontend, environment, definition_id):
+    """Start the base-weight download in a detached call; True while it runs."""
+    return _ask_frontend(
+        frontend, "start_weights_download", environment, None, definition_id
+    )
 
 
 def pool_config(definition_id):

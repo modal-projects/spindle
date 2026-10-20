@@ -41,6 +41,7 @@ def deployed(monkeypatch):
         calls=[],
         fail=None,
         images=[],
+        weights=[],
     )
 
     class FakeApp:
@@ -101,6 +102,12 @@ def deployed(monkeypatch):
         "build_sampler_image",
         lambda frontend, environment: state.images.append((frontend, environment)),
     )
+
+    def start_weights(frontend, environment, definition_id):
+        state.weights.append((definition_id, "frontend" in state.calls))
+        return True
+
+    monkeypatch.setattr(cli, "start_weights_download", start_weights)
     monkeypatch.setattr(
         modal.Dict,
         "from_name",
@@ -229,6 +236,32 @@ def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
     cli.deploy([deployment()])
     assert deployed.calls == ["trainer", "inference", "frontend"]
     assert deployed.images == ["spindle"]
+
+
+def test_deploy_starts_weight_downloads_on_the_new_frontend(deployed, capsys):
+    cli.deploy([deployment()])
+    assert deployed.weights == [(deployment().definition_id, True)]
+    assert (
+        "Weights qwen35-9b-lora-16k: downloading in the background"
+        in capsys.readouterr().out
+    )
+
+
+def test_weight_download_start_failure_only_warns(monkeypatch, deployed):
+    def broken(frontend, environment, definition_id):
+        raise RuntimeError("frontend unavailable")
+
+    monkeypatch.setattr(cli, "start_weights_download", broken)
+    console = Console(record=True, width=160)
+    cli.deploy(
+        [deployment()],
+        run_steps=partial(
+            deploy_wizard.deploy_with_progress, console, retry_command="spindle deploy"
+        ),
+    )
+    output = console.export_text()
+    assert "Weights    qwen35-9b-lora-16k not started (frontend unavailable)" in output
+    assert "Deployed in" in output
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
