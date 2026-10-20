@@ -20,6 +20,7 @@ class Config(BaseConfig):
             "gate_proj",
             "up_proj",
             "down_proj",
+            "lm_head",
         ],
         "max_tokens_per_gpu": 32768,
         "max_lora_slots": 6,
