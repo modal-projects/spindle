@@ -21,6 +21,7 @@ dependencies = [
     "uvicorn>=0.52.0",
     "xxhash>=3.8.1",
     "zstandard>=0.25.0",
+    "questionary>=2.1",
 ]
 
 [tool.setuptools.packages.find]
