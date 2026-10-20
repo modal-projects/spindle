@@ -2,13 +2,16 @@ import json
 import subprocess
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import modal
 import pytest
+from rich.console import Console
 
+from spindle import deploy_wizard
 from spindle import deployment_cli as cli
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal import deployment_configs
@@ -51,7 +54,7 @@ def deployed(monkeypatch):
         if name not in state.apps:
             raise modal.exception.NotFoundError("not deployed")
 
-    def run(command, *, env, check):
+    def run(command, *, env, check, **kwargs):
         state.calls.append("frontend")
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
@@ -94,11 +97,11 @@ def deployed(monkeypatch):
     return state
 
 
-def test_deploy_defaults_to_bundled_configs(tmp_path, monkeypatch, deployed):
+def test_deploy_all_deploys_bundled_configs(tmp_path, monkeypatch, deployed):
     bundled = config_path("qwen35-9b-lora-16k").parent.glob("[!_]*.py")
     expected = {load(path).name for path in bundled}
     monkeypatch.chdir(tmp_path)
-    cli.main(["deploy"])
+    cli.main(["deploy", "--all"])
     assert len(expected) > 1
     assert {row["recipe"]["name"] for row in deployed.configs} == expected
     assert max(len(value) for value in deployed.env.values()) < 131_072
@@ -122,6 +125,79 @@ def test_unresponsive_frontend_fails_fast(monkeypatch):
     with pytest.raises(ValueError, match="modal app stop spindle"):
         deployment_configs.deployed_configs("spindle", "dev")
     assert cancelled == [True]
+
+
+def test_deploy_accepts_bundled_config_names(deployed):
+    cli.main(["deploy", "qwen35-9b-lora-16k", "qwen3-8b-lora-32k"])
+    assert [row["recipe"]["name"] for row in deployed.configs] == [
+        "qwen35-9b-lora-16k",
+        "qwen3-8b-lora-32k",
+    ]
+
+
+def test_deploy_rejects_unknown_config_names(deployed, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["deploy", "not-a-model"])
+    assert "unknown config 'not-a-model'" in capsys.readouterr().err
+    assert deployed.calls == []
+
+
+def test_bare_deploy_without_a_terminal_deploys_nothing(monkeypatch, deployed, capsys):
+    monkeypatch.setattr(cli, "interactive", lambda: False)
+    with pytest.raises(SystemExit):
+        cli.main(["deploy"])
+    assert "--all" in capsys.readouterr().err
+    assert deployed.calls == []
+
+
+def test_bare_deploy_in_a_terminal_deploys_the_picked_models(monkeypatch, deployed):
+    presets = deploy_wizard.bundled_presets()
+    picked = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 32_768)]
+    shown = []
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    monkeypatch.setattr(deploy_wizard, "choose", lambda *args: picked)
+    monkeypatch.setattr(
+        deploy_wizard,
+        "show_next_steps",
+        lambda console, chosen, *args: shown.append(chosen),
+    )
+    cli.main(["deploy"])
+    assert [row["recipe"]["name"] for row in deployed.configs] == ["qwen35-9b-lora-64k"]
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert shown == [picked]
+
+
+def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deployed):
+    console = Console(record=True, width=120)
+    presets = deploy_wizard.bundled_presets()
+    picked = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 16_384)]
+    deployed.fail = "inference"
+    with pytest.raises(RuntimeError):
+        cli.deploy(
+            cli.compile_configs([preset.path for preset in picked]),
+            run_steps=partial(
+                deploy_wizard.deploy_with_progress,
+                console,
+                retry_command=deploy_wizard.deploy_command(picked),
+            ),
+        )
+    output = console.export_text()
+    assert "Trainer    qwen35-9b-lora-16k" in output
+    assert "Inference  qwen35-9b-lora-16k failed" in output
+    assert "spindle deploy qwen35-9b-lora-16k" in output
+    assert deployed.calls == ["trainer", "inference"]
+
+
+def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
+    def cancel(*args):
+        raise deploy_wizard.Cancelled
+
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    monkeypatch.setattr(deploy_wizard, "choose", cancel)
+    with pytest.raises(SystemExit):
+        cli.main(["deploy"])
+    assert "cancelled" in capsys.readouterr().err
+    assert deployed.calls == []
 
 
 def test_deploy_reuses_unchanged_apps(deployed):
