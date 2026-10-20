@@ -9,10 +9,11 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
+from spindle.resource_scope import ResourcePolicy, SessionAttribution, resource_name, scoped_definition, definition_owner
 
 
 def _jsonable(value):
@@ -27,11 +28,24 @@ class DeploymentConfig(BaseModel):
     recipe: BaseConfig
     trainer_settings: dict
     inference_settings: dict
+    attribution: SessionAttribution | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    def for_session(self, namespace: str, attribution: SessionAttribution):
+        recipe = BaseConfig(**_jsonable(vars(self.recipe)))
+        recipe.name = scoped_definition(self.definition_id, namespace, attribution.session_id)
+        return self.model_copy(update={"recipe": recipe, "attribution": attribution})
+
+    @property
+    def base_definition_id(self) -> str:
+        return definition_owner(self.definition_id)[0]
 
     @field_validator("recipe", mode="before")
     @classmethod
     def restore_recipe(cls, value):
-        return BaseConfig(**value) if isinstance(value, dict) else value
+        recipe = BaseConfig(**value) if isinstance(value, dict) else value
+        if isinstance(recipe, BaseConfig):
+            ResourcePolicy.from_platform(recipe.platform)
+        return recipe
 
     @field_serializer("recipe")
     def serialize_recipe(self, recipe):
@@ -72,11 +86,11 @@ class DeploymentConfig(BaseModel):
 
     @property
     def trainer_app_name(self) -> str:
-        return f"spindle-trainer-{self.recipe.name}"
+        return resource_name("trainer", self.recipe.name)
 
     @property
     def inference_app_name(self) -> str:
-        return f"spindle-inference-{self.recipe.name}"
+        return f"spindle-inference-{self.base_definition_id}"
 
     @property
     def weights_repo(self) -> str:
@@ -173,6 +187,7 @@ def validate_frontend(recipes: list[BaseConfig]) -> None:
         raise ValueError("duplicate deployment name")
     first = recipes[0]
     for recipe in recipes:
+        ResourcePolicy.from_platform(recipe.platform)
         if recipe.platform != first.platform:
             raise ValueError("deployments on one frontend must share platform settings")
         if (

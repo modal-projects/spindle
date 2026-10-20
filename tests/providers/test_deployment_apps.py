@@ -606,3 +606,17 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_owned_trainer_and_sampler_receive_identical_immutable_tags(builders):
+    from spindle.resource_scope import SessionAttribution
+    attribution = SessionAttribution(session_id='session-a', run_id='run-1', client_tags=(('client', 'a'),))
+    for preset in ('qwen35-9b-lora-16k', 'qwen35-4b-fft-64k'):
+        row = deployment(preset).for_session('frontend/metaflow', attribution)
+        trainer, _ = deployment_apps.build_trainer_app(row, image=object())
+        pool = LoraPoolSpec(row.definition_id) if row.parameterization == 'lora' else FFTPoolSpec.base(row.definition_id)
+        sampler, _ = deployment_apps.build_rollout_app(row, pool, image=object())
+        for app in (trainer, sampler):
+            assert all(app.tags[key] == value for key, value in attribution.app_tags().items())
+        assert trainer.tags['spindle_role'] == 'trainer'
+        assert sampler.tags['spindle_role'] == 'inference'

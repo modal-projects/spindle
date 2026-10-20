@@ -148,6 +148,14 @@ def test_deploy_reuses_unchanged_apps(deployed):
     assert deployed.calls == ["inference", "frontend"]
 
 
+def test_session_deployment_publishes_the_policy(deployed):
+    row = deployment()
+    row.recipe.platform["resource_scope"] = "session"
+    cli.deploy([row])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.configs[0]["recipe"]["platform"]["resource_scope"] == "session"
+
+
 @pytest.mark.parametrize("mode", ["lora", "full"])
 def test_inference_changes_refresh_existing_pools_and_retry_before_frontend(
     deployed, mode

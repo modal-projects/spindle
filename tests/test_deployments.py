@@ -45,6 +45,33 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
+def test_resource_policy_is_validated_when_loading_saved_deployments():
+    row = resolved()
+    assert "resource_scope" not in row.recipe.platform
+    saved = row.model_dump(mode="json")
+    saved["recipe"]["platform"]["resource_scope"] = "sesion"
+    with pytest.raises(ValueError, match="scope"):
+        DeploymentConfig.model_validate(saved)
+
+
+def test_session_policy_and_allowlist_round_trip_without_changing_worker_settings():
+    shared = resolved()
+    isolated = resolved(recipe(platform__resource_scope="session", platform__resource_tag_keys=["project"]))
+    restored = DeploymentConfig.model_validate_json(isolated.model_dump_json())
+    assert restored.recipe.platform["resource_scope"] == "session"
+    assert restored.recipe.platform["resource_tag_keys"] == ["project"]
+    assert isolated.trainer_identity() == shared.trainer_identity()
+    assert isolated.inference_identity() == shared.inference_identity()
+    validate_frontend([isolated.recipe])
+    with pytest.raises(ValueError, match="share platform settings"):
+        validate_frontend([isolated.recipe, recipe(name="other")])
+
+
+def test_frontend_validation_rejects_invalid_resource_policy():
+    with pytest.raises(ValueError, match="reserved"):
+        validate_frontend([recipe(platform__resource_tag_keys=["spindle_session_id"])])
+
+
 def test_presets_context_topology_and_backend_options():
     spec = recipe()
     config = backend_config(spec)["miles"]

@@ -27,6 +27,11 @@ The control plane is a stateless, autoscaling Modal web server. Its replicas are
 The control plane stores sessions, models, engine assignments, and sampling
 state in Modal Dicts so every replica shares the same durable state.
 
+[Optional session isolation](session-isolation.md) restricts compute sharing to
+one Tinker ServiceClient session and tags its trainer and sampler apps. Shared
+mode remains the default. The guide covers configuration, ownership, limits,
+and cleanup.
+
 ## Training engines
 
 Client sessions are handled by the control plane. Training engines receive only

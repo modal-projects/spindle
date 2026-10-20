@@ -9,6 +9,7 @@ from pathlib import Path
 
 import modal
 from stitch.pools.modal_flash import ModalFlashPool
+from spindle.resource_scope import resource_name
 
 from .deployment_configs import (
     PLATFORM_ENV,
@@ -33,7 +34,7 @@ class LoraPoolSpec:
 
     @property
     def app_name(self) -> str:
-        return f"spindle-lora-{self.definition_id}"
+        return resource_name("lora", self.definition_id)
 
     def as_dict(self) -> dict[str, str]:
         return asdict(self)
