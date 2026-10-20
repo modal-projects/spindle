@@ -11,7 +11,7 @@ from spindle.replay import REPLAY_FIELDS
 _replay_builder = None
 
 
-def replay_row(inputs, targets: list[int]) -> dict:
+def replay_row(inputs, targets: list[int] | list[list[int]]) -> dict:
     row = {}
     n = len(targets)
     for name in REPLAY_FIELDS & inputs.keys():
@@ -57,7 +57,11 @@ def replay_row(inputs, targets: list[int]) -> dict:
                 "sampling mask offsets must have input_tokens + 1 entries, start at zero, and end at the id count"
             )
         for token, a, b in zip(targets, offsets, offsets[1:], strict=False):
-            if a != b and (token not in ids[a:b] or len(set(ids[a:b])) != b - a):
+            candidates = token if isinstance(token, list) else [token]
+            if a != b and (
+                any(candidate not in ids[a:b] for candidate in candidates)
+                or len(set(ids[a:b])) != b - a
+            ):
                 raise ValueError(
                     "each sampling support must contain its target and have no duplicate ids"
                 )

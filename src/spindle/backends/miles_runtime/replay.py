@@ -11,6 +11,8 @@ from functools import wraps
 
 import torch
 
+from .targets import install_multi_target_hooks
+
 _replayed_run = None
 
 
@@ -130,6 +132,7 @@ def install_replay_hooks(
         )["log_probs"]
 
     tinker_losses._target_logprobs = target_logprobs
+    install_multi_target_hooks(tinker_losses)
     original_iterator = lora_model.get_data_iterator
 
     @wraps(original_iterator)
