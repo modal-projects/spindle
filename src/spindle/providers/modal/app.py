@@ -255,6 +255,21 @@ async def _all_or_first_error(*steps) -> None:
         raise
 
 
+def _pool_min_containers(pool: LoraPoolSpec | FFTPoolSpec) -> int:
+    if isinstance(pool, FFTPoolSpec) and pool.min_containers is not None:
+        return pool.min_containers
+    return module_for(pool.definition_id).recipe.inference_min_replicas
+
+
+async def _deploy_with_base_weights(pool: LoraPoolSpec | FFTPoolSpec, deploy) -> None:
+    """Overlap the weight download with the deploy unless warm containers would boot without them."""
+    if _pool_min_containers(pool):
+        await _ensure_model_assets(pool.definition_id)
+        await deploy()
+    else:
+        await _all_or_first_error(_ensure_model_assets(pool.definition_id), deploy())
+
+
 async def _trainer_booted(registry, definition_id: str) -> bool:
     return any(
         record.definition_id == definition_id
@@ -513,10 +528,13 @@ def _plane():
         definition_id = session.engine_definition_id
         parameterization = parameterization_for(definition_id)
         if parameterization == "lora":
-            steps = [_ready_lora_pool(LoraPoolSpec(definition_id))]
+            lora_pool = LoraPoolSpec(definition_id)
             if session.model_id is None:
-                steps.append(_ensure_model_assets(definition_id))
-            await _all_or_first_error(*steps)
+                await _deploy_with_base_weights(
+                    lora_pool, lambda: _ready_lora_pool(lora_pool)
+                )
+            else:
+                await _ready_lora_pool(lora_pool)
             return
         if parameterization != "full":
             return
@@ -537,10 +555,12 @@ def _plane():
         if record is None:
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
-            steps = [ensure_fft_pool.remote.aio(pool.as_dict())]
             if session.model_id is None:
-                steps.append(_ensure_model_assets(definition_id))
-            await _all_or_first_error(*steps)
+                await _deploy_with_base_weights(
+                    pool, lambda: ensure_fft_pool.remote.aio(pool.as_dict())
+                )
+            else:
+                await ensure_fft_pool.remote.aio(pool.as_dict())
         else:
             await _touch_fft_pool(pool)
 

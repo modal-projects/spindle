@@ -1086,3 +1086,26 @@ def test_first_pool_surfaces_the_failing_step(monkeypatch, failing):
 
     asyncio.run(run())
     assert cancelled == [{"assets": "deploy", "deploy": "assets"}[failing]]
+
+
+def test_warm_pool_downloads_weights_before_deploying(monkeypatch):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    warm = DeploymentConfig.create(load(config_path("qwen35-9b-lora-128k")))
+    assert warm.recipe.inference_min_replicas > 0
+    monkeypatch.setattr(modal_app, "DEFINITIONS", (*modal_app.DEFINITIONS, warm))
+    events = []
+
+    async def prepare(definition_id):
+        await asyncio.sleep(0.01)
+        events.append("assets")
+
+    async def deploy(spec):
+        events.append("deploy")
+        return "https://gateway"
+
+    async def run():
+        plane = concurrent_pool_plane(monkeypatch, prepare=prepare, deploy=deploy)
+        await plane.ensure_sampling_pool(base_session(warm.definition_id))
+
+    asyncio.run(run())
+    assert events == ["assets", "deploy"]
