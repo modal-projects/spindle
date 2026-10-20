@@ -557,6 +557,42 @@ def test_model_creation_reuses_released_slot_at_trainer_cap() -> None:
 
 
 def test_pending_creation_explains_trainer_startup() -> None:
+    async def scaling(definition_id: str) -> bool:
+        return True
+
+    async def run() -> None:
+        engines = LocalEnginePlatform(DEFINITION, EchoExecutor)
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            engines,
+            reconcile_trainers=scaling,
+            trainer_autoscaling=lambda _: True,
+        )
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"base_model": "Qwen/Qwen3-4B"},
+        )
+        assert (await plane.retrieve(creation.request_id)).reason is None
+        now[0] += 75
+        resolution = await plane.retrieve(creation.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            "starting a trainer for Qwen/Qwen3-4B (1m 15s so far)"
+        )
+
+        await engines.spawn_instance(DEFINITION)
+        placed = await plane.retrieve(creation.request_id)
+        assert placed.status == FutureResolutionStatus.COMPLETE
+
+    asyncio.run(run())
+
+
+def test_waiting_for_a_trainer_slot_is_not_reported_as_startup() -> None:
     async def run() -> None:
         plane, session_id = await session_and_plane(max_models=1)
         now = [time.time()]
@@ -565,15 +601,15 @@ def test_pending_creation_explains_trainer_startup() -> None:
         first = await plane.create_model(
             session_id=session_id, model_seq_id=0, definition_id=DEFINITION, spec=spec
         )
-        assert (await plane.retrieve(first.request_id)).reason is None
+        assert (
+            await plane.retrieve(first.request_id)
+        ).status == FutureResolutionStatus.COMPLETE
         overflow = await plane.create_model(
             session_id=session_id, model_seq_id=1, definition_id=DEFINITION, spec=spec
         )
-        now[0] += 75
+        now[0] += 20 * 60
         resolution = await plane.retrieve(overflow.request_id)
         assert resolution.status == FutureResolutionStatus.PENDING
-        assert resolution.reason.startswith(
-            "starting a trainer for Qwen/Qwen3-4B (1m 15s so far)"
-        )
+        assert resolution.reason is None
 
     asyncio.run(run())

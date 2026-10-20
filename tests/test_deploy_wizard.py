@@ -1,7 +1,5 @@
-import threading
 from concurrent.futures import Future
 
-import pytest
 from rich.console import Console
 
 from spindle import deploy_wizard
@@ -66,42 +64,43 @@ def test_progress_reports_the_total_deploy_time():
     assert "Deployed in 0s" in console.export_text()
 
 
-def test_progress_waits_for_background_work_before_the_last_step():
+def test_progress_runs_every_step_before_waiting_on_background_work():
     console = Console(record=True, width=120)
     order = []
     building = Future()
-    steps = [
-        ("Trainer    a", lambda: order.append("trainer")),
-        ("API server", lambda: order.append(("frontend", building.done()))),
-    ]
 
-    def finish_build():
-        order.append("image")
+    def deploy_frontend():
+        order.append(("frontend", building.done()))
         building.set_result(None)
 
-    threading.Timer(0.05, finish_build).start()
+    steps = [
+        ("Trainer    a", lambda: order.append("trainer")),
+        ("API server", deploy_frontend),
+    ]
     deploy_wizard.deploy_with_progress(
         console, steps, [("Sampler image", building)], retry_command="spindle deploy a"
     )
-    assert order == ["trainer", "image", ("frontend", True)]
+    assert order == ["trainer", ("frontend", False)]
     assert "Sampler image" in console.export_text()
 
 
-def test_progress_marks_a_failed_background_step():
+def test_progress_only_warns_when_background_work_fails():
     console = Console(record=True, width=120)
     building = Future()
     building.set_exception(RuntimeError("image build failed"))
-    steps = [("Trainer    a", lambda: None), ("API server", lambda: None)]
-    with pytest.raises(RuntimeError):
-        deploy_wizard.deploy_with_progress(
-            console,
-            steps,
-            [("Sampler image", building)],
-            retry_command="spindle deploy a",
-        )
+    ran = []
+    steps = [("Trainer    a", lambda: None), ("API server", lambda: ran.append(1))]
+    deploy_wizard.deploy_with_progress(
+        console,
+        steps,
+        [("Sampler image", building)],
+        retry_command="spindle deploy a",
+    )
     output = console.export_text()
-    assert "Sampler image failed" in output
-    assert "spindle deploy a" in output
+    assert ran == [1]
+    assert "Sampler image failed: image build failed" in output
+    assert "builds it instead" in output
+    assert "Deployed in" in output
 
 
 def test_format_duration():

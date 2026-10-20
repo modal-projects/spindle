@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 from contextlib import nullcontext
 from copy import deepcopy
 from functools import partial
@@ -62,7 +63,6 @@ def deployed(monkeypatch):
 
     def run(command, *, env, check, **kwargs):
         state.calls.append("frontend")
-        assert state.images, "frontend deployed before the sampler image was built"
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
         state.configs = json.loads(Path(env[CONFIGS_FILE_ENV]).read_text())
@@ -208,14 +208,35 @@ def test_every_deploy_builds_the_sampler_image_once(deployed):
     assert deployed.images == [("spindle", None), ("spindle", None)]
 
 
-def test_sampler_image_failure_stops_before_the_frontend(monkeypatch, deployed):
+def test_sampler_image_failure_still_deploys_the_frontend(
+    monkeypatch, deployed, capsys
+):
     def broken(frontend, environment):
         raise RuntimeError("image build failed")
 
     monkeypatch.setattr(cli, "build_sampler_image", broken)
-    with pytest.raises(RuntimeError, match="image build failed"):
-        cli.deploy([deployment()])
-    assert "frontend" not in deployed.calls
+    cli.deploy([deployment()])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert "Sampler image build failed: image build failed" in capsys.readouterr().err
+
+
+def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
+    frontend_deployed = threading.Event()
+    deploy_frontend = subprocess.run
+
+    def build(frontend, environment):
+        assert frontend_deployed.wait(timeout=5)
+        deployed.images.append(frontend)
+
+    def run(*args, **kwargs):
+        deploy_frontend(*args, **kwargs)
+        frontend_deployed.set()
+
+    monkeypatch.setattr(cli, "build_sampler_image", build)
+    monkeypatch.setattr(subprocess, "run", run)
+    cli.deploy([deployment()])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.images == ["spindle"]
 
 
 def test_progress_shows_the_sampler_image_row(deployed):

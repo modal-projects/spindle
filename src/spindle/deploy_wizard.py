@@ -10,6 +10,7 @@ from pathlib import Path
 import modal
 import questionary
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
@@ -305,7 +306,7 @@ def show_plan(
 def deploy_with_progress(
     console: Console, steps, background=(), *, retry_command: str
 ) -> None:
-    """One row per step; `background` (label, future) pairs must finish before the last step."""
+    """One row per step, in order; `background` (label, future) rows finish last and only warn."""
     console.print(
         "[dim]The first deploy in a workspace builds container images, which can take several minutes.[/dim]"
     )
@@ -334,6 +335,16 @@ def deploy_with_progress(
         if future.exception() is None:
             progress.update(task, completed=1)
 
+    def finish(task, label, future):
+        try:
+            future.result()
+        except Exception as exc:
+            progress.update(task, description=f"[yellow]{label} skipped[/yellow]")
+            console.print(
+                f"[yellow]{label} failed:[/yellow] {escape(str(exc))}\n"
+                "The first request that needs it builds it instead."
+            )
+
     started = time.monotonic()
     with progress:
         waiting = []
@@ -345,14 +356,11 @@ def deploy_with_progress(
             (progress.add_task(label, total=1, start=False), label, step)
             for label, step in steps
         ]
-        for task, label, step in rows[:-1]:
+        for task, label, step in rows:
             progress.start_task(task)
             run(task, label, step)
         for task, label, future in waiting:
-            run(task, label, future.result)
-        task, label, step = rows[-1]
-        progress.start_task(task)
-        run(task, label, step)
+            finish(task, label, future)
     console.print(
         f"[green]✓[/green] Deployed in {format_duration(time.monotonic() - started)}"
     )

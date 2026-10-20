@@ -99,7 +99,8 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
     """Deploy missing or changed trainer and inference apps, then the frontend.
 
     `run_steps(steps, background)` gets the ordered steps and (label, future) pairs already
-    running; the sampler image build overlaps every step but the frontend deploy.
+    running. The sampler image build overlaps every step; a failed build only warns, since
+    the first sampling request builds the image anyway.
     """
     if sys.version_info[:2] != (3, 12):
         raise ValueError(
@@ -188,10 +189,16 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
         return
     with modal.enable_output():
         building = in_background(build_image)
-        for _, step in steps[:-1]:
+        for _, step in steps:
             step()
-        building.result()
-    deploy_frontend()
+        try:
+            building.result()
+        except Exception as exc:
+            print(
+                f"Sampler image build failed: {exc}\n"
+                "The first sampling request builds it instead.",
+                file=sys.stderr,
+            )
 
 
 def in_background(step):
