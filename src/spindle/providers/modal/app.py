@@ -5,13 +5,11 @@ import logging
 import os
 import time
 from dataclasses import asdict
-from pathlib import Path
 
 import modal
 from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
-from spindle.assets import TRANSFORM_MARKER, apply_transform
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
@@ -185,14 +183,11 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
-    if definition.asset_transform:
-        if not Path(checkpoint, TRANSFORM_MARKER).exists():
-            release = f"{checkpoint}.release"
-            snapshot_download(repo_id=definition.weights_repo, local_dir=release)
-            model_assets.commit()
-            apply_transform(definition.asset_transform, Path(release), Path(checkpoint))
-    else:
-        snapshot_download(repo_id=definition.weights_repo, local_dir=checkpoint)
+    snapshot_download(
+        repo_id=definition.weights_repo,
+        revision=definition.recipe.weights_revision or None,
+        local_dir=checkpoint,
+    )
     model_assets.commit()
 
 
@@ -241,8 +236,11 @@ async def ensure_lora_pool(spec: dict) -> str:
 
 
 async def _ensure_model_assets(definition_id: str) -> None:
-    """Download the base weights once per definition; later calls skip the container start."""
-    key = f"model_assets_ready:{definition_id}"
+    """Download the base weights once per definition and weights revision; later
+    calls skip the container start."""
+    definition = module_for(definition_id)
+    revision = definition.recipe.weights_revision
+    key = f"model_assets_ready:{definition_id}:{definition.weights_repo}@{revision}"
     if await shared_kv().get(key) is not None:
         return
     await prepare_model_assets.remote.aio(definition_id)

@@ -32,8 +32,8 @@ class BaseConfig:
     model = ""
     # Hugging Face repo for base weights; defaults to ``model``.
     model_weights = ""
-    # Conversion applied to the downloaded weights; see spindle.assets.
-    asset_transform = ""
+    # Commit of the weights repo to download; empty follows its default branch.
+    weights_revision = ""
     max_context_length = 16384
     parameterization = "lora"
     backend = "miles"
