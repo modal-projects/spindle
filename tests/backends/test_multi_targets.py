@@ -155,3 +155,56 @@ def test_candidate_scores_and_gradients_share_logits(nested):
     torch.testing.assert_close(loss, expected_loss)
     torch.testing.assert_close(logits.grad, reference_logits.grad)
     assert len(calls) == (2 if nested else 1)
+
+
+def test_reported_1631_by_five_targets_use_one_prompt():
+    value = Datum(
+        model_input=ModelInput.from_ints([1] * 1631),
+        loss_fn_inputs={
+            "target_tokens": TensorData(
+                data=[2, 3, 4, 5, 6] * 1631, dtype="int64", shape=[1631, 5]
+            ),
+        },
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    prepared = prepare_batch(batch, {"a": 0})
+    assert len(prepared.slot_rows) == 1
+    _, row = prepared.slot_rows[0]
+    assert len(row["tokens"]) == 1632
+    assert row["target_len"] == 1631
+    assert row["target_tokens"][-1] == [2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("loss_fn", ["importance_sampling", "ppo", "cispo", "dro"])
+def test_multi_target_rl_inputs_keep_candidate_dimension(loss_fn):
+    value = datum([[2, 4], [3, 5], [4, 6]])
+    for name in ("advantages", "logprobs"):
+        value.loss_fn_inputs[name] = TensorData(
+            data=[0.5] * 6, dtype="float32", shape=[3, 2]
+        )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn=loss_fn, loss_fn_config={}
+    )
+    prepared = prepare_batch(batch, {"a": 0}, sequence_alignment=8)
+    _, row = prepared.slot_rows[0]
+    for name in ("advantages", "sampling_logprobs"):
+        assert row[name] == [[0.5, 0.5]] * 3 + [[0.0, 0.0]] * 4
+
+
+def test_sampling_support_requires_all_candidate_targets():
+    value = datum([[2, 4], [3, 5], [4, 6]])
+    value.loss_fn_inputs.update(
+        sampling_mask_ids=TensorData(data=[4, 6], dtype="int64", shape=[2]),
+        sampling_mask_offsets=TensorData(data=[0, 0, 0, 2], dtype="int64", shape=[4]),
+    )
+    batch = ForwardBatch(
+        items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
+    )
+    assert len(prepare_batch(batch, {"a": 0}).slot_rows) == 1
+    value.loss_fn_inputs["sampling_mask_ids"] = TensorData(
+        data=[4, 7], dtype="int64", shape=[2]
+    )
+    with pytest.raises(ValueError, match="each sampling support"):
+        prepare_batch(batch, {"a": 0})
