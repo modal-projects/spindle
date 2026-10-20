@@ -96,12 +96,7 @@ def apps_to_publish(configs, current_configs, environment, trainers, inference):
 
 
 def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None):
-    """Deploy missing or changed trainer and inference apps, then the frontend.
-
-    `run_steps(steps, background)` gets the ordered steps and (label, future) pairs already
-    running. The sampler image build overlaps every step; a failed build only warns, since
-    the first sampling request builds the image anyway.
-    """
+    """Deploy missing or changed trainer and inference apps, then the frontend."""
     if sys.version_info[:2] != (3, 12):
         raise ValueError(
             "Python deployment requires Python 3.12 to match the serialized GPU runtime images"

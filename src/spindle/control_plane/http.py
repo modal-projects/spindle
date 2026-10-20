@@ -640,8 +640,6 @@ def create_control_plane_app(
                 "queue_state": "active",
             }
             if resolution.reason:
-                # Tinker SDKs log a non-active queue state with its reason; an
-                # unrecognized state avoids their capacity wording.
                 content["queue_state"] = "starting"
                 content["queue_state_reason"] = resolution.reason
             return JSONResponse(status_code=408, content=content)

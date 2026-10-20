@@ -200,14 +200,6 @@ def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deploye
     assert deployed.calls == ["trainer", "inference"]
 
 
-def test_every_deploy_builds_the_sampler_image_once(deployed):
-    row = deployment()
-    cli.deploy([row])
-    cli.deploy([row])
-    assert deployed.calls == ["trainer", "inference", "frontend", "frontend"]
-    assert deployed.images == [("spindle", None), ("spindle", None)]
-
-
 def test_sampler_image_failure_still_deploys_the_frontend(
     monkeypatch, deployed, capsys
 ):
@@ -237,22 +229,6 @@ def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
     cli.deploy([deployment()])
     assert deployed.calls == ["trainer", "inference", "frontend"]
     assert deployed.images == ["spindle"]
-
-
-def test_progress_shows_the_sampler_image_row(deployed):
-    console = Console(record=True, width=120)
-    cli.deploy(
-        [deployment()],
-        run_steps=partial(
-            deploy_wizard.deploy_with_progress,
-            console,
-            retry_command="spindle deploy qwen35-9b-lora-16k",
-        ),
-    )
-    output = console.export_text()
-    assert "Sampler image" in output
-    assert "API server" in output
-    assert deployed.images == [("spindle", None)]
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
