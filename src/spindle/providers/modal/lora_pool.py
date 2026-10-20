@@ -4,11 +4,14 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import modal
 from stitch.pools.modal_flash import ModalFlashPool
+
+from spindle.startup_timing import StartupTimeline
 
 from .deployment_configs import (
     PLATFORM_ENV,
@@ -81,8 +84,13 @@ def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
     environment = platform["modal"]["environment"]
     if environment:
         command.extend(["--env", environment])
+    started = time.time()
     subprocess.run(command, env={**os.environ, **spec.env(), **recipe_env}, check=True)
-    return pool.gateway_url()
+    url = pool.gateway_url()
+    StartupTimeline("sampler-pool", origin=started, labels=spec.as_dict()).mark(
+        "pool_deployed"
+    )
+    return url
 
 
 def stop_pool(spec: LoraPoolSpec) -> None:

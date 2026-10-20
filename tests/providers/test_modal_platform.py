@@ -1,4 +1,5 @@
 import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 import modal
@@ -229,5 +230,19 @@ def test_failed_shared_instance_read_reaches_all_waiters_and_can_retry():
         )
         await kv.put(instance_key("shared"), record.model_dump(mode="json"))
         assert (await platform.get_instance("shared")).boot_id == "recovered-boot"
+
+    asyncio.run(run())
+
+
+def test_spawn_instance_records_spawn_time() -> None:
+    async def run() -> None:
+        platform, kv, _ = recording_platform()
+        before = time.time()
+        instance = await platform.spawn_instance(DEFINITION)
+        record = await kv.get(instance_key(instance.instance_id))
+        assert before <= record["spawned_at"] <= time.time()
+        assert record["started_at"] is None
+        assert record["ready_at"] is None
+        assert record["startup"] is None
 
     asyncio.run(run())
