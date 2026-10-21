@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -120,6 +121,32 @@ def test_backend_read_timeout_fences_engine() -> None:
         await executor.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            {"optimizer_params": {"type": "dimuon", "learning_rate": 1e-3}},
+            "optimizer family dimuon is not supported",
+        ),
+        (
+            {
+                "adam_params": {},
+                "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+            },
+            "optimizer family dimuon is not supported",
+        ),
+        (
+            {"dimuon_params": {"learning_rate": 1e-3}},
+            "optim_step parameters ['dimuon_params'] are not supported",
+        ),
+    ),
+)
+def test_optim_step_rejects_non_adam_params(payload, message, caplog) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        parse_operation_payload(OperationKind.OPTIM_STEP, payload)
+    assert "rejected unsupported optimizer: dimuon" in caplog.text
 
 
 def test_backend_batches_cross_http() -> None:
@@ -436,5 +463,32 @@ def test_backend_non_json_failure_preserves_message_and_fencing():
             assert fenced == [True]
         finally:
             await client.close()
+
+    asyncio.run(run())
+
+
+def test_healthz_reports_startup_phases() -> None:
+    from spindle.startup_timing import StartupTimeline
+
+    async def run() -> None:
+        startup = StartupTimeline("trainer-backend", origin=10.0)
+        startup.mark("backend_imports_done")
+        app = create_backend_app(EchoExecutor(), startup=startup)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://backend"
+        ) as client:
+            body = (await client.get("/healthz")).json()
+        assert body["status"] == "ok"
+        assert body["startup"]["component"] == "trainer-backend"
+        assert set(body["startup"]["phases"]) == {"backend_imports_done"}
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_backend_app(EchoExecutor())),
+            base_url="http://backend",
+        ) as client:
+            assert (await client.get("/healthz")).json() == {
+                "status": "ok",
+                "startup": None,
+            }
 
     asyncio.run(run())

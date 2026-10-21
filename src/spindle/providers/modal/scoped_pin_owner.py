@@ -7,6 +7,8 @@ import logging
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
 
+from .app_tags import app_tags
+
 log = logging.getLogger(__name__)
 
 
@@ -104,7 +106,10 @@ async def open_pinned_app(
     # SDK checkpoint-created models use IDs such as "<session>:train:1".
     _, model_and_version = key.split(":", 1)
     model_id, version = model_and_version.rsplit(":", 1)
-    child = modal.App(name + "-pin-" + hashlib.sha256(key.encode()).hexdigest()[:12])
+    child = modal.App(
+        name + "-pin-" + hashlib.sha256(key.encode()).hexdigest()[:12],
+        tags=app_tags("inference", model=engine.model, framework="sglang"),
+    )
     server = register_sampler(
         child,
         engine=engine,

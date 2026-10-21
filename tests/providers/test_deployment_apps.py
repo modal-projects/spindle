@@ -37,7 +37,8 @@ def write_configs(tmp_path, rows):
 
 
 class App:
-    def __init__(self, name):
+    def __init__(self, name, *, tags):
+        self.tags = tags
         self.name = name
         self.functions = {}
         self.servers = {}
@@ -79,6 +80,7 @@ def test_trainer_declaration_and_executor_configuration(
     platform["storage"]["checkpoints"] = "test-custom-checkpoints"
     image = object()
     app, trainer = deployment_apps.build_trainer_app(row, platform, image=image)
+    assert app.tags["spindle_role"] == "trainer"
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
     assert declaration["region"] is None
@@ -129,6 +131,12 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
         )
     )
     app, server = deployment_apps.build_rollout_app(row, pool, image="test-image")
+    assert app.tags["spindle_role"] == "inference"
+    assert app.tags["_modal_job_type"] == "serving"
+    assert app.tags["_modal_framework"] == "sglang"
+    assert app.tags["_modal_model_name"] == (
+        "qwen3.5-9b-base" if kind == "lora" else "qwen3.5-4b"
+    )
     settings, _ = app.servers["Server"]
     assert app.name == pool.app_name
     assert (
@@ -391,6 +399,9 @@ def test_provisioner_rejects_wrong_settings_and_uses_saved_config(
     row = deployment()
     app, provision = deployment_apps.build_inference_app(row, image="test")
     assert app.name == row.inference_app_name
+    assert app.tags["_modal_source"] == "spindle"
+    assert app.tags["spindle_role"] == "inference-provisioner"
+
     calls = []
     monkeypatch.setattr(
         deployment_apps,
@@ -415,6 +426,14 @@ def test_trainer_and_inference_apps_construct_offline(builders, role):
         app, _ = deployment_apps.build_trainer_app(row, image="test")
     else:
         app, _ = deployment_apps.build_inference_app(row, image="test")
+    assert app.tags["_modal_source"] == "spindle"
+    assert app.tags["_modal_model_name"] == "qwen3.5-9b-base"
+    if role == "trainer":
+        assert app.tags["_modal_job_type"] == "training_spindle"
+        assert app.tags["_modal_framework"] == "miles"
+    else:
+        assert app.tags["_modal_job_type"] == "serving"
+        assert "_modal_framework" not in app.tags
     assert app.name == (
         row.trainer_app_name if role == "trainer" else row.inference_app_name
     )

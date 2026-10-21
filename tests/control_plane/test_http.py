@@ -132,6 +132,13 @@ def test_training_round_trip_over_http() -> None:
     ("path", "body"),
     (
         (
+            "/api/v1/optim_step",
+            {
+                "seq_id": 1,
+                "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+            },
+        ),
+        (
             "/api/v1/save_weights_for_sampler",
             {"seq_id": 1, "path": "invalid/name"},
         ),
@@ -450,6 +457,32 @@ def test_errors_map_to_status_codes() -> None:
         assert invalid_full.status_code == 400
         assert invalid_full.json()["error"] == "invalid_request"
         assert "cannot both be provided" in invalid_full.json()["message"]
+
+        dimuon = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 3,
+                "base_model": BASE_MODEL,
+                "lora_config": {"rank": 32},
+                "optimizer_config": {"type": "dimuon", "version": 1},
+            },
+        )
+        assert dimuon.status_code == 400
+        assert dimuon.json()["error"] == "invalid_request"
+        assert "optimizer family dimuon is not supported" in dimuon.json()["message"]
+
+        adamw = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 4,
+                "base_model": BASE_MODEL,
+                "lora_config": {"rank": 32},
+                "optimizer_config": {"type": "adamw"},
+            },
+        )
+        assert adamw.status_code == 200
         await client.aclose()
 
     asyncio.run(run())
@@ -685,5 +718,43 @@ def test_result_negotiation_constructs_one_response_before_timing(
                     "bytes": len(response.content),
                 }
             ]
+
+    asyncio.run(run())
+
+
+def test_pending_future_with_a_reason_reports_a_starting_queue_state() -> None:
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+        )
+
+        async def retrieve(request_id: str, timeout: float = 0.0) -> FutureResolution:
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason="starting a sampler for Qwen/Qwen3-4B (45s so far)",
+            )
+
+        plane.retrieve = retrieve
+        app = create_control_plane_app(
+            plane, DEFINITIONS, api_key="tml-test", retrieve_window=1.0
+        )
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            headers={"X-API-Key": "tml-test"},
+            transport=httpx.ASGITransport(app=app),
+        )
+        retrieved = await client.post(
+            "/api/v1/retrieve_future", json={"request_id": "sample-abc:0"}
+        )
+        assert retrieved.status_code == 408
+        assert retrieved.json() == {
+            "type": "try_again",
+            "request_id": "sample-abc:0",
+            "queue_state": "starting",
+            "queue_state_reason": "starting a sampler for Qwen/Qwen3-4B (45s so far)",
+        }
+        await client.aclose()
 
     asyncio.run(run())

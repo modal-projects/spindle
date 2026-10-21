@@ -17,6 +17,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from stitch.types import VersionConstraint, VersionRef
 
+from spindle.startup_timing import timeline
+
 from .bulletin import SnapshotBulletin, SnapshotNotFound
 from .request_replay import RequestReplay
 
@@ -289,6 +291,10 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
+                if not app.state.registered_adapters:
+                    timeline("sampler-sidecar").mark(
+                        "first_adapter_loaded", adapter=resolved.identity
+                    )
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 

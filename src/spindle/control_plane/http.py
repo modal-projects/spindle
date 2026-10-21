@@ -79,6 +79,7 @@ class CreateModelBody(BaseModel):
     base_model: str
     lora_config: dict[str, Any] | None = None
     parameterization: dict[str, str] | None = None
+    optimizer_config: dict[str, Any] | None = None
     rollout: RolloutPoolBody | None = None
     user_metadata: dict[str, str] | None = None
 
@@ -336,6 +337,13 @@ def create_control_plane_app(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
             )
+        if body.optimizer_config is not None:
+            family = body.optimizer_config.get("type")
+            if family != "adamw":
+                logging.getLogger(__name__).warning(
+                    "rejected unsupported optimizer: %s", family
+                )
+                raise ValueError(f"optimizer family {family} is not supported")
         if body.parameterization is None:
             parameterization: Parameterization | None = (
                 "lora" if body.lora_config is not None else None
@@ -626,14 +634,15 @@ def create_control_plane_app(
                 fields["bytes"] = len(response.body)
             mark("cp.retrieve.end", request_id=body.request_id, **fields)
         if resolution.status == FutureResolutionStatus.PENDING:
-            return JSONResponse(
-                status_code=408,
-                content={
-                    "type": "try_again",
-                    "request_id": body.request_id,
-                    "queue_state": "active",
-                },
-            )
+            content = {
+                "type": "try_again",
+                "request_id": body.request_id,
+                "queue_state": "active",
+            }
+            if resolution.reason:
+                content["queue_state"] = "starting"
+                content["queue_state_reason"] = resolution.reason
+            return JSONResponse(status_code=408, content=content)
         if response is not None:
             return response
         if resolution.status == FutureResolutionStatus.RETRYABLE:

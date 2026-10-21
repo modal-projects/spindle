@@ -19,8 +19,10 @@ from spindle.providers.contracts import (
     Parameterization,
     SamplingTask,
 )
+from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
 
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -103,7 +105,7 @@ TRAINER_DEPLOYMENT_ENV = {
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
 }
-app = modal.App(APP_NAME)
+app = modal.App(APP_NAME, tags=app_tags("frontend"))
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
@@ -184,11 +186,15 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
+    started = time.time()
     snapshot_download(
         repo_id=definition.weights_repo,
         local_dir=checkpoint,
     )
     model_assets.commit()
+    StartupTimeline("model-assets", origin=started, labels={"path": checkpoint}).mark(
+        "assets_ready"
+    )
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
