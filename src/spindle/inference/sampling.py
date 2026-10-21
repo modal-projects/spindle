@@ -10,6 +10,9 @@ from typing import Any
 
 import httpx
 from stitch.publish import constrain_request
+from stitch.types import VersionRef
+
+from .routing import InferenceRouter, RoutingRequest
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -31,8 +34,15 @@ TCP_KEEPALIVE_OPTIONS = (
 GatewayResolver = Callable[[], Awaitable[tuple[str, ...]]]
 
 
-def keepalive_transport() -> httpx.AsyncHTTPTransport:
-    return httpx.AsyncHTTPTransport(socket_options=list(TCP_KEEPALIVE_OPTIONS))
+def keepalive_transport(
+    *, max_connections: int | None = 100
+) -> httpx.AsyncHTTPTransport:
+    return httpx.AsyncHTTPTransport(
+        socket_options=list(TCP_KEEPALIVE_OPTIONS),
+        # Do not queue large sample groups behind HTTPX's 100-connection limit
+        # after their routing reservations have already been made.
+        limits=httpx.Limits(max_connections=max_connections),
+    )
 
 
 async def sample_task(
@@ -53,6 +63,7 @@ async def sample_task(
     stats: dict[str, Any] | None = None,
     session_id: str | None = None,
     on_event: Callable[[dict], None] | None = None,
+    router: InferenceRouter | None = None,
 ) -> dict[str, Any]:
     request = task["payload"]
     prompt = _prompt_tokens(request["prompt"])
@@ -74,6 +85,8 @@ async def sample_task(
     model_id = task.get("model_id")
     version = task.get("publish_version")
     latest = bool(task.get("latest"))
+    if model_id is None or latest:
+        router = None
     num_samples = int(request.get("num_samples", 1))
     prompt_logprobs = bool(request.get("prompt_logprobs"))
     topk_prompt_logprobs = int(request.get("topk_prompt_logprobs") or 0)
@@ -127,7 +140,12 @@ async def sample_task(
         else httpx.AsyncClient(
             timeout=timeout,
             trust_env=False,
-            transport=transport or keepalive_transport(),
+            transport=transport
+            or (
+                keepalive_transport(max_connections=None)
+                if router is not None
+                else keepalive_transport()
+            ),
             headers=headers,
         )
     )
@@ -157,6 +175,8 @@ async def sample_task(
                     trace_attrs=trace_attrs,
                     base_headers=headers,
                     request_timeout=timeout,
+                    router=router,
+                    group_size=num_samples,
                 )
                 for index in range(num_samples)
             )
@@ -224,6 +244,8 @@ async def _sample_one(
     trace_attrs: dict | None = None,
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
+    router: InferenceRouter | None = None,
+    group_size: int = 1,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -308,16 +330,47 @@ async def _sample_one(
                 "prompt_tokens": len(prompt),
             },
         )
+        upstream = None
+        if router is not None:
+            await router.refresh()
+            details = {}
+            engine = router.select_engine(
+                RoutingRequest(
+                    adapter=VersionRef(str(model_id), int(version)).identity,
+                    affinity=cache_affinity_id or routing_session_id,
+                    request_id=observation.id,
+                    group_id=request_id if physical_attempt == 1 else observation.id,
+                    group_size=group_size if physical_attempt == 1 else 1,
+                    sample_index=index if physical_attempt == 1 else 0,
+                ),
+                details=details,
+            )
+            upstream = engine.replica_id if engine is not None else None
+            observation.attrs.update(selected_replica=upstream, routing=details)
+            if upstream is not None:
+                headers = {
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower()
+                    not in {"modal-session-id", "modal-routing-affinity-key"}
+                }
+                headers["Modal-Flash-Upstream"] = engine.upstream
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
-            response = await client.post(
+            request = client.build_request(
+                "POST",
                 f"{gateway_url}/generate",
                 json=body,
                 headers=headers,
                 timeout=request_timeout,
                 extensions={"trace": HTTPTrace(attempt_result).record},
             )
+            if upstream is not None:
+                # Caller-provided clients may also carry conflicting defaults.
+                request.headers.pop("Modal-Session-ID", None)
+                request.headers.pop("Modal-Routing-Affinity-Key", None)
+            response = await client.send(request)
         except httpx.TransportError as exc:
             attempt_result["error_type"] = type(exc).__name__
             cause = exc
@@ -335,8 +388,14 @@ async def _sample_one(
             )
         else:
             attempt_result["http_status"] = response.status_code
+            actual_replica = response.headers.get("x-spindle-replica")
+            if upstream is not None and actual_replica and actual_replica != upstream:
+                attempt_result["route_mismatch"] = True
+            if actual_replica:
+                attempt_result["upstream"] = actual_replica
             retryable = (
                 response.status_code == 409
+                or (response.status_code in {404, 408, 429} and router is not None)
                 or response.status_code >= 500
                 or (response.status_code == 404 and not isinstance(gateway, str))
             )
@@ -358,6 +417,7 @@ async def _sample_one(
                     else None
                 )
                 if version_error is not None:
+                    attempt_result["version_error"] = version_error
                     reason = version_error
                     if not isinstance(gateway, str):
                         rejected.add(gateway_url)
@@ -391,6 +451,15 @@ async def _sample_one(
                             flush=True,
                         )
         finally:
+            if router is not None:
+                router.finish_request(
+                    observation.id,
+                    failed=cause is not None
+                    or attempt_result.get("route_mismatch", False)
+                    or "version_error" in attempt_result
+                    or attempt_result.get("http_status", 200) >= 500
+                    or attempt_result.get("http_status", 200) in {404, 408, 429},
+                )
             observation.finish()
         remaining = deadline - loop.time()
         if remaining <= 0:

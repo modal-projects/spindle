@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
+import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -39,6 +42,9 @@ def create_app(
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
+        app.state.routing_requests = {}
+        app.state.routing_catalog = {}
+        app.state.routing_read_at = 0.0
         try:
             yield
         finally:
@@ -49,6 +55,29 @@ def create_app(
             await app.state.client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.get("/routing-state")
+    async def routing_state():
+        now = time.monotonic()
+        if now - app.state.routing_read_at > 0.5:
+            app.state.routing_read_at = now
+            try:
+                app.state.routing_catalog = json.loads(
+                    await asyncio.to_thread(
+                        Path("/tmp/spindle-adapter-catalog.json").read_text
+                    )
+                )
+            except (OSError, ValueError):
+                app.state.routing_catalog = {}
+        catalog = app.state.routing_catalog
+        return {
+            "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "active": len(app.state.routing_requests),
+            "request_ids": list(app.state.routing_requests),
+            "pending_adapters": sorted(set(app.state.routing_requests.values())),
+            "cpu_adapters": catalog.get("cpu_adapters", []),
+            "age_seconds": time.time() - catalog["timestamp"] if catalog else None,
+        }
 
     @app.get("/health")
     async def health() -> Response:
@@ -62,6 +91,26 @@ def create_app(
     @app.post("/generate")
     async def generate(request: Request) -> Response:
         payload = await request.json()
+        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        constraint = VersionConstraint.from_payload(payload)
+        run_id = payload.get("weight_run_id")
+        if isinstance(rid, str):
+            app.state.routing_requests[rid] = (
+                VersionRef(str(run_id), constraint.exact_version).identity
+                if run_id is not None and constraint.exact_version is not None
+                else payload.get("lora_path", "base")
+            )
+        try:
+            response = await generate_response(request, payload)
+            response.headers["x-spindle-replica"] = os.environ.get(
+                "MODAL_TASK_ID", "local"
+            )
+            return response
+        finally:
+            if isinstance(rid, str):
+                app.state.routing_requests.pop(rid, None)
+
+    async def generate_response(request: Request, payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -85,6 +134,10 @@ def create_app(
                     status_code=409,
                 )
 
+        if isinstance(payload["rid"], str):
+            app.state.routing_requests[payload["rid"]] = payload.get(
+                "lora_path", "base"
+            )
         response = await _post_generate(app.state.client, request, payload)
         if response is None:
             return Response(status_code=499)
