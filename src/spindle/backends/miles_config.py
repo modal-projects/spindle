@@ -52,8 +52,6 @@ _UNEMBED_LEAVES = frozenset({"output_layer", "lm_head"})
 
 def _peft_names(target: str) -> tuple[str, ...]:
     if "*" in target:
-        # Miles matches a dotted target against whole module names; adapters
-        # and SGLang match module-name suffixes.
         return (target.rsplit("*.", 1)[-1],)
     leaf = target.rsplit(".", 1)[-1]
     return _PEFT_TARGETS.get(leaf, (leaf,))
