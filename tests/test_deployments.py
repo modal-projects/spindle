@@ -182,6 +182,12 @@ def test_trainer_image_is_part_of_trainer_identity():
     assert trainer.inference_identity() == resolved().inference_identity()
 
 
+def test_tag_changes_redeploy_trainer_and_inference_apps():
+    tagged = resolved(tags={"team": "ranking"})
+    assert tagged.trainer_identity() != resolved().trainer_identity()
+    assert tagged.inference_identity() != resolved().inference_identity()
+
+
 def test_routing_uses_deployment_order():
     small = resolved()
     large = resolved(recipe("qwen35-9b-lora-64k"))

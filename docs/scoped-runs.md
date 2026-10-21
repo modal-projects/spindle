@@ -27,6 +27,8 @@ when a model is created. Base and pinned samplers have a zero minimum.
 Use your Modal profile and the `spindle-proxy` secret, or pass
 `proxy_secret=modal.Secret.from_name(...)`. An API key is generated for each run
 unless you supply `api_key`. App names default to `spindle-<hash>`.
+Pass `tags={"team": "ranking"}` to add Modal app tags to the scoped app and its
+pinned sampler apps; keys starting with `_modal_` or `spindle_` are reserved.
 
 ## Recovering a lost trainer
 

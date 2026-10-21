@@ -131,6 +131,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_timeout_s,
             recipe.trainer_env,
             recipe.trainer_image,
+            recipe.tags,
             self.trainer_settings,
             self.spindle_version,
         )
@@ -156,6 +157,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
+            recipe.tags,
             self.inference_settings,
             self.spindle_version,
         )
