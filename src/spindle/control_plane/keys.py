@@ -57,6 +57,10 @@ def sampling_session_key(sampling_session_id: str) -> str:
     return f"sampling_session:{_part(sampling_session_id)}"
 
 
+def sampler_warm_key(pool: str) -> str:
+    return f"sampler_warm:{_part(pool)}"
+
+
 def sample_task_key(sampling_session_id: str, seq_id: int) -> str:
     if seq_id < 0:
         raise ValueError("seq_id must be non-negative")

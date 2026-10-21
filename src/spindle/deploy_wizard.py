@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 import modal
 import questionary
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
@@ -27,6 +30,42 @@ MODE_LABELS = {"lora": "LoRA", "full": "Full fine-tune"}
 
 class Cancelled(Exception):
     pass
+
+
+class SetupIncomplete(Exception):
+    pass
+
+
+class RequiredSecret(NamedTuple):
+    platform_key: str
+    keys: tuple[str, ...]
+    purpose: str
+    create: str
+
+
+REQUIRED_SECRETS = (
+    RequiredSecret(
+        "api",
+        ("TINKER_API_KEY",),
+        "API key your Tinker clients send to Spindle",
+        'modal secret create {name} TINKER_API_KEY="tml-$(openssl rand -hex 32)"',
+    ),
+    RequiredSecret(
+        "sampler_proxy",
+        ("MODAL_PROXY_TOKEN_ID", "MODAL_PROXY_TOKEN_SECRET"),
+        "Modal proxy token Spindle uses to reach its sampler pools",
+        "modal workspace proxy-tokens create, allow it for your environment, then\n"
+        "    modal secret create {name} MODAL_PROXY_TOKEN_ID=wk-... "
+        "MODAL_PROXY_TOKEN_SECRET=ws-...",
+    ),
+    RequiredSecret(
+        "huggingface",
+        ("HF_TOKEN",),
+        "Hugging Face read token for downloading model weights",
+        "modal secret create {name} HF_TOKEN=hf_...  "
+        "(token from huggingface.co/settings/tokens)",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +173,53 @@ def short_name(model: str) -> str:
     return model.split("/", 1)[-1]
 
 
+def secret_problem(
+    name: str, keys: tuple[str, ...], environment: str | None
+) -> str | None:
+    try:
+        modal.Secret.from_name(
+            name, environment_name=environment, required_keys=list(keys)
+        ).hydrate()
+    except modal.exception.NotFoundError:
+        return "not found"
+    except modal.exception.ConflictError as exc:
+        return str(exc)
+    return None
+
+
+def check_setup(console: Console, environment: str | None) -> None:
+    names = BaseConfig.platform["secrets"]
+    table = Table(
+        title="Setup check", title_justify="left", show_header=False, box=None
+    )
+    table.add_row(
+        "[green]✓[/green]",
+        "MODAL_ENVIRONMENT",
+        environment or "unset: your profile's default environment",
+    )
+    fixes = []
+    with console.status("Checking your Modal secrets..."):
+        for secret in REQUIRED_SECRETS:
+            name = names[secret.platform_key]
+            label = f"{name} · {', '.join(secret.keys)}"
+            problem = secret_problem(name, secret.keys, environment)
+            if problem is None:
+                table.add_row("[green]✓[/green]", label, secret.purpose)
+            else:
+                table.add_row(
+                    "[red]✗[/red]", label, f"{secret.purpose} [red]({problem})[/red]"
+                )
+                fixes.append(secret.create.format(name=name))
+    console.print(table)
+    if fixes:
+        env = f" (with MODAL_ENVIRONMENT={environment})" if environment else ""
+        console.print(f"\nCreate the missing secrets{env}:")
+        for fix in fixes:
+            console.print(f"  [bold]{fix}[/bold]")
+        raise SetupIncomplete
+    console.print()
+
+
 def ask(question):
     answer = question.ask()
     if answer is None:
@@ -172,6 +258,7 @@ def choose(console: Console, frontend: str, environment: str | None) -> list[Pre
             border_style="green",
         )
     )
+    check_setup(console, environment)
 
     models = models_by_provider(presets)
     width = max(len(short_name(model)) for model in models)
@@ -301,7 +388,10 @@ def show_plan(
     )
 
 
-def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
+def deploy_with_progress(
+    console: Console, steps, background=(), *, retry_command: str
+) -> None:
+    """One row per step, in order; `background` (label, future) rows finish last and only warn."""
     console.print(
         "[dim]The first deploy in a workspace builds container images, which can take several minutes.[/dim]"
     )
@@ -311,23 +401,51 @@ def deploy_with_progress(console: Console, steps, retry_command: str) -> None:
         TimeElapsedColumn(),
         console=console,
     )
+
+    def run(task, label, call):
+        try:
+            call()
+        except Exception as exc:
+            progress.update(task, description=f"[red]{label} failed[/red]")
+            output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
+            if output:
+                console.print(output)
+            console.print(
+                f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
+            )
+            raise
+        progress.update(task, completed=1)
+
+    def mark_done(task, future):
+        if future.exception() is None:
+            progress.update(task, completed=1)
+
+    def finish(task, label, future):
+        try:
+            future.result()
+        except Exception as exc:
+            progress.update(task, description=f"[yellow]{label} skipped[/yellow]")
+            console.print(
+                f"[yellow]{label} failed:[/yellow] {escape(str(exc))}\n"
+                "The first request that needs it builds it instead."
+            )
+
     started = time.monotonic()
     with progress:
-        tasks = [progress.add_task(label, total=1, start=False) for label, _ in steps]
-        for task, (label, step) in zip(tasks, steps):
+        waiting = []
+        for label, future in background:
+            task = progress.add_task(label, total=1)
+            future.add_done_callback(partial(mark_done, task))
+            waiting.append((task, label, future))
+        rows = [
+            (progress.add_task(label, total=1, start=False), label, step)
+            for label, step in steps
+        ]
+        for task, label, step in rows:
             progress.start_task(task)
-            try:
-                step()
-            except Exception as exc:
-                progress.update(task, description=f"[red]{label} failed[/red]")
-                output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
-                if output:
-                    console.print(output)
-                console.print(
-                    f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
-                )
-                raise
-            progress.update(task, completed=1)
+            run(task, label, step)
+        for task, label, future in waiting:
+            finish(task, label, future)
     console.print(
         f"[green]✓[/green] Deployed in {format_duration(time.monotonic() - started)}"
     )

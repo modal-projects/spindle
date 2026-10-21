@@ -1,3 +1,7 @@
+from concurrent.futures import Future
+
+import modal
+import pytest
 from rich.console import Console
 
 from spindle import deploy_wizard
@@ -62,6 +66,45 @@ def test_progress_reports_the_total_deploy_time():
     assert "Deployed in 0s" in console.export_text()
 
 
+def test_progress_runs_every_step_before_waiting_on_background_work():
+    console = Console(record=True, width=120)
+    order = []
+    building = Future()
+
+    def deploy_frontend():
+        order.append(("frontend", building.done()))
+        building.set_result(None)
+
+    steps = [
+        ("Trainer    a", lambda: order.append("trainer")),
+        ("API server", deploy_frontend),
+    ]
+    deploy_wizard.deploy_with_progress(
+        console, steps, [("Sampler image", building)], retry_command="spindle deploy a"
+    )
+    assert order == ["trainer", ("frontend", False)]
+    assert "Sampler image" in console.export_text()
+
+
+def test_progress_only_warns_when_background_work_fails():
+    console = Console(record=True, width=120)
+    building = Future()
+    building.set_exception(RuntimeError("image build failed"))
+    ran = []
+    steps = [("Trainer    a", lambda: None), ("API server", lambda: ran.append(1))]
+    deploy_wizard.deploy_with_progress(
+        console,
+        steps,
+        [("Sampler image", building)],
+        retry_command="spindle deploy a",
+    )
+    output = console.export_text()
+    assert ran == [1]
+    assert "Sampler image failed: image build failed" in output
+    assert "builds it instead" in output
+    assert "Deployed in" in output
+
+
 def test_format_duration():
     assert deploy_wizard.format_duration(8.4) == "8s"
     assert deploy_wizard.format_duration(125) == "2m 05s"
@@ -82,3 +125,48 @@ def test_unresponsive_frontend_names_the_app_to_stop():
     )
     assert "modal app stop spindle -e dev" in console.export_text()
     assert deploy_wizard.stop_command("spindle", None) == "modal app stop spindle"
+
+
+def test_setup_check_lists_every_missing_secret_with_a_fix(monkeypatch):
+    present = {"spindle-api": {"TINKER_API_KEY"}, "huggingface-secret": {"OTHER"}}
+
+    class FakeSecret:
+        def __init__(self, name, keys):
+            self.name, self.keys = name, keys
+
+        def hydrate(self):
+            if self.name not in present:
+                raise modal.exception.NotFoundError("missing")
+            missing = set(self.keys) - present[self.name]
+            if missing:
+                raise modal.exception.ConflictError(
+                    f"Secret is missing key(s): {', '.join(sorted(missing))}"
+                )
+
+    monkeypatch.setattr(
+        modal.Secret,
+        "from_name",
+        lambda name, environment_name=None, required_keys=(): FakeSecret(
+            name, required_keys
+        ),
+    )
+    console = Console(record=True, width=160)
+    with pytest.raises(deploy_wizard.SetupIncomplete):
+        deploy_wizard.check_setup(console, "dev")
+    output = console.export_text()
+    assert "spindle-proxy · MODAL_PROXY_TOKEN_ID, MODAL_PROXY_TOKEN_SECRET" in output
+    assert "(not found)" in output
+    assert "missing key(s): HF_TOKEN" in output
+    assert "modal secret create huggingface-secret HF_TOKEN=hf_..." in output
+    assert "modal secret create spindle-api" not in output
+
+
+def test_setup_check_passes_when_every_secret_exists(monkeypatch):
+    class PresentSecret:
+        def hydrate(self):
+            pass
+
+    monkeypatch.setattr(modal.Secret, "from_name", lambda *a, **k: PresentSecret())
+    console = Console(record=True, width=160)
+    deploy_wizard.check_setup(console, None)
+    assert "✗" not in console.export_text()

@@ -115,6 +115,8 @@ spindle config validate my_model.py
 spindle deploy my_model.py
 ~~~
 
+Bundled configs deploy by name, e.g. `spindle deploy qwen35-9b-lora-16k gpt-oss-20b-lora-32k`, and `spindle deploy --all` deploys every bundled config. With no arguments in a terminal, `spindle deploy` asks which models to deploy; without a terminal it exits instead of deploying.
+
 Validation loads the recipes and checks that they can share one frontend. Backend integration settings are checked when creating a DeploymentConfig at deploy time. Native backend options are checked at engine startup.
 
 The checked-in [deploy_models.sh](../scripts/deploy_models.sh) lists the complete active config set. Add a config path there, then run it. The deployment command owns frontend selection and trainer/inference updates:
