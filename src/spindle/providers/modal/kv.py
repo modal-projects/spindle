@@ -43,6 +43,7 @@ KEY_STORES = {
     "engine_instance": "engines",
     "model_assets_ready": "engines",
     "lora_pool": "engines",
+    "sampler_warm": "engines",
     "deployment_failure": "engines",
     "engine_call": "engines",
     "engine_current": "engines",
