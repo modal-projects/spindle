@@ -114,65 +114,38 @@ def _load_actor(monkeypatch):
     )
     _module(monkeypatch, "megatron.core.dist_checkpointing")
 
-    fsdp_actor = _module(monkeypatch, "miles.backends.fsdp_utils.actor")
-    megatron_actor = _module(monkeypatch, "miles.backends.megatron_utils.actor")
     megatron_model = _module(monkeypatch, "miles.backends.megatron_utils.model")
     checkpoint = _module(monkeypatch, "miles.backends.megatron_utils.lora.checkpoint")
     _module(monkeypatch, "miles.backends.megatron_utils.lora.model")
     _module(
-        monkeypatch, "miles.backends.training_utils.replay_data"
+        monkeypatch, "miles.backends.training_utils.replay.data"
     ).fill_replay_data = lambda **kwargs: None
     _module(
         monkeypatch, "miles.utils.replay_base"
     ).routing_replay_manager = types.SimpleNamespace()
     lora_actor = _module(monkeypatch, "miles.backends.megatron_utils.lora.actor")
     lora_actor.MultiLoRATrainRayActor = type("MultiLoRATrainRayActor", (), {})
-    training_cp_utils = _module(monkeypatch, "miles.backends.training_utils.cp_utils")
-    training_cp_utils.get_logits_and_tokens_offset_with_cp = lambda *args: None
-    training_cp_utils.slice_log_prob_with_cp = lambda *args: None
-    training_data = _module(monkeypatch, "miles.backends.training_utils.data")
-    training_loss = _module(monkeypatch, "miles.backends.training_utils.loss")
-    training_mm_data = _module(monkeypatch, "miles.backends.training_utils.mm_data")
-    checkpoint_io = _module(monkeypatch, "miles.backends.training_utils.checkpoint_io")
+    checkpoint_io = _module(monkeypatch, "miles.backends.training_utils.checkpoint.io")
     checkpoint_io.write_checkpoint_dir = lambda *args, **kwargs: None
     snapshot_publisher = _module(
         monkeypatch, "miles.backends.training_utils.weight_update.snapshot_publisher"
     )
     snapshot_publisher.write_checkpoint_dir = checkpoint_io.write_checkpoint_dir
     checkpoint.write_checkpoint_dir = checkpoint_io.write_checkpoint_dir
-    loss_hub = _module(monkeypatch, "miles.backends.training_utils.loss_hub")
-    loss_hub.logit_processors = types.SimpleNamespace(
-        get_log_probs_and_entropy=lambda *args, **kwargs: None
-    )
-    loss_hub.math_utils = _module(
-        monkeypatch, "miles.backends.training_utils.loss_hub.math_utils"
+    loss_hub = _module(monkeypatch, "miles.backends.training_utils.loss.hub")
+    loss_hub.logit_processors = _module(
+        monkeypatch, "miles.backends.training_utils.loss.hub.logit_processors"
     )
     loss_hub.tinker_losses = _module(
-        monkeypatch, "miles.backends.training_utils.loss_hub.tinker_losses"
+        monkeypatch, "miles.backends.training_utils.loss.hub.tinker_losses"
     )
-    for module in (training_loss, loss_hub.tinker_losses, megatron_actor, fsdp_actor):
-        module.get_log_probs_and_entropy = (
-            loss_hub.logit_processors.get_log_probs_and_entropy
-        )
-    for module in (training_data, training_mm_data, loss_hub.math_utils):
-        module.slice_log_prob_with_cp = training_cp_utils.slice_log_prob_with_cp
-    _module(
-        monkeypatch, "miles.backends.training_utils.parallel"
-    ).get_parallel_state = lambda: None
     torch.distributed = sys.modules["torch.distributed"]
     sys.modules["megatron.core"].dist_checkpointing = sys.modules[
         "megatron.core.dist_checkpointing"
     ]
     sys.modules["miles.backends.megatron_utils.lora"].checkpoint = checkpoint
     sys.modules["miles.backends.megatron_utils.lora"].actor = lora_actor
-    sys.modules["miles.backends.training_utils"].checkpoint_io = checkpoint_io
-    sys.modules["miles.backends.training_utils"].cp_utils = training_cp_utils
-    sys.modules["miles.backends.training_utils"].data = training_data
-    sys.modules["miles.backends.training_utils"].loss = training_loss
-    sys.modules["miles.backends.training_utils"].mm_data = training_mm_data
-    sys.modules["miles.backends.training_utils"].loss_hub = loss_hub
-    sys.modules["miles.backends.fsdp_utils"].actor = fsdp_actor
-    sys.modules["miles.backends.megatron_utils"].actor = megatron_actor
+    sys.modules["miles.backends.training_utils.checkpoint"].io = checkpoint_io
     sys.modules["miles.backends.megatron_utils"].model = megatron_model
 
     # Replay hook behavior is covered separately with its Miles interfaces.

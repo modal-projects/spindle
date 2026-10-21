@@ -17,16 +17,18 @@ from .image_dependencies import (
 # The release tag pins Miles together with the Megatron-LM and Megatron-Bridge
 # revisions its image was built and tested with. Update all three by moving to a
 # newer release tag, digest, and commit together, then refresh the trainer app.
-MILES_RELEASE = "v0.1.1"
+MILES_RELEASE = "v0.1.2"
 BASE_IMAGE = (
     f"radixark/miles:{MILES_RELEASE}"
-    "@sha256:6355834f16bacd35d5d40c43f142e3758376f7b2e8d678bccfe870c092bd96bf"
+    "@sha256:c81d8ba7b91571aac8e0bb2be372c6a9664e1ff7b88f518a8891861bae83e3b7"
 )
-MILES_RELEASE_COMMIT = "2806267d060d51b1d3b62f85a1f9b145047aeef9"
+MILES_RELEASE_COMMIT = "a22fd824191c64ba7c5d6c531f125406e4ce9cc6"
 MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
-MILES_BRANCH = "spindle-miles"
-MILES_COMMIT = "fdd808c008175d4895fd8c57c95ef4fa5bb6a2a0"
+MILES_BRANCH = "spindle-miles-v0.1.2"
+MILES_COMMIT = "83e458d967b838333de098defbf5cf672ef4ce28"
 MILES_PATH = "/root/miles"
+# Megatron-LM is only partially installed as a package; some model
+# construction imports resolve from the source tree.
 MEGATRON_PATH = "/root/Megatron-LM"
 
 
@@ -91,26 +93,13 @@ BRIDGE_IMPORT_CACHE_PATCH = (
     "             converted_weights = self._convert_loaded_hf_weight(task, hf_weights)\n"
 )
 
-# The release has the DSA backend hooks but omits the TileLang implementation.
-# Upstream #5049 adds the kernels and their packed/context-parallel tests.
-# Fetching the commit by hash pins its exact contents, unlike a generated .diff.
-DSA_KERNEL_COMMIT = "4f657171b150510cafc48f429673fb1b2c4c098d"
-DSA_KERNEL_INSTALL = (
-    f"git -C {MEGATRON_PATH} fetch --depth=2 --no-tags"
-    f" https://github.com/NVIDIA/Megatron-LM.git {DSA_KERNEL_COMMIT}"
-    f" && git -C {MEGATRON_PATH} diff --binary {DSA_KERNEL_COMMIT}^ {DSA_KERNEL_COMMIT}"
-    " > /tmp/dsa-kernels.diff"
-    f" && git -C {MEGATRON_PATH} apply /tmp/dsa-kernels.diff"
-    " && rm /tmp/dsa-kernels.diff"
-)
-
-
 image = (
     modal.Image.from_registry(BASE_IMAGE)
     .entrypoint([])
     .env(
         {
             "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH",
+            "PYTHONPATH": f"{MEGATRON_PATH}:$PYTHONPATH",
             "CUDA_DEVICE_MAX_CONNECTIONS": "1",
         }
     )
@@ -139,11 +128,11 @@ image = (
     .run_commands(
         "pip install --no-deps 'peft>=0.18.1'",
         MEGATRON_RUNTIME_CHECK,
-        'python -c "from miles.ray.train.group import TrainerController as T; '
+        'python -c "from miles.ray.placement_group import create_trainer_handles; '
+        "from miles.ray.train.group import TrainerController as T; "
         "assert all(hasattr(T, name) for name in "
         "('load_slot', 'unload_slot', 'forward_backward', "
         "'forward_only', 'optim_step', 'save_slot', 'export_slot'))\"",
     )
-    .run_commands(DSA_KERNEL_INSTALL)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )
