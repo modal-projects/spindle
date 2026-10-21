@@ -78,7 +78,7 @@ Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, 
 
 ### Images
 
-`trainer_image` selects a named trainer image instead of the backend default; the names are listed in [deployment_apps.py](../src/spindle/providers/modal/deployment_apps.py). The multi-LoRA actor runs on Miles v0.1.1 and v0.1.2.
+`trainer_image` selects a named trainer image instead of the backend default; the names are listed in [deployment_apps.py](../src/spindle/providers/modal/deployment_apps.py).
 
 ## Prepare and launch
 

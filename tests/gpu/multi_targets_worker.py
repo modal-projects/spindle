@@ -9,8 +9,12 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 from megatron.core.fusions import fused_cross_entropy
-from miles.backends.training_utils.loss_hub import tinker_losses
-from miles.backends.training_utils.parallel import ParallelState, set_parallel_state
+from miles.backends.training_utils.loss.hub import tinker_losses
+from miles.backends.training_utils.parallel import (
+    ParallelState,
+    get_parallel_state,
+    set_parallel_state,
+)
 from miles.tinker.runtime import _build_train_data
 from miles.utils.ft_utils.process_group_utils import GroupInfo
 from tinker import Datum, ModelInput, TensorData
@@ -100,6 +104,11 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
         torch.tensor(row["tokens"], device="cuda") for _, row in prepared.slot_rows
     ]
     batch["loss_fn_config"] = {}
+    # Miles moves loss masks to the device before the loss, as its rollout data path does.
+    batch["loss_masks"] = [
+        torch.tensor(mask, dtype=torch.int, device="cuda")
+        for mask in batch["loss_masks"]
+    ]
     lengths = batch["total_lengths"]
     torch.manual_seed(109)
     full = torch.randn(sum(lengths), 1024, device="cuda", dtype=dtype)
@@ -147,7 +156,10 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
         actual = record["logprobs"].cuda()
         torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
         score_error = max(score_error, (actual - expected).abs().max().item())
-    torch.testing.assert_close(loss, expected_loss, rtol=2e-5, atol=2e-4)
+    # Each context-parallel rank sums the loss over its own sequence shard.
+    total_loss = loss.detach().clone()
+    dist.all_reduce(total_loss, group=get_parallel_state().cp.group)
+    torch.testing.assert_close(total_loss, expected_loss, rtol=2e-5, atol=2e-4)
     loss.backward()
     expected_loss.backward()
     # The pinned Megatron fused CE casts each column's gradient to BF16,

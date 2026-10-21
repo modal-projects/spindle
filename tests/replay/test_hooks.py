@@ -46,7 +46,8 @@ def miles():
     logit.build_local_sampling_mask = lambda *args, **kwargs: None
     loss = SimpleNamespace()
     loss._target_logprobs = lambda *args: "ordinary"
-    loss._response_masks = lambda *args: []
+    loss._local_response_masks = lambda *args: []
+    loss._gather_per_datum_outputs = lambda *args: []
     loss.get_log_probs_and_entropy = lambda logits, **kwargs: {"log_probs": kwargs}
     dependencies = dict(
         megatron_model=model,
