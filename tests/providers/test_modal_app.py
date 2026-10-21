@@ -4,7 +4,9 @@ import json
 import subprocess
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import modal
 import pytest
 
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
@@ -226,7 +228,12 @@ def weight_downloads(monkeypatch, registry, calls):
 
     async def spawn(definition_id: str):
         spawned.append(definition_id)
-        return SimpleNamespace(object_id=f"fc-{len(spawned)}")
+        call_id = f"fc-{len(spawned)}"
+
+        async def cancel() -> None:
+            calls[call_id] = False
+
+        return SimpleNamespace(object_id=call_id, cancel=SimpleNamespace(aio=cancel))
 
     async def running(call_id: str) -> bool:
         state = calls.get(call_id, True)
@@ -321,17 +328,48 @@ def test_failed_weight_download_is_reported_and_restarted(monkeypatch) -> None:
     assert spawned == [LORA_DEFINITION, LORA_DEFINITION]
 
 
-def test_concurrent_requests_start_one_weight_download(monkeypatch) -> None:
+def test_download_started_by_another_server_is_joined(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    spawned = weight_downloads(monkeypatch, InMemoryKeyValueStore(), {})
+    registry = InMemoryKeyValueStore()
+    calls = {}
+    spawned = weight_downloads(monkeypatch, registry, calls)
+    key = f"model_assets_call:{LORA_DEFINITION}"
+    spawn = modal_app.prepare_model_assets.spawn.aio
+
+    async def racing_spawn(definition_id: str):
+        await registry.put(key, {"call_id": "fc-other", "started_at": 50.0})
+        return await spawn(definition_id)
+
+    modal_app.prepare_model_assets.spawn.aio = racing_spawn
 
     async def run() -> None:
-        await asyncio.gather(
-            *(modal_app._start_weights_download(LORA_DEFINITION) for _ in range(8))
-        )
+        assert await modal_app._start_weights_download(LORA_DEFINITION) == 50.0
+        assert (await registry.get(key))["call_id"] == "fc-other"
 
     asyncio.run(run())
     assert spawned == [LORA_DEFINITION]
+    assert calls == {"fc-1": False}
+
+
+@pytest.mark.parametrize(
+    ("outcome", "running"),
+    [
+        (TimeoutError(), True),
+        (modal.exception.ConnectionError("blip"), True),
+        (modal.exception.OutputExpiredError(), False),
+        (None, False),
+    ],
+)
+def test_call_running_treats_poll_errors_as_still_running(outcome, running) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    call = AsyncMock()
+    call.get.aio.side_effect = outcome
+    with patch.object(modal.FunctionCall, "from_id", return_value=call):
+        assert asyncio.run(modal_app._call_running("fc-1")) is running
+    call.get.aio.side_effect = RuntimeError("401 Unauthorized")
+    with patch.object(modal.FunctionCall, "from_id", return_value=call):
+        with pytest.raises(RuntimeError):
+            asyncio.run(modal_app._call_running("fc-1"))
 
 
 def test_trainers_wait_for_the_weight_download(monkeypatch) -> None:
@@ -409,20 +447,6 @@ def base_task(definition):
         "publish_version": None,
         "latest": False,
     }
-
-
-def test_execute_sample_fails_when_the_weight_download_failed(monkeypatch) -> None:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    weight_downloads(
-        monkeypatch, InMemoryKeyValueStore(), {"fc-1": RuntimeError("gone")}
-    )
-
-    async def run() -> None:
-        await modal_app._start_weights_download(LORA_DEFINITION)
-        await modal_app.execute_sample.local(base_task(LORA_DEFINITION))
-
-    with pytest.raises(modal_app.WeightsDownloadFailed, match="gone"):
-        asyncio.run(run())
 
 
 def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> None:

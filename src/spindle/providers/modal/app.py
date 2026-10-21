@@ -69,6 +69,7 @@ from .lora_pool import (
 )
 from .sampling import ModalSamplingTaskPlatform
 from .trainer_reconciler import (
+    TRANSIENT_POLL_ERRORS,
     complete_reconcile,
     pending_reconciliations,
     reconcile_trainers,
@@ -276,10 +277,13 @@ async def _call_running(call_id: str) -> bool:
     """Whether a spawned call is still running; raises its error if it failed."""
     try:
         await modal.FunctionCall.from_id(call_id).get.aio(timeout=0)
-    except (TimeoutError, modal.exception.TimeoutError):
-        return True
     except modal.exception.OutputExpiredError:
         return False
+    except (TimeoutError, modal.exception.TimeoutError):
+        return True
+    except TRANSIENT_POLL_ERRORS:
+        logging.getLogger(__name__).exception("weights download poll %s", call_id)
+        return True
     return False
 
 
@@ -305,19 +309,32 @@ async def _start_weights_download(definition_id: str) -> float | None:
     """Join the running download, or start one unless the weights are ready."""
     lock = _weights_starts.setdefault(definition_id, asyncio.Lock())
     async with lock:
-        try:
-            started = await _weights_download(definition_id)
-        except WeightsDownloadFailed:
-            started = None
-        if started is not None or await _weights_are_ready(definition_id):
-            return started
+        if await _weights_are_ready(definition_id):
+            return None
+        store = shared_kv()
+        key = _weights_call_key(definition_id)
+        stale = await store.get(key)
+        if stale is not None:
+            try:
+                if await _call_running(stale["call_id"]):
+                    return float(stale["started_at"])
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "restarting failed weights download %s", definition_id
+                )
+            if await _weights_are_ready(definition_id):
+                return None
         call = await prepare_model_assets.spawn.aio(definition_id)
-        started = time.time()
-        await shared_kv().put(
-            _weights_call_key(definition_id),
-            {"call_id": call.object_id, "started_at": started},
-        )
-        return started
+        record = {"call_id": call.object_id, "started_at": time.time()}
+        inserted = await store.put_if_absent(key, record)
+        if not inserted.created:
+            existing = inserted.value
+            if stale is None or existing["call_id"] != stale["call_id"]:
+                # Another API server started one first; join it instead.
+                await call.cancel.aio()
+                return float(existing["started_at"])
+            await store.put(key, record)
+        return record["started_at"]
 
 
 async def _wait_for_weights(definition_id: str) -> bool:
