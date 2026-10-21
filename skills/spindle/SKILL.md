@@ -20,13 +20,19 @@ uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
 
 Use the Python version supported by the installed revision; scoped runs currently
 require Python 3.12. Select the Modal workspace and environment before creating
-secrets. There are three separate credentials:
+secrets. There are four separate credentials:
 
 - Modal credentials allow deployment and resource management.
 - The `spindle-proxy` secret holds `MODAL_PROXY_TOKEN_ID` and
   `MODAL_PROXY_TOKEN_SECRET` for access to sampler pools.
 - The Spindle API key authenticates Tinker clients. A scoped run generates one;
   a shared deployment reads it from the `spindle-api` secret.
+- The `huggingface-secret` secret holds `HF_TOKEN`, a Hugging Face read token
+  for downloading base weights.
+
+Deploy a shared server non-interactively by naming bundled configs, e.g.
+`uv run spindle deploy qwen36-35b-a3b-lora-32k`. A bare `spindle deploy` is
+interactive and exits without a terminal.
 
 See the [README](../../README.md) for authentication and shared deployment commands.
 

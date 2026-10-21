@@ -146,6 +146,19 @@ results tabluated:
 | 16 | 8,390 | 524 | 75.9% | $2.40 |
 | 32 | 9,298 | 291 | 80.4% | $2.17 |
 
+# Multiple target tokens per position
+
+The Miles backend supports `target_tokens` shaped `[sequence_length]` or
+`[sequence_length, num_choices]` and returns log probabilities with the same
+shape. Loss weights (and RL advantages/sampling log probabilities) must match
+that shape. Dense tensors and the sparse CSR encoding produced by the Tinker
+SDK are supported. The `megatron_lora` and `megatron_fft` backends do not support
+2D targets.
+
+The transformer evaluates each input sequence once. Each candidate column then
+runs vocabulary scoring separately on the shared logits, so vocabulary-scoring
+work and saved logits-sized backward activations grow with `num_choices`.
+
 # Deterministic Training (Experimental) 
 
 The deterministic path aims to give each client the same training results regardless of which other clients share its batches (think of it as batch-invariance for training). It uses deterministic attention kernels, fixed reduction layouts, and ordered per-client gradient accumulation, alongside batch-invariant inference.
