@@ -160,6 +160,28 @@ Model-specific apps set `_modal_model_name` to the lowercased model basename
 multiple models, so it omits that tag. `training_spindle` avoids matching the
 Dojo report's source-independent `training` filter.
 
+Add your own tags, such as a team or job ID for cost attribution, with the recipe's
+`tags` field. They are applied to the recipe's trainer, inference provisioner, and
+rollout pool apps:
+
+```python
+from spindle.configs.qwen36_35b_a3b_lora_32k import Config as Base
+
+
+class Config(Base):
+    name = "sft-job-123"
+    tags = {"team": "ranking", "job_id": "job-123"}
+    overrides = {"platform.frontend": "spindle-job-123"}
+```
+
+To attribute each job separately, give each job its own recipe `name`, `tags`,
+and frontend, as above, so it gets its own trainer and inference apps.
+`spindle deploy` publishes a frontend with exactly the recipes passed to it.
+The frontend can serve several recipes, so it does not carry recipe tags.
+Keys starting with `_modal_` or `spindle_` are reserved. Changing `tags`
+redeploys the recipe's apps on the next `spindle deploy`. For scoped runs, pass
+`spindle.run(..., tags={...})`.
+
 Read the tags of a deployed app with the Modal SDK:
 
 ```python

@@ -114,6 +114,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_max_clients_per_instance,
             recipe.trainer_timeout_s,
             recipe.trainer_env,
+            recipe.tags,
             self.trainer_settings,
         )
 
@@ -136,6 +137,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
+            recipe.tags,
             self.inference_settings,
         )
 

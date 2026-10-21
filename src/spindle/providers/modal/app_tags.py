@@ -9,8 +9,22 @@ JOB_TYPES = {
 }
 
 
-def app_tags(role: str, *, model: str = "", framework: str = "") -> dict[str, str]:
+RESERVED_PREFIXES = ("_modal_", "spindle_")
+
+
+def app_tags(
+    role: str,
+    *,
+    model: str = "",
+    framework: str = "",
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    extra = extra or {}
+    reserved = sorted(key for key in extra if key.startswith(RESERVED_PREFIXES))
+    if reserved:
+        raise ValueError(f"app tag keys {reserved} are reserved for Spindle")
     tags = {
+        **extra,
         "_modal_source": "spindle",
         "spindle_role": role,
         # Dojo's report also matches job_type=training without checking source.

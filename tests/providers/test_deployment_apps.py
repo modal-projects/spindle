@@ -606,3 +606,26 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_recipe_tags_reach_every_recipe_app(builders):
+    row = deployment()
+    row.recipe.tags = {"team": "ranking", "job": "sft-123"}
+    trainer, _ = deployment_apps.build_trainer_app(row, image="test")
+    provisioner, _ = deployment_apps.build_inference_app(row, image="test")
+    pool, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    for app in (trainer, provisioner, pool):
+        assert app.tags["team"] == "ranking"
+        assert app.tags["job"] == "sft-123"
+        assert app.tags["_modal_source"] == "spindle"
+    assert trainer.tags["spindle_role"] == "trainer"
+
+
+@pytest.mark.parametrize("key", ["spindle_role", "_modal_source"])
+def test_recipe_tags_cannot_override_spindle_tags(builders, key):
+    row = deployment()
+    row.recipe.tags = {key: "other"}
+    with pytest.raises(ValueError, match="reserved"):
+        deployment_apps.build_trainer_app(row, image="test")

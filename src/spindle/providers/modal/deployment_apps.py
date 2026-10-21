@@ -134,7 +134,9 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer_name = recipe.name
     app = modal.App(
         deployment.trainer_app_name,
-        tags=app_tags("trainer", model=recipe.model, framework=recipe.backend),
+        tags=app_tags(
+            "trainer", model=recipe.model, framework=recipe.backend, extra=recipe.tags
+        ),
     )
 
     env = {
@@ -260,7 +262,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         raise ValueError("pool does not match deployment")
     app = modal.App(
         pool.app_name,
-        tags=app_tags("inference", model=recipe.model, framework="sglang"),
+        tags=app_tags(
+            "inference", model=recipe.model, framework="sglang", extra=recipe.tags
+        ),
     )
     options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
@@ -367,7 +371,11 @@ def build_inference_app(deployment, platform=None, *, image=None):
         )
     app = modal.App(
         deployment.inference_app_name,
-        tags=app_tags("inference-provisioner", model=deployment.recipe.model),
+        tags=app_tags(
+            "inference-provisioner",
+            model=deployment.recipe.model,
+            extra=deployment.recipe.tags,
+        ),
     )
     inference_name = deployment.name
 
