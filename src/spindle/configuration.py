@@ -59,6 +59,7 @@ class BaseConfig:
     inference_routing_balance_relative = 1.25
     inference_routing_cache_threshold = 0.5
     inference_lora_routing = "affinity"
+    inference_router_runtime = "rust"
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}

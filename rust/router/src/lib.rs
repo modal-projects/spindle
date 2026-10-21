@@ -1,5 +1,6 @@
-//! One scheduler per frontend process and inference pool. No network I/O here.
+//! One scheduler per frontend process and inference pool; native owns transport.
 mod cache_wait;
+mod native;
 mod radix;
 
 use pyo3::exceptions::PyValueError;
@@ -15,6 +16,14 @@ struct Work {
     age_seconds: f64,
     #[serde(default)]
     prefix_nodes: Vec<radix::Row>,
+    #[serde(default, deserialize_with = "deserialize_prefixes")]
+    prefixes: HashSet<u128>,
+    #[serde(default)]
+    waiting_requests: usize,
+    #[serde(default)]
+    kv_used_tokens: u64,
+    #[serde(default)]
+    kv_capacity_tokens: u64,
     cpu_adapters: HashSet<String>,
     gpu_adapters: HashSet<String>,
     request_ids: HashSet<String>,
@@ -22,11 +31,23 @@ struct Work {
     prefill_tokens: u64,
     decode_tokens: u64,
 }
+// Decode endpoint hashes once per observation, away from the request path.
+fn deserialize_prefixes<'de, D>(deserializer: D) -> Result<HashSet<u128>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|hash| u128::from_str_radix(&hash, 16).map_err(serde::de::Error::custom))
+        .collect()
+}
 #[derive(Deserialize)]
 struct Replica {
     replica: String,
     upstream: String,
     active: usize,
+    #[serde(default)]
+    adapters: HashMap<String, usize>,
     work: Work,
 }
 
@@ -121,7 +142,12 @@ pub struct Candidate {
     adapter_tier: u8,
     preferred: bool,
     tie: u64,
+    adapter_tie: u64,
     active: usize,
+    adapter_active: usize,
+    active_adapter_count: usize,
+    queued: usize,
+    kv_pinned_fraction: Option<f64>,
     cached_tokens: usize,
     backlog_seconds: f64,
     prefill_seconds: f64,
@@ -283,6 +309,7 @@ impl Router {
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
         let mut candidates = Vec::new();
+        let mut cooling_down = HashSet::new();
         let hits = self
             .radix
             .matches(&request.adapter, &request.hashes, self.replicas.len());
@@ -296,12 +323,15 @@ impl Router {
                 .failed_until
                 .get(&replica.replica)
                 .is_some_and(|t| *t > now)
-                || self
-                    .busy_until
-                    .get(&replica.replica)
-                    .is_some_and(|t| *t > now)
             {
                 continue;
+            }
+            if self
+                .busy_until
+                .get(&replica.replica)
+                .is_some_and(|t| *t > now)
+            {
+                cooling_down.insert(i);
             }
             let unobserved: Vec<_> = self
                 .reservations
@@ -310,7 +340,29 @@ impl Router {
                 .map(|(_, r)| r)
                 .collect();
             let active = replica.active + unobserved.len();
-            let hit = hits[i];
+            let adapter_active = replica.adapters.get(&request.adapter).copied().unwrap_or(0)
+                + unobserved
+                    .iter()
+                    .filter(|r| r.adapter == request.adapter)
+                    .count();
+            let mut active_adapters: HashSet<&str> = replica
+                .adapters
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .map(|(adapter, _)| adapter.as_str())
+                .collect();
+            active_adapters.extend(unobserved.iter().map(|r| r.adapter.as_str()));
+            let active_adapter_count = active_adapters.len();
+            // The structural catalog is bounded. Resident endpoints can still
+            // prove longer matches when an ancestor was omitted from that catalog.
+            let hit = request
+                .hashes
+                .iter()
+                .enumerate()
+                .rev()
+                .take_while(|(index, _)| (index + 1) * 64 > hits[i])
+                .find(|(_, hash)| w.prefixes.contains(hash))
+                .map_or(hits[i], |(index, _)| (index + 1) * 64);
             let mut pending = w.pending_adapters.clone();
             for r in &unobserved {
                 pending.insert(r.adapter.clone());
@@ -352,7 +404,16 @@ impl Router {
                     )
                     .as_bytes(),
                 ),
+                adapter_tie: xxh3_64(
+                    format!("{}\0{}", request.adapter, replica.replica).as_bytes(),
+                ),
                 active,
+                adapter_active,
+                active_adapter_count,
+                queued: w.waiting_requests,
+                kv_pinned_fraction: (w.kv_capacity_tokens > 0
+                    && w.kv_used_tokens <= w.kv_capacity_tokens)
+                    .then(|| w.kv_used_tokens as f64 / w.kv_capacity_tokens as f64),
                 cached_tokens: hit,
                 backlog_seconds: backlog,
                 prefill_seconds: (request.prompt_tokens - hit) as f64 / self.prefill_rate,
@@ -362,7 +423,7 @@ impl Router {
         let all = candidates;
         let candidates: Vec<_> = all
             .iter()
-            .filter(|c| c.active < self.capacity)
+            .filter(|c| c.active < self.capacity && !cooling_down.contains(&c.replica_index))
             .cloned()
             .collect();
         let available = candidates.len();
@@ -465,6 +526,7 @@ impl Router {
 
 #[pymodule]
 fn spindle_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<native::NativeRuntime>()?;
     m.add_class::<Router>()?;
     m.add_class::<Request>()?;
     m.add_class::<Snapshot>()?;

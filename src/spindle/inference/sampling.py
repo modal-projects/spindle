@@ -13,7 +13,7 @@ from stitch.publish import constrain_request
 from stitch.types import VersionRef
 
 if TYPE_CHECKING:
-    from .router import Router
+    from .router_transport import RouterTransport as Router
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -326,53 +326,39 @@ async def _sample_one(
             },
         )
         upstream = None
-        if router is not None:
-            routing_started = loop.time()
-            decision = await router.select_destination(
-                routing_request,
-                observation.id,
-                deadline=deadline,
-            )
-            routing_wait = loop.time() - routing_started
-            if stats is not None:
-                stats["wait_s"] = stats.get("wait_s", 0.0) + routing_wait
-            observation.attrs["routing_wait_s"] = routing_wait
-            upstream = decision.replica
-            headers = {
-                k: v
-                for k, v in headers.items()
-                if k.lower() not in {"modal-session-id", "modal-routing-affinity-key"}
-            }
-            headers["Modal-Flash-Upstream"] = decision.upstream
-            observation.attrs.update(
-                selected_replica=upstream,
-                routing=dict(
-                    policy=router.policy,
-                    reason=decision.reason,
-                    available_replicas=decision.available_replicas,
-                    best_cached_tokens=decision.best_cached_tokens,
-                    cached_tokens=decision.cached_tokens,
-                    backlog_seconds=decision.backlog_seconds,
-                    prefill_seconds=decision.prefill_seconds,
-                    adapter_seconds=decision.adapter_seconds,
-                ),
-            )
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
-            request = client.build_request(
-                "POST",
-                f"{gateway_url}/generate",
-                json=body,
-                headers=headers,
-                timeout=request_timeout,
-                extensions={"trace": HTTPTrace(attempt_result).record},
-            )
-            if upstream is not None:
-                # Caller-provided clients may also carry conflicting defaults.
-                request.headers.pop("Modal-Session-ID", None)
-                request.headers.pop("Modal-Routing-Affinity-Key", None)
-            response = await client.send(request)
+            if router is not None:
+                dispatched = await router.dispatch(
+                    routing_request,
+                    request_id=observation.id,
+                    gateway=gateway_url,
+                    body=body,
+                    headers=headers,
+                    client=client,
+                    deadline=min(deadline, loop.time() + request_timeout),
+                    trace_attrs=attempt_result,
+                )
+                response = dispatched.response
+                upstream = dispatched.replica
+                observation.attrs["selected_replica"] = upstream
+                observation.attrs["routing"] = dispatched.routing
+                observation.attrs["routing_wait_s"] = dispatched.routing["wait_s"]
+                if stats is not None:
+                    stats["wait_s"] = (
+                        stats.get("wait_s", 0.0) + dispatched.routing["wait_s"]
+                    )
+            else:
+                request = client.build_request(
+                    "POST",
+                    f"{gateway_url}/generate",
+                    json=body,
+                    headers=headers,
+                    timeout=request_timeout,
+                    extensions={"trace": HTTPTrace(attempt_result).record},
+                )
+                response = await client.send(request)
         except httpx.TransportError as exc:
             attempt_result["error_type"] = type(exc).__name__
             cause = exc
@@ -459,15 +445,6 @@ async def _sample_one(
                             flush=True,
                         )
         finally:
-            if router is not None:
-                router.complete(
-                    observation.id,
-                    status=attempt_result.get("http_status"),
-                    failed=cause is not None
-                    or attempt_result.get("route_mismatch", False)
-                    or "version_error" in attempt_result
-                    or attempt_result.get("http_status", 200) >= 500,
-                )
             observation.finish()
         remaining = deadline - loop.time()
         if remaining <= 0:

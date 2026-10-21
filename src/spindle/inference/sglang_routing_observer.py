@@ -2,12 +2,14 @@
 
 Installed as sglang.srt.spindle_routing_observer by the rollout image. The
 scheduler owns all inspected state. No tensor contents are read, no prefix
-match mutates the engine tree, and a bounded writer handles file I/O separately.
+match mutates the engine tree, and a bounded writer formats owned Rust snapshots
+and atomically publishes them separately from the scheduler.
 Enable explicitly with SGLANG_SPINDLE_ROUTING_OBSERVATIONS=1.
 """
 
 from array import array
 import json
+import logging
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -38,16 +40,20 @@ class PrefixCatalog:
 
     def export(self):
         selected = {}
-        for row in sorted(self.nodes.values(), key=lambda r: r[4], reverse=True):
-            if not row[3]:
-                continue
+        reusable = (row for row in self.nodes.values() if row[3])
+        for row in sorted(reusable, key=lambda r: r[4], reverse=True):
+            remaining = self.limit - len(selected)
+            if not remaining:
+                break
             path = []
             key = row[1]
             while key is not None and key not in selected:
                 item = self.nodes[key]
                 path.append(item)
+                if len(path) > remaining:
+                    break
                 key = item[2]
-            if len(selected) + len(path) > self.limit:
+            if len(path) > remaining:
                 continue
             for item in reversed(path):
                 selected[item[1]] = item[:4]
@@ -56,11 +62,21 @@ class PrefixCatalog:
 
 def rust_prefixes(cache, adapter_names, catalog=None):
     rows = cache.tree_core._binding.routing_snapshot()
+    return rust_snapshot_prefixes(
+        rows,
+        cache.tree_core.root_node_handle(),
+        cache.is_mamba_enabled,
+        adapter_names,
+        catalog,
+    )
+
+
+def rust_snapshot_prefixes(rows, root, hybrid, adapter_names, catalog=None):
+    """Format owned CPU data without accessing the live scheduler or tree."""
     children = {}
     for row in rows:
         children.setdefault(row[1], []).append(row)
     # The native root is omitted. Descendants of an evicted ancestor receive no credit.
-    root = cache.tree_core.root_node_handle()
     stack = [(row, None, 0, None) for row in children.get(root, ())]
     result = []
     while stack:
@@ -81,7 +97,7 @@ def rust_prefixes(cache, adapter_names, catalog=None):
             take = end - start
             digest.update(tokens[offset:take].tobytes())
             key = digest.hexdigest()
-            reusable = not cache.is_mamba_enabled or (mamba and end == end_node)
+            reusable = not hybrid or (mamba and end == end_node)
             if catalog is not None:
                 catalog.add(adapter, key, parent_key, reusable, accessed)
             parent_key = key
@@ -190,12 +206,31 @@ def device_prefixes(cache, adapter_names, catalog=None):
     return [key for _, key in sorted(result, reverse=True)[:8192]]
 
 
+def publish_snapshot(state):
+    """Only owned snapshot values cross onto the publication thread."""
+    started = time.monotonic()
+    capture = state.pop("_rust_capture", None)
+    if capture is not None:
+        rows, root, hybrid, names = capture
+        catalog = PrefixCatalog()
+        state["prefixes"] = rust_snapshot_prefixes(rows, root, hybrid, names, catalog)
+        state["prefix_nodes"] = catalog.export()
+    # timestamp remains the capture time: delayed publication must not appear fresh.
+    state["publication_build_seconds"] = time.monotonic() - started
+    encoded = json.dumps(state, separators=(",", ":"))
+    PATH.with_suffix(".tmp").write_text(encoded)
+    os.replace(PATH.with_suffix(".tmp"), PATH)
+
+
 def write_snapshots():
     while True:
         state = pending.get()
-        encoded = json.dumps(state, separators=(",", ":"))
-        PATH.with_suffix(".tmp").write_text(encoded)
-        os.replace(PATH.with_suffix(".tmp"), PATH)
+        try:
+            publish_snapshot(state)
+        except Exception:
+            # Do not publish incomplete state or permanently lose future observations.
+            # Readers keep seeing the previous timestamp and apply their freshness limit.
+            logging.exception("Cache observation publication failed")
 
 
 def snapshot(scheduler, running_batch, last_batch):
@@ -211,14 +246,33 @@ def snapshot(scheduler, running_batch, last_batch):
     if now - last_snapshot < 1:
         return
     last_snapshot = now
+    captured_at = time.time()
     if not scheduler.enable_lora:
         return
     manager = scheduler.tp_worker.model_runner.lora_manager
     names = {uid: ref.lora_name for uid, ref in manager.lora_refs.items()}
     catalog = PrefixCatalog()
-    prefixes = device_prefixes(scheduler.tree_cache, names, catalog)
-    if prefixes is None:
-        return
+    cache = scheduler.tree_cache
+    capture = None
+    if (
+        type(cache).__name__ == "UnifiedRadixCache"
+        and not cache.is_swa_enabled
+        and type(cache.tree_core).__name__ == "RustUnifiedTreeCore"
+    ):
+        # The binding returns owned token vectors and scalar metadata. Capture
+        # while the scheduler owns the tree; format them asynchronously.
+        capture = (
+            cache.tree_core._binding.routing_snapshot(),
+            cache.tree_core.root_node_handle(),
+            cache.is_mamba_enabled,
+            names,
+        )
+        prefixes = []
+    else:
+        # Legacy Python tree nodes are mutable, so inspect them on their owner thread.
+        prefixes = device_prefixes(cache, names, catalog)
+        if prefixes is None:
+            return
     requests = {r.rid: r for r in scheduler.waiting_queue}
     for batch in (running_batch, last_batch):
         if batch is not None:
@@ -241,8 +295,10 @@ def snapshot(scheduler, running_batch, last_batch):
             )
         )
     sequence += 1
+    # Read pinned/evictable accounting on the scheduler owner thread.
+    pool = scheduler.pool_stats_observer.get_pool_stats()
     state = dict(
-        timestamp=time.time(),
+        timestamp=captured_at,
         sequence=sequence,
         incarnation=os.getpid(),
         prefixes=prefixes,
@@ -256,7 +312,13 @@ def snapshot(scheduler, running_batch, last_batch):
         cache_kind=type(scheduler.tree_cache).__name__,
         running_requests=len(running_batch.reqs) if running_batch is not None else 0,
         waiting_requests=len(scheduler.waiting_queue),
+        kv_used_tokens=pool.full_num_used,
+        kv_capacity_tokens=(
+            pool.full_num_used + pool.full_available_size + pool.full_evictable_size
+        ),
     )
+    if capture is not None:
+        state["_rust_capture"] = capture
     if writer is None:
         writer = threading.Thread(target=write_snapshots, daemon=True)
         writer.start()

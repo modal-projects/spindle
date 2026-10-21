@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import os
 import time
@@ -19,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 from stitch.types import VersionConstraint, VersionRef
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
+from .request_replay import RequestReplay
 
 
 def create_app(
@@ -45,9 +45,13 @@ def create_app(
         app.state.request_work = {}
         app.state.routing_catalog = {}
         app.state.routing_read_at = 0.0
+        app.state.routing_prefix_snapshot = None
+        app.state.routing_reusable_prefixes = []
+        app.state.request_replay = RequestReplay()
         try:
             yield
         finally:
+            await app.state.request_replay.aclose()
             pending = list(app.state.adapter_resolutions.values())
             for task in pending:
                 task.cancel()
@@ -57,7 +61,7 @@ def create_app(
     app = FastAPI(lifespan=lifespan)
 
     @app.get("/routing-state")
-    async def routing_state():
+    async def routing_state(include_prefix_nodes: bool = True):
         now = time.monotonic()
         if now - app.state.routing_read_at > 0.5:
             app.state.routing_read_at = now
@@ -72,6 +76,24 @@ def create_app(
         snapshot = app.state.routing_catalog
         work = None
         if snapshot:
+            prefixes = snapshot["prefixes"]
+            if not include_prefix_nodes:
+                if app.state.routing_prefix_snapshot is not snapshot:
+                    # Include reusable structural ancestors even when the flat
+                    # endpoint catalog reaches its own limit. This preserves
+                    # the union of matches available from both representations.
+                    app.state.routing_reusable_prefixes = list(
+                        dict.fromkeys(
+                            snapshot["prefixes"]
+                            + [
+                                row[1]
+                                for row in snapshot.get("prefix_nodes", [])
+                                if row[3]
+                            ]
+                        )
+                    )
+                    app.state.routing_prefix_snapshot = snapshot
+                prefixes = app.state.routing_reusable_prefixes
             rows = {
                 r["rid"]: r
                 for r in snapshot["requests"]
@@ -84,8 +106,7 @@ def create_app(
             )
             work = dict(
                 age_seconds=time.time() - snapshot["timestamp"],
-                prefixes=snapshot["prefixes"],
-                prefix_nodes=snapshot.get("prefix_nodes", []),
+                prefixes=prefixes,
                 cpu_adapters=snapshot["cpu_adapters"],
                 gpu_adapters=snapshot["gpu_adapters"],
                 request_ids=list(rows),
@@ -96,7 +117,11 @@ def create_app(
                 cache_kind=snapshot["cache_kind"],
                 running_requests=snapshot["running_requests"],
                 waiting_requests=snapshot["waiting_requests"],
+                kv_used_tokens=snapshot.get("kv_used_tokens", 0),
+                kv_capacity_tokens=snapshot.get("kv_capacity_tokens", 0),
             )
+            if include_prefix_nodes:
+                work["prefix_nodes"] = snapshot.get("prefix_nodes", [])
         return {
             "replica": os.environ.get("MODAL_TASK_ID", "local"),
             "active": len(app.state.routing_requests),
@@ -121,6 +146,22 @@ def create_app(
     async def generate(request: Request) -> Response:
         payload = await request.json()
         rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        # Deduplicate scalar attempts. Preserve the existing batch-ID path;
+        # its separate engine request IDs do not identify one shared attempt.
+        replay_id = rid if isinstance(rid, str) else object()
+        response = await app.state.request_replay.run(
+            replay_id,
+            payload,
+            lambda: generate_once(payload),
+            request.is_disconnected,
+        )
+        if response is None:
+            response = Response(status_code=499)
+        response.headers["x-spindle-replica"] = os.environ.get("MODAL_TASK_ID", "local")
+        return response
+
+    async def generate_once(payload: dict) -> Response:
+        rid = payload["rid"]
         constraint = VersionConstraint.from_payload(payload)
         run_id = payload.get("weight_run_id")
         if isinstance(rid, str):
@@ -138,17 +179,13 @@ def create_app(
                 ),
             )
         try:
-            response = await generate_response(request, payload)
-            response.headers["x-spindle-replica"] = os.environ.get(
-                "MODAL_TASK_ID", "local"
-            )
-            return response
+            return await generate_response(payload)
         finally:
             if isinstance(rid, str):
                 app.state.routing_requests.pop(rid, None)
                 app.state.request_work.pop(rid, None)
 
-    async def generate_response(request: Request, payload: dict) -> Response:
+    async def generate_response(payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -176,9 +213,7 @@ def create_app(
             app.state.routing_requests[payload["rid"]] = payload.get(
                 "lora_path", "base"
             )
-        response = await _post_generate(app.state.client, request, payload)
-        if response is None:
-            return Response(status_code=499)
+        response = await _post_generate(app.state.client, payload)
         try:
             body = response.json()
         except ValueError:
@@ -275,37 +310,29 @@ async def _prepare_adapter(
 
 async def _post_generate(
     client: httpx.AsyncClient,
-    request: Request,
     payload: dict,
-) -> httpx.Response | None:
+) -> httpx.Response:
     rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
-    task = asyncio.create_task(client.post("/generate", json=payload))
     try:
-        while not task.done():
-            done, _ = await asyncio.wait((task,), timeout=0.25)
-            if done:
-                break
-            if await request.is_disconnected():
-                await _abort(client, rid)
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                return None
-        return await task
+        return await client.post("/generate", json=payload)
     except asyncio.CancelledError:
         await _abort(client, rid)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
         raise
 
 
 async def _abort(client: httpx.AsyncClient, rid) -> None:
     rids = rid if isinstance(rid, list) else [rid]
-    await asyncio.gather(
-        *(client.post("/abort_request", json={"rid": str(item)}) for item in rids),
-        return_exceptions=True,
-    )
+    try:
+        async with asyncio.timeout(2):
+            await asyncio.gather(
+                *(
+                    client.post("/abort_request", json={"rid": str(item)})
+                    for item in rids
+                ),
+                return_exceptions=True,
+            )
+    except TimeoutError:
+        pass
 
 
 def main() -> None:

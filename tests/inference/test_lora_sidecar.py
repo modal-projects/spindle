@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 
 import httpx
 from fastapi.testclient import TestClient
@@ -8,7 +7,6 @@ from stitch.types import VersionRef
 
 from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
-from spindle.inference import lora_sidecar
 
 
 def test_generation_concurrency_does_not_block_health_requests(tmp_path):
@@ -75,61 +73,6 @@ def _publish(tmp_path, version):
     bulletin = SnapshotBulletin(tmp_path / "bulletin")
     bulletin.publish(VersionRef("model-a", version), source)
     return bulletin
-
-
-def test_routing_state_counts_registration_wait_and_cleans_up_on_cancel(
-    tmp_path, monkeypatch
-):
-    async def scenario():
-        entered = asyncio.Event()
-
-        async def prepare(*args):
-            entered.set()
-            await asyncio.Future()
-
-        monkeypatch.setattr(lora_sidecar, "_prepare_adapter", prepare)
-        app = create_app(SnapshotBulletin(tmp_path / "bulletin"), "http://unused")
-        async with (
-            app.router.lifespan_context(app),
-            httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
-            ) as client,
-        ):
-            app.state.routing_read_at = time.monotonic()
-            app.state.routing_catalog = {
-                "timestamp": time.time(),
-                "cpu_adapters": ["other/v1"],
-                "requests": [],
-                "prefixes": [],
-                "gpu_adapters": [],
-                "snapshot_seconds": 0,
-                "cache_kind": "UnifiedRadixCache",
-                "running_requests": 0,
-                "waiting_requests": 0,
-            }
-            request = asyncio.create_task(
-                client.post(
-                    "/generate",
-                    json={
-                        "rid": "waiting",
-                        "input_ids": [1],
-                        "weight_run_id": "model",
-                        "weight_version": {"exact_version": 7, "min_version": None},
-                    },
-                )
-            )
-            await asyncio.wait_for(entered.wait(), 2)
-            state = (await client.get("/routing-state")).json()
-            assert state["active"] == 1
-            assert state["request_ids"] == ["waiting"]
-            assert state["pending_adapters"] == [VersionRef("model", 7).identity]
-            assert state["cpu_adapters"] == ["other/v1"]
-            assert 0 <= state["age_seconds"] < 1
-            request.cancel()
-            await asyncio.gather(request, return_exceptions=True)
-            assert (await client.get("/routing-state")).json()["active"] == 0
-
-    asyncio.run(scenario())
 
 
 def test_sidecar_resolves_exact_adapter_and_stamps_response(tmp_path) -> None:

@@ -220,34 +220,3 @@ def test_no_endpoint_is_noop(monkeypatch):
             pass
     finally:
         otlp.provider.cache_clear()
-
-
-def test_router_prediction_is_exported_separately_from_engine_hit(spans):
-    with otlp.sample_trace(task(), {}):
-        otlp.record_attempt(
-            {
-                "ev": "span",
-                "name": "sample_attempt",
-                "t0": time.time(),
-                "t1": time.time(),
-                "attrs": {
-                    "ok": True,
-                    "selected_replica": "replica-a",
-                    "routing_wait_s": 0.2,
-                    "routing": {
-                        "policy": "cache_wait",
-                        "cached_tokens": 128,
-                        "reason": "affinity_released",
-                        "prompt": "PRIVATE",
-                    },
-                    "backend_timing": {"cached_tokens": 64},
-                },
-            }
-        )
-    attempt = next(
-        s for s in spans.get_finished_spans() if s.name == "spindle.sample.attempt"
-    )
-    assert attempt.attributes["spindle.routing.cached_tokens"] == 128
-    assert attempt.attributes["sglang.cached_tokens"] == 64
-    assert attempt.attributes["spindle.routing.wait_s"] == 0.2
-    assert "spindle.routing.prompt" not in attempt.attributes

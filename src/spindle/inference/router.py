@@ -6,6 +6,10 @@ import json
 import logging
 import random
 import time
+
+import httpx
+from .router_transport import RoutedResponse
+from spindle.telemetry.http_trace import HTTPTrace
 from collections.abc import Awaitable, Callable
 
 from spindle_router import Decision, Request, Snapshot, Router as Scheduler
@@ -100,6 +104,71 @@ class Router:
                     self.changed.wait(),
                     min(remaining, decision.retry_after, random.uniform(0.25, 0.75)),
                 )
+
+    async def dispatch(
+        self,
+        prepared,
+        *,
+        request_id,
+        gateway,
+        body,
+        headers,
+        client,
+        deadline,
+        trace_attrs=None,
+    ):
+        began = asyncio.get_running_loop().time()
+        decision = await self.select_destination(
+            prepared, request_id, deadline=deadline
+        )
+        routing = dict(
+            policy=self.policy,
+            reason=decision.reason,
+            available_replicas=decision.available_replicas,
+            cached_tokens=decision.cached_tokens,
+            best_cached_tokens=decision.best_cached_tokens,
+            backlog_seconds=decision.backlog_seconds,
+            prefill_seconds=decision.prefill_seconds,
+            adapter_seconds=decision.adapter_seconds,
+            wait_s=asyncio.get_running_loop().time() - began,
+        )
+        status, failed = None, True
+        try:
+            headers = {
+                k: v
+                for k, v in headers.items()
+                if k.lower()
+                not in {
+                    "modal-session-id",
+                    "modal-routing-affinity-key",
+                    "modal-flash-upstream",
+                }
+            }
+            headers["Modal-Flash-Upstream"] = decision.upstream
+            request = client.build_request(
+                "POST",
+                gateway + "/generate",
+                json=body,
+                headers=headers,
+                extensions={"trace": HTTPTrace(trace_attrs).record}
+                if trace_attrs is not None
+                else {},
+                timeout=max(0.001, deadline - asyncio.get_running_loop().time()),
+            )
+            request.headers.pop("Modal-Session-ID", None)
+            request.headers.pop("Modal-Routing-Affinity-Key", None)
+            response = await client.send(request)
+            status = response.status_code
+            actual = response.headers.get("x-spindle-replica")
+            failed = status >= 500 or bool(actual and actual != decision.replica)
+            if actual and actual != decision.replica:
+                raise httpx.TransportError("Worker identity mismatch")
+            return RoutedResponse(response, decision.replica, routing)
+        except asyncio.CancelledError:
+            failed = False
+            raise
+        finally:
+            self.complete(request_id, status=status, failed=failed)
 
     def complete(self, request_id, *, status=None, failed=False):
         outcome = "busy" if status in (429, 503) else "failed" if failed else "ok"

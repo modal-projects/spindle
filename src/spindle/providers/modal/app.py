@@ -322,7 +322,11 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                     spec.app_name,
                     gateway,
                     policy=policy,
-                    capacity=definition.inference_settings["max_running_requests"],
+                    runtime=definition.recipe.inference_router_runtime,
+                    capacity=(
+                        definition.inference_settings["max_running_requests"]
+                        + (definition.inference_settings.get("max_queued_requests") or 0)
+                    ),
                     rates=definition.recipe.inference_routing_work_rates,
                     balance_absolute=definition.recipe.inference_routing_balance_absolute,
                     balance_relative=definition.recipe.inference_routing_balance_relative,
