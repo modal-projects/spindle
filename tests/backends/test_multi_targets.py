@@ -157,6 +157,38 @@ def test_candidate_scores_and_gradients_share_logits(nested):
     assert len(calls) == (2 if nested else 1)
 
 
+def test_miles_v012_masks_and_outputs_keep_candidate_columns():
+    def single_target(args, batch, logits):
+        return [target.float() for target in batch["target_tokens"]]
+
+    def gather(args, batch, log_probs, per_datum_losses):
+        assert all(log_prob.ndim == 1 for log_prob in log_probs)
+        return [
+            {"sample_index": index, "logprobs": log_prob, "loss": loss}
+            for index, (log_prob, loss) in enumerate(
+                zip(log_probs, per_datum_losses, strict=True)
+            )
+        ]
+
+    losses = SimpleNamespace(
+        _target_logprobs=single_target,
+        _local_response_masks=lambda args, batch, _: batch["loss_masks"],
+        _gather_per_datum_outputs=gather,
+    )
+    install_multi_target_hooks(losses)
+    targets = [torch.tensor([1, 2]), torch.tensor([[3, 4], [5, 6]])]
+    batch = {"target_tokens": targets, "loss_masks": [torch.ones(2)] * 2}
+    scores = losses._target_logprobs(None, batch, None)
+    masks = losses._local_response_masks(None, batch, scores)
+    assert [mask.shape for mask in masks] == [(2,), (2, 1)]
+    outputs = losses._gather_per_datum_outputs(None, batch, scores, [1.0, 2.0])
+    torch.testing.assert_close(outputs[0]["logprobs"], torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(
+        outputs[1]["logprobs"], torch.tensor([[3.0, 4.0], [5.0, 6.0]])
+    )
+    assert [output["loss"] for output in outputs] == [1.0, 2.0]
+
+
 def test_reported_1631_by_five_targets_use_one_prompt():
     value = Datum(
         model_input=ModelInput.from_ints([1] * 1631),
