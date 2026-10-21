@@ -36,24 +36,26 @@ uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
 ## Set up the server
 
 Authenticate with a [Modal account](https://modal.com/docs/guide/workspaces) that can deploy apps and create
-secrets, and select the environment to deploy into **before** creating secrets, so the secrets and the
-deployment end up in the same environment:
+secrets, then create and select the [environment](https://modal.com/docs/guide/environments) to deploy into
+**before** creating secrets, so the secrets and the deployment end up in the same environment:
 
 ```bash
 modal token new
-export MODAL_ENVIRONMENT=your-environment
-modal environment list
+modal environment create my-spindle
+export MODAL_ENVIRONMENT=my-spindle
 ```
 
-For automation, supply existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials instead of the interactive login.
+To use an existing environment, skip `modal environment create` and export its name. For automation, supply
+existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials instead of the interactive login.
 
-Spindle uses three separate credentials:
+Spindle uses four separate credentials:
 
 | Credential | Purpose | Who needs it |
 | --- | --- | --- |
 | Modal API token / local profile | Manage Modal resources | Deployer |
 | `TINKER_API_KEY` in the `spindle-api` secret | Authenticate calls to the Spindle API | Deployer and API clients |
 | Proxy token in the `spindle-proxy` secret | Let Spindle reach protected sampler pools | Deployed control plane and trainers |
+| `HF_TOKEN` in the `huggingface-secret` secret | Download base model weights from Hugging Face | Deployed trainers |
 
 Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
 
@@ -83,13 +85,53 @@ modal secret create spindle-proxy \
   MODAL_PROXY_TOKEN_SECRET="$MODAL_PROXY_TOKEN_SECRET"
 ```
 
-To deploy the Spindle server, simply run:
+Spindle downloads base weights from Hugging Face. Create a **Read** token at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (for a gated model, also accept its
+license on the model page with the same account) and store it under `huggingface-secret`:
 
 ```bash
-spindle deploy
+modal secret create huggingface-secret HF_TOKEN=hf_...
 ```
 
-You'll want to save the `server` URL from the above deployment output.
+### Deploy
+
+From your project, run:
+
+```bash
+uv run spindle deploy
+```
+
+(With the project's virtual environment activated, `spindle deploy` works too.)
+
+In a terminal, this starts an interactive deploy. It first checks that each secret above exists in
+`MODAL_ENVIRONMENT` with its required keys, and prints the command to create any that are missing:
+
+<img src="docs/assets/spindle-deploy/setup-check-missing.png" alt="Setup check reporting a missing huggingface-secret" width="800">
+
+It then asks:
+
+1. Which models to post-train. Qwen3.6-35B-A3B is selected by default.
+2. LoRA or full fine-tuning, for models that support both. LoRA is selected by default.
+3. The longest sequence you'll train on (prompt + completion). Each model gets its smallest bundled config that fits.
+
+<img src="docs/assets/spindle-deploy/model-picker.png" alt="Model picker grouped by provider" width="800">
+
+After you confirm the plan, it deploys a trainer and an inference app per config, shows progress for each, and prints
+the server URL to use as `TINKER_BASE_URL`.
+
+<img src="docs/assets/spindle-deploy/deployed.png" alt="Interactive spindle deploy accepting the defaults" width="800">
+
+For scripts, CI, and agents, pass bundled config names (the interactive deploy prints the equivalent command) or
+config files:
+
+```bash
+uv run spindle deploy qwen36-35b-a3b-lora-32k
+uv run spindle deploy --all          # every bundled config
+```
+
+Without a terminal and without arguments, `spindle deploy` exits with this guidance instead of deploying. Bundled
+configs live in [`src/spindle/configs`](src/spindle/configs). Each deploy sets the complete list of configs the
+server serves, so include every config you want to keep serving.
 
 A single deployment can serve multiple concurrent independent training jobs across different base models, training parameterizations, and experiment scales.
 GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times. See
