@@ -104,6 +104,11 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
         torch.tensor(row["tokens"], device="cuda") for _, row in prepared.slot_rows
     ]
     batch["loss_fn_config"] = {}
+    # Miles moves loss masks to the device before the loss, as its rollout data path does.
+    batch["loss_masks"] = [
+        torch.tensor(mask, dtype=torch.int, device="cuda")
+        for mask in batch["loss_masks"]
+    ]
     lengths = batch["total_lengths"]
     torch.manual_seed(109)
     full = torch.randn(sum(lengths), 1024, device="cuda", dtype=dtype)
