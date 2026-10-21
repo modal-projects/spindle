@@ -1,7 +1,8 @@
 """Build the small Python extension once per Rust source revision."""
 
-from pathlib import Path
 import sysconfig
+from pathlib import Path
+
 import modal
 
 SOURCE = Path(__file__).resolve().parents[4] / "rust/router"

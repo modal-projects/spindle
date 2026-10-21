@@ -6,8 +6,9 @@ import time
 import httpx
 from stitch.pools.modal_flash import list_flash_containers_async
 
-from spindle.inference.router import Router
 from spindle.inference.native_router import NativeRouter
+from spindle.inference.router import Router
+
 from .fft_pool import proxy_auth_headers
 
 

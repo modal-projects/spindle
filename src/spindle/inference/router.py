@@ -1,18 +1,20 @@
 """Async lifecycle around the Rust scheduler; no policy logic lives here."""
 
 import asyncio
-from contextlib import suppress
 import json
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 import httpx
-from .router_transport import RoutedResponse
-from spindle.telemetry.http_trace import HTTPTrace
-from collections.abc import Awaitable, Callable
+from spindle_router import Decision, Request, Snapshot
+from spindle_router import Router as Scheduler
 
-from spindle_router import Decision, Request, Snapshot, Router as Scheduler
+from spindle.telemetry.http_trace import HTTPTrace
+
+from .router_transport import RoutedResponse
 
 log = logging.getLogger(__name__)
 SnapshotReader = Callable[[], Awaitable[list[dict]]]

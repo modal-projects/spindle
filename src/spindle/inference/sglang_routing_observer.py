@@ -7,17 +7,16 @@ and atomically publishes them separately from the scheduler.
 Enable explicitly with SGLANG_SPINDLE_ROUTING_OBSERVATIONS=1.
 """
 
-from array import array
 import json
 import logging
 import os
-from pathlib import Path
-from queue import Empty, Full, Queue
 import threading
 import time
+from array import array
+from pathlib import Path
+from queue import Empty, Full, Queue
 
 import xxhash
-
 
 ENABLED = os.environ.get("SGLANG_SPINDLE_ROUTING_OBSERVATIONS") == "1"
 PATH = Path("/tmp/spindle-routing-work.json")

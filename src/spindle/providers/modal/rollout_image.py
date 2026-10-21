@@ -1,5 +1,6 @@
-import modal
 from pathlib import Path
+
+import modal
 
 from .image_dependencies import (
     CORE_PACKAGES,
@@ -12,7 +13,7 @@ SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
 SGLANG_BRANCH = "spindle-sglang-v0.5.21"
 
-base_image = (
+image = (
     modal.Image.from_registry(SGLANG_IMAGE)
     .entrypoint([])
     .apt_install("git")
@@ -53,6 +54,5 @@ base_image = (
             "SGLANG_DISABLE_CUDNN_CHECK": "1",
         }
     )
+    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
-
-image = base_image.add_local_python_source("spindle", ignore=ignore_config_source)

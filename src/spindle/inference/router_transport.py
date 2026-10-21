@@ -6,7 +6,8 @@ release reservations on cancellation and respect the caller's absolute deadline.
 """
 
 from dataclasses import dataclass
-from typing import Protocol, Any
+from typing import Any, Protocol
+
 import httpx
 
 

@@ -1,11 +1,11 @@
 """Share one generation across duplicate deliveries of the same request ID."""
 
 import asyncio
-from collections import OrderedDict
-from dataclasses import dataclass
 import hashlib
 import json
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from fastapi.responses import JSONResponse
 

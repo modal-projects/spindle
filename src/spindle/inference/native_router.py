@@ -1,14 +1,15 @@
 """Lifecycle/control-plane wrapper; no per-request PyO3 calls or cache snapshots."""
 
 import asyncio
-from contextlib import suppress
-from dataclasses import dataclass
 import json
 import secrets
+from contextlib import suppress
+from dataclasses import dataclass
 from urllib.parse import quote
 
 import httpx
 from spindle_router import NativeRuntime
+
 from .router_transport import RoutedResponse
 
 
