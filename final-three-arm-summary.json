@@ -1,0 +1,948 @@
+{
+  "time": 1792562345.9368453,
+  "windows": {
+    "0-60min": {
+      "Modal sessions": {
+        "phase": "measured",
+        "elapsed_seconds": 12815.709825515747,
+        "window": [
+          0,
+          3600
+        ],
+        "completed_requests": 37230,
+        "completed_output_tps": 6728.9991666666665,
+        "cache_reuse": 0.8964167151233746,
+        "uncached_tokens": 68585123,
+        "completed_request_p95_seconds": 167.90998077392578,
+        "mean_active_per_worker": 114.69311377245509,
+        "mean_queued_per_worker": 1.903817365269461,
+        "mean_load_spread": 33.19311377245509,
+        "queued_with_spare_worker_fraction": 0.0029940119760479044,
+        "all_workers_at_least_56_fraction": 0.9910179640718563,
+        "mean_decode_batch": 109.72846116526264,
+        "mean_distinct_adapters_per_decode_batch": 7.974643849512637,
+        "dominant_adapter_fraction": 0.16928369425871911,
+        "decode_iterations_per_worker_second": 15.76467577656481,
+        "worker_metrics": {
+          "ta-01M5E4553Q9DNP0DXM1ERZ473R": {
+            "mean_active": 105.74850299401197,
+            "mean_queued": 0.23353293413173654,
+            "decode_tokens_per_second": 1934.7902518067456
+          },
+          "ta-01M5E4553Q3VQQ9JGMC0K8Q5WR": {
+            "mean_active": 113.6556886227545,
+            "mean_queued": 1.43562874251497,
+            "decode_tokens_per_second": 1779.1562662123142
+          },
+          "ta-01M5E45547M0BH1DTZ01FCBWGR": {
+            "mean_active": 106.60179640718563,
+            "mean_queued": 0.2559880239520958,
+            "decode_tokens_per_second": 1844.9252725945869
+          },
+          "ta-01M5E45547FVYCPFQTKZXJXHGR": {
+            "mean_active": 132.76646706586826,
+            "mean_queued": 5.690119760479042,
+            "decode_tokens_per_second": 1360.4626643133474
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 40392,
+          "http_200": 37220,
+          "http_499": 25,
+          "http_503": 2667
+        },
+        "median_snapshot_ms": 355.1962930000627,
+        "inflight_requests_by_client": {
+          "0": 62,
+          "1": 63,
+          "2": 61,
+          "3": 64,
+          "4": 57,
+          "5": 60,
+          "6": 60,
+          "7": 61
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 6919.334454926994
+      },
+      "Custom sticky": {
+        "phase": "measured",
+        "elapsed_seconds": 25313.519408226013,
+        "window": [
+          0,
+          3600
+        ],
+        "completed_requests": 41836,
+        "completed_output_tps": 7663.330277777778,
+        "cache_reuse": 0.8943493492409936,
+        "uncached_tokens": 79247225,
+        "completed_request_p95_seconds": 146.23399758338928,
+        "mean_active_per_worker": 108.5136815920398,
+        "mean_queued_per_worker": 1.8606965174129353,
+        "mean_load_spread": 45.527363184079604,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 0.9552238805970149,
+        "mean_decode_batch": 102.16785607654946,
+        "mean_distinct_adapters_per_decode_batch": 7.988046430678036,
+        "dominant_adapter_fraction": 0.17500164736320498,
+        "decode_iterations_per_worker_second": 19.08016079790655,
+        "worker_metrics": {
+          "ta-01M5DR9366XXNCES0QB0SZ6DAR": {
+            "mean_active": 120.40961857379767,
+            "mean_queued": 2.232172470978441,
+            "decode_tokens_per_second": 1936.81910137776
+          },
+          "ta-01M5DR936TSTQV7DGQE43XVMYR": {
+            "mean_active": 95.82089552238806,
+            "mean_queued": 0.21724709784411278,
+            "decode_tokens_per_second": 2139.5192889836144
+          },
+          "ta-01M5DR936T4D2FPFGRBPNZK9SR": {
+            "mean_active": 125.7927031509121,
+            "mean_queued": 4.7645107794361525,
+            "decode_tokens_per_second": 1664.9635953426866
+          },
+          "ta-01M5DR9366RVV55WS1NSRCJR0R": {
+            "mean_active": 92.03150912106136,
+            "mean_queued": 0.22885572139303484,
+            "decode_tokens_per_second": 2056.214503567688
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 56056,
+          "http_200": 41865,
+          "http_409": 1,
+          "http_499": 1,
+          "http_503": 13770
+        },
+        "median_snapshot_ms": 265.78967299974465,
+        "inflight_requests_by_client": {
+          "0": 63,
+          "1": 59,
+          "2": 59,
+          "3": 61,
+          "4": 60,
+          "5": 61,
+          "6": 57,
+          "7": 59
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 7797.516489271749
+      },
+      "Memory aware": {
+        "phase": "measured",
+        "elapsed_seconds": 25165.279472589493,
+        "window": [
+          0,
+          3600
+        ],
+        "completed_requests": 46225,
+        "completed_output_tps": 8475.508055555556,
+        "cache_reuse": 0.9496126745575674,
+        "uncached_tokens": 42788596,
+        "completed_request_p95_seconds": 130.68590259552002,
+        "mean_active_per_worker": 109.77086494688922,
+        "mean_queued_per_worker": 0.332701062215478,
+        "mean_load_spread": 28.207890743550834,
+        "queued_with_spare_worker_fraction": 0.0015174506828528073,
+        "all_workers_at_least_56_fraction": 0.9893778452200304,
+        "mean_decode_batch": 108.88137473062046,
+        "mean_distinct_adapters_per_decode_batch": 6.093126346897661,
+        "dominant_adapter_fraction": 0.40206747326430925,
+        "decode_iterations_per_worker_second": 19.794135317349433,
+        "worker_metrics": {
+          "ta-01M5DRDMTK741EBJ2W7NDTGSFR": {
+            "mean_active": 113.36115326251897,
+            "mean_queued": 0.2959028831562974,
+            "decode_tokens_per_second": 2393.86248867758
+          },
+          "ta-01M5DRDMV15HZXYKVQFC10EGNR": {
+            "mean_active": 100.55842185128984,
+            "mean_queued": 0.3141122913505311,
+            "decode_tokens_per_second": 1971.2333767800937
+          },
+          "ta-01M5DRDMV18HERRSEVTZ8MSM0R": {
+            "mean_active": 110.96206373292868,
+            "mean_queued": 0.30500758725341426,
+            "decode_tokens_per_second": 2090.555648625739
+          },
+          "ta-01M5DRDMTKVVWJWD2TNJYCBQ4R": {
+            "mean_active": 114.20182094081942,
+            "mean_queued": 0.4157814871016692,
+            "decode_tokens_per_second": 2165.199145744318
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 47515,
+          "http_200": 46255,
+          "http_503": 817
+        },
+        "median_snapshot_ms": 300.0990059999822,
+        "inflight_requests_by_client": {
+          "0": 59,
+          "1": 57,
+          "2": 54,
+          "3": 61,
+          "4": 61,
+          "5": 57,
+          "6": 62,
+          "7": 57
+        },
+        "failures": [
+          {
+            "event": "failure",
+            "time": 1792543690.1960986,
+            "policy": "cache_wait",
+            "component": "grading",
+            "client": 1,
+            "step": 0,
+            "trajectory": 179,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')"
+          },
+          {
+            "event": "failure",
+            "time": 1792543690.1998441,
+            "policy": "cache_wait",
+            "component": "client",
+            "client": 1,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')",
+            "traceback": "Traceback (most recent call last):\n  File \"/tmp/swe-real-kv-preempt-cache-1020/run.py\", line 165, in client\n    return client_loop(index, tokenizer, environments, graders, Log, STOP, tasks, prepared[index])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 185, in client_loop\n    results = [grading[i].result(timeout=3600) for i in range(CFG[\"batch_sizes\"][index])]\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 456, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 162, in grade\n    return grade_work()\n           ^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 148, in grade_work\n    result = grade_episode(\n             ^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 26, in grade_episode\n    result = environments.grade(\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/swe_gym_env.py\", line 150, in grade\n    raise InfrastructureError(f\"No trustworthy test results: {path}; exit={rc}\")\nswe_gym_env.InfrastructureError: No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1\n"
+          }
+        ],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 8620.85065982773
+      }
+    },
+    "20-60min": {
+      "Modal sessions": {
+        "phase": "measured",
+        "elapsed_seconds": 12815.91255736351,
+        "window": [
+          1200,
+          3600
+        ],
+        "completed_requests": 20822,
+        "completed_output_tps": 5981.821666666667,
+        "cache_reuse": 0.8732659442478804,
+        "uncached_tokens": 52917706,
+        "completed_request_p95_seconds": 201.5369565486908,
+        "mean_active_per_worker": 116.4561797752809,
+        "mean_queued_per_worker": 2.269662921348315,
+        "mean_load_spread": 34.72808988764045,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 1,
+        "mean_decode_batch": 110.91859589830248,
+        "mean_distinct_adapters_per_decode_batch": 8.0,
+        "dominant_adapter_fraction": 0.16740184475709,
+        "decode_iterations_per_worker_second": 13.598327445514983,
+        "worker_metrics": {
+          "ta-01M5E45547FVYCPFQTKZXJXHGR": {
+            "mean_active": 134.6247191011236,
+            "mean_queued": 6.512359550561798,
+            "decode_tokens_per_second": 1069.028454252048
+          },
+          "ta-01M5E4553Q9DNP0DXM1ERZ473R": {
+            "mean_active": 104.84719101123595,
+            "mean_queued": 0.24943820224719102,
+            "decode_tokens_per_second": 1747.5690129544635
+          },
+          "ta-01M5E4553Q3VQQ9JGMC0K8Q5WR": {
+            "mean_active": 117.32584269662921,
+            "mean_queued": 2.0382022471910113,
+            "decode_tokens_per_second": 1529.620589924355
+          },
+          "ta-01M5E45547M0BH1DTZ01FCBWGR": {
+            "mean_active": 109.02696629213483,
+            "mean_queued": 0.2786516853932584,
+            "decode_tokens_per_second": 1687.0114901566226
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 22903,
+          "http_200": 20757,
+          "http_499": 25,
+          "http_503": 2100
+        },
+        "median_snapshot_ms": 368.4892800001762,
+        "inflight_requests_by_client": {
+          "0": 62,
+          "1": 63,
+          "2": 61,
+          "3": 64,
+          "4": 57,
+          "5": 60,
+          "6": 60,
+          "7": 61
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 6033.229547287489
+      },
+      "Custom sticky": {
+        "phase": "measured",
+        "elapsed_seconds": 25313.74814081192,
+        "window": [
+          1200,
+          3600
+        ],
+        "completed_requests": 24089,
+        "completed_output_tps": 6935.4158333333335,
+        "cache_reuse": 0.8733513446822877,
+        "uncached_tokens": 60779770,
+        "completed_request_p95_seconds": 174.2395739555359,
+        "mean_active_per_worker": 108.85918114143921,
+        "mean_queued_per_worker": 2.6153846153846154,
+        "mean_load_spread": 56.883374689826304,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 0.9478908188585607,
+        "mean_decode_batch": 98.95721452819419,
+        "mean_distinct_adapters_per_decode_batch": 8.0,
+        "dominant_adapter_fraction": 0.18050031014070236,
+        "decode_iterations_per_worker_second": 17.359765948579273,
+        "worker_metrics": {
+          "ta-01M5DR936TSTQV7DGQE43XVMYR": {
+            "mean_active": 91.37717121588089,
+            "mean_queued": 0.21588089330024815,
+            "decode_tokens_per_second": 1972.1511857634944
+          },
+          "ta-01M5DR936T4D2FPFGRBPNZK9SR": {
+            "mean_active": 134.83126550868485,
+            "mean_queued": 6.856079404466501,
+            "decode_tokens_per_second": 1342.6703330581404
+          },
+          "ta-01M5DR9366RVV55WS1NSRCJR0R": {
+            "mean_active": 82.93796526054591,
+            "mean_queued": 0.2555831265508685,
+            "decode_tokens_per_second": 1826.8746595066134
+          },
+          "ta-01M5DR9366XXNCES0QB0SZ6DAR": {
+            "mean_active": 126.29032258064517,
+            "mean_queued": 3.133995037220844,
+            "decode_tokens_per_second": 1729.8001542029506
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 37573,
+          "http_200": 24060,
+          "http_409": 1,
+          "http_499": 1,
+          "http_503": 13539
+        },
+        "median_snapshot_ms": 273.85901599973295,
+        "inflight_requests_by_client": {
+          "0": 63,
+          "1": 59,
+          "2": 59,
+          "3": 61,
+          "4": 60,
+          "5": 61,
+          "6": 57,
+          "7": 59
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 6871.496332531198
+      },
+      "Memory aware": {
+        "phase": "measured",
+        "elapsed_seconds": 25165.519881010056,
+        "window": [
+          1200,
+          3600
+        ],
+        "completed_requests": 28366,
+        "completed_output_tps": 8098.167083333334,
+        "cache_reuse": 0.9498158510914154,
+        "uncached_tokens": 28771453,
+        "completed_request_p95_seconds": 143.73524951934814,
+        "mean_active_per_worker": 110.7793453724605,
+        "mean_queued_per_worker": 0.26918735891647855,
+        "mean_load_spread": 26.62076749435666,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 1,
+        "mean_decode_batch": 110.19921383916127,
+        "mean_distinct_adapters_per_decode_batch": 5.662297842324124,
+        "dominant_adapter_fraction": 0.41200767291811957,
+        "decode_iterations_per_worker_second": 18.34099549598094,
+        "worker_metrics": {
+          "ta-01M5DRDMV15HZXYKVQFC10EGNR": {
+            "mean_active": 99.52370203160271,
+            "mean_queued": 0.2595936794582393,
+            "decode_tokens_per_second": 1806.410531885655
+          },
+          "ta-01M5DRDMV18HERRSEVTZ8MSM0R": {
+            "mean_active": 110.92325056433408,
+            "mean_queued": 0.2325056433408578,
+            "decode_tokens_per_second": 1942.4851497316668
+          },
+          "ta-01M5DRDMTKVVWJWD2TNJYCBQ4R": {
+            "mean_active": 115.63882618510158,
+            "mean_queued": 0.25733634311512416,
+            "decode_tokens_per_second": 2044.7104473579172
+          },
+          "ta-01M5DRDMTK741EBJ2W7NDTGSFR": {
+            "mean_active": 117.03160270880362,
+            "mean_queued": 0.327313769751693,
+            "decode_tokens_per_second": 2291.0470097635516
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 28359,
+          "http_200": 28314,
+          "http_503": 39
+        },
+        "median_snapshot_ms": 314.4255880001765,
+        "inflight_requests_by_client": {
+          "0": 59,
+          "1": 57,
+          "2": 54,
+          "3": 61,
+          "4": 61,
+          "5": 57,
+          "6": 62,
+          "7": 57
+        },
+        "failures": [
+          {
+            "event": "failure",
+            "time": 1792543690.1960986,
+            "policy": "cache_wait",
+            "component": "grading",
+            "client": 1,
+            "step": 0,
+            "trajectory": 179,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')"
+          },
+          {
+            "event": "failure",
+            "time": 1792543690.1998441,
+            "policy": "cache_wait",
+            "component": "client",
+            "client": 1,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')",
+            "traceback": "Traceback (most recent call last):\n  File \"/tmp/swe-real-kv-preempt-cache-1020/run.py\", line 165, in client\n    return client_loop(index, tokenizer, environments, graders, Log, STOP, tasks, prepared[index])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 185, in client_loop\n    results = [grading[i].result(timeout=3600) for i in range(CFG[\"batch_sizes\"][index])]\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 456, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 162, in grade\n    return grade_work()\n           ^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 148, in grade_work\n    result = grade_episode(\n             ^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 26, in grade_episode\n    result = environments.grade(\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/swe_gym_env.py\", line 150, in grade\n    raise InfrastructureError(f\"No trustworthy test results: {path}; exit={rc}\")\nswe_gym_env.InfrastructureError: No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1\n"
+          }
+        ],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 8084.65313873879
+      }
+    },
+    "60-90min": {
+      "Modal sessions": {
+        "phase": "measured",
+        "elapsed_seconds": 12816.154120445251,
+        "window": [
+          3600,
+          5400
+        ],
+        "completed_requests": 14117,
+        "completed_output_tps": 5557.871666666667,
+        "cache_reuse": 0.8362564088830973,
+        "uncached_tokens": 47907020,
+        "completed_request_p95_seconds": 226.81521582603455,
+        "mean_active_per_worker": 113.51876876876877,
+        "mean_queued_per_worker": 2.6471471471471473,
+        "mean_load_spread": 45.171171171171174,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 0.978978978978979,
+        "mean_decode_batch": 104.47385137897417,
+        "mean_distinct_adapters_per_decode_batch": 8.0,
+        "dominant_adapter_fraction": 0.16984020054398277,
+        "decode_iterations_per_worker_second": 13.310337738614484,
+        "worker_metrics": {
+          "ta-01M5E4553Q9DNP0DXM1ERZ473R": {
+            "mean_active": 90.04504504504504,
+            "mean_queued": 0.24924924924924924,
+            "decode_tokens_per_second": 1667.299755094361
+          },
+          "ta-01M5E4553Q3VQQ9JGMC0K8Q5WR": {
+            "mean_active": 127.68168168168168,
+            "mean_queued": 3.324324324324324,
+            "decode_tokens_per_second": 1501.040316215948
+          },
+          "ta-01M5E45547M0BH1DTZ01FCBWGR": {
+            "mean_active": 101.96696696696696,
+            "mean_queued": 0.2732732732732733,
+            "decode_tokens_per_second": 1637.4607787242437
+          },
+          "ta-01M5E45547FVYCPFQTKZXJXHGR": {
+            "mean_active": 134.38138138138137,
+            "mean_queued": 6.741741741741742,
+            "decode_tokens_per_second": 756.5281367972906
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 15741,
+          "http_200": 14057,
+          "http_499": 0,
+          "http_503": 1801
+        },
+        "median_snapshot_ms": 384.0116780002063,
+        "inflight_requests_by_client": {
+          "0": 51,
+          "1": 47,
+          "2": 44,
+          "3": 40,
+          "4": 61,
+          "5": 41,
+          "6": 40,
+          "7": 32
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 5562.328986831843
+      },
+      "Custom sticky": {
+        "phase": "measured",
+        "elapsed_seconds": 25313.94023323059,
+        "window": [
+          3600,
+          5400
+        ],
+        "completed_requests": 11998,
+        "completed_output_tps": 5108.526666666667,
+        "cache_reuse": 0.839037296955268,
+        "uncached_tokens": 46369411,
+        "completed_request_p95_seconds": 212.5160596370697,
+        "mean_active_per_worker": 77.99512987012987,
+        "mean_queued_per_worker": 2.237012987012987,
+        "mean_load_spread": 96.8538961038961,
+        "queued_with_spare_worker_fraction": 0.5032467532467533,
+        "all_workers_at_least_56_fraction": 0.3116883116883117,
+        "mean_decode_batch": 51.24164536316209,
+        "mean_distinct_adapters_per_decode_batch": 6.710783236359009,
+        "dominant_adapter_fraction": 0.20664674999192964,
+        "decode_iterations_per_worker_second": 24.1204301052288,
+        "worker_metrics": {
+          "ta-01M5DR936TSTQV7DGQE43XVMYR": {
+            "mean_active": 46.41883116883117,
+            "mean_queued": 0.22402597402597402,
+            "decode_tokens_per_second": 1260.3376034169432
+          },
+          "ta-01M5DR936T4D2FPFGRBPNZK9SR": {
+            "mean_active": 136.26623376623377,
+            "mean_queued": 7.925324675324675,
+            "decode_tokens_per_second": 850.4071982459913
+          },
+          "ta-01M5DR9366RVV55WS1NSRCJR0R": {
+            "mean_active": 42.116883116883116,
+            "mean_queued": 0.1461038961038961,
+            "decode_tokens_per_second": 1265.117661122212
+          },
+          "ta-01M5DR9366XXNCES0QB0SZ6DAR": {
+            "mean_active": 87.17857142857143,
+            "mean_queued": 0.6525974025974026,
+            "decode_tokens_per_second": 1568.0196390511444
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 30341,
+          "http_200": 11948,
+          "http_409": 0,
+          "http_499": 22,
+          "http_503": 18629
+        },
+        "median_snapshot_ms": 280.29765899918857,
+        "inflight_requests_by_client": {
+          "0": 25,
+          "1": 24,
+          "2": 12,
+          "3": 21,
+          "4": 31,
+          "5": 16,
+          "6": 24,
+          "7": 22
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 4943.8821018362905
+      },
+      "Memory aware": {
+        "phase": "measured",
+        "elapsed_seconds": 25165.724239587784,
+        "window": [
+          3600,
+          5400
+        ],
+        "completed_requests": 10379,
+        "completed_output_tps": 4943.873888888889,
+        "cache_reuse": 0.9773010950792933,
+        "uncached_tokens": 6664459,
+        "completed_request_p95_seconds": 148.8534517288208,
+        "mean_active_per_worker": 50.16172106824926,
+        "mean_queued_per_worker": 0.04599406528189911,
+        "mean_load_spread": 15.044510385756677,
+        "queued_with_spare_worker_fraction": 0,
+        "all_workers_at_least_56_fraction": 0.41839762611275966,
+        "mean_decode_batch": 39.30187274740289,
+        "mean_distinct_adapters_per_decode_batch": 3.3190784669383526,
+        "dominant_adapter_fraction": 0.48490671143280784,
+        "decode_iterations_per_worker_second": 29.58373177433616,
+        "worker_metrics": {
+          "ta-01M5DRDMTKVVWJWD2TNJYCBQ4R": {
+            "mean_active": 49.87240356083086,
+            "mean_queued": 0.03857566765578635,
+            "decode_tokens_per_second": 1116.4086820752902
+          },
+          "ta-01M5DRDMTK741EBJ2W7NDTGSFR": {
+            "mean_active": 44.52818991097923,
+            "mean_queued": 0.03857566765578635,
+            "decode_tokens_per_second": 1148.6268022704726
+          },
+          "ta-01M5DRDMV15HZXYKVQFC10EGNR": {
+            "mean_active": 55.44807121661721,
+            "mean_queued": 0.05341246290801187,
+            "decode_tokens_per_second": 1262.8032397151867
+          },
+          "ta-01M5DRDMV18HERRSEVTZ8MSM0R": {
+            "mean_active": 50.798219584569736,
+            "mean_queued": 0.05341246290801187,
+            "decode_tokens_per_second": 1122.9455222920876
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 9889,
+          "http_200": 10318,
+          "http_499": 7,
+          "http_503": 7
+        },
+        "median_snapshot_ms": 346.5199450001819,
+        "inflight_requests_by_client": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 1
+        },
+        "failures": [
+          {
+            "event": "failure",
+            "time": 1792543690.1960986,
+            "policy": "cache_wait",
+            "component": "grading",
+            "client": 1,
+            "step": 0,
+            "trajectory": 179,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')"
+          },
+          {
+            "event": "failure",
+            "time": 1792543690.1998441,
+            "policy": "cache_wait",
+            "component": "client",
+            "client": 1,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')",
+            "traceback": "Traceback (most recent call last):\n  File \"/tmp/swe-real-kv-preempt-cache-1020/run.py\", line 165, in client\n    return client_loop(index, tokenizer, environments, graders, Log, STOP, tasks, prepared[index])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 185, in client_loop\n    results = [grading[i].result(timeout=3600) for i in range(CFG[\"batch_sizes\"][index])]\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 456, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 162, in grade\n    return grade_work()\n           ^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 148, in grade_work\n    result = grade_episode(\n             ^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 26, in grade_episode\n    result = environments.grade(\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/swe_gym_env.py\", line 150, in grade\n    raise InfrastructureError(f\"No trustworthy test results: {path}; exit={rc}\")\nswe_gym_env.InfrastructureError: No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1\n"
+          }
+        ],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 4650.784246353037
+      }
+    },
+    "0-90min": {
+      "Modal sessions": {
+        "phase": "measured",
+        "elapsed_seconds": 12816.375762939453,
+        "window": [
+          0,
+          5400
+        ],
+        "completed_requests": 51347,
+        "completed_output_tps": 6338.623333333333,
+        "cache_reuse": 0.8779802137720513,
+        "uncached_tokens": 116492143,
+        "completed_request_p95_seconds": 183.68988013267517,
+        "mean_active_per_worker": 114.30244755244755,
+        "mean_queued_per_worker": 2.151098901098901,
+        "mean_load_spread": 37.17782217782218,
+        "queued_with_spare_worker_fraction": 0.001998001998001998,
+        "all_workers_at_least_56_fraction": 0.987012987012987,
+        "mean_decode_batch": 108.17460347004426,
+        "mean_distinct_adapters_per_decode_batch": 7.982165846152892,
+        "dominant_adapter_fraction": 0.1694365616734818,
+        "decode_iterations_per_worker_second": 14.944233416837237,
+        "worker_metrics": {
+          "ta-01M5E4553Q9DNP0DXM1ERZ473R": {
+            "mean_active": 100.52447552447552,
+            "mean_queued": 0.23876123876123875,
+            "decode_tokens_per_second": 1845.8321744783418
+          },
+          "ta-01M5E4553Q3VQQ9JGMC0K8Q5WR": {
+            "mean_active": 118.32167832167832,
+            "mean_queued": 2.063936063936064,
+            "decode_tokens_per_second": 1685.6149941936576
+          },
+          "ta-01M5E45547M0BH1DTZ01FCBWGR": {
+            "mean_active": 105.05994005994006,
+            "mean_queued": 0.26173826173826176,
+            "decode_tokens_per_second": 1775.3656024941226
+          },
+          "ta-01M5E45547FVYCPFQTKZXJXHGR": {
+            "mean_active": 133.3036963036963,
+            "mean_queued": 6.03996003996004,
+            "decode_tokens_per_second": 1159.5333249544897
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 56173,
+          "http_200": 51315,
+          "http_499": 25,
+          "http_503": 4474
+        },
+        "median_snapshot_ms": 365.5886010001268,
+        "inflight_requests_by_client": {
+          "0": 51,
+          "1": 47,
+          "2": 44,
+          "3": 40,
+          "4": 61,
+          "5": 41,
+          "6": 40,
+          "7": 32
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 6466.346096120612
+      },
+      "Custom sticky": {
+        "phase": "measured",
+        "elapsed_seconds": 25314.170446395874,
+        "window": [
+          0,
+          5400
+        ],
+        "completed_requests": 53834,
+        "completed_output_tps": 6811.729074074074,
+        "cache_reuse": 0.8790010386500721,
+        "uncached_tokens": 125616636,
+        "completed_request_p95_seconds": 163.2561104297638,
+        "mean_active_per_worker": 98.19566410537871,
+        "mean_queued_per_worker": 1.9879253567508233,
+        "mean_load_spread": 62.880351262349066,
+        "queued_with_spare_worker_fraction": 0.17014270032930845,
+        "all_workers_at_least_56_fraction": 0.7376509330406147,
+        "mean_decode_batch": 82.49956026785715,
+        "mean_distinct_adapters_per_decode_batch": 7.495120535714285,
+        "dominant_adapter_fraction": 0.1826116335089773,
+        "decode_iterations_per_worker_second": 20.75430224925671,
+        "worker_metrics": {
+          "ta-01M5DR9366XXNCES0QB0SZ6DAR": {
+            "mean_active": 109.17453347969264,
+            "mean_queued": 1.6981339187705817,
+            "decode_tokens_per_second": 1814.7089355761357
+          },
+          "ta-01M5DR936TSTQV7DGQE43XVMYR": {
+            "mean_active": 79.1185510428101,
+            "mean_queued": 0.21953896816684962,
+            "decode_tokens_per_second": 1847.620626286705
+          },
+          "ta-01M5DR936T4D2FPFGRBPNZK9SR": {
+            "mean_active": 129.33369923161362,
+            "mean_queued": 5.833150384193194,
+            "decode_tokens_per_second": 1393.2772626782912
+          },
+          "ta-01M5DR9366RVV55WS1NSRCJR0R": {
+            "mean_active": 75.15587266739847,
+            "mean_queued": 0.20087815587266739,
+            "decode_tokens_per_second": 1793.2764123783766
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 86501,
+          "http_200": 53879,
+          "http_409": 1,
+          "http_499": 23,
+          "http_503": 32442
+        },
+        "median_snapshot_ms": 270.8171689998835,
+        "inflight_requests_by_client": {
+          "0": 25,
+          "1": 24,
+          "2": 12,
+          "3": 21,
+          "4": 31,
+          "5": 16,
+          "6": 24,
+          "7": 22
+        },
+        "failures": [],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 6848.883236919508
+      },
+      "Memory aware": {
+        "phase": "measured",
+        "elapsed_seconds": 25165.96806550026,
+        "window": [
+          0,
+          5400
+        ],
+        "completed_requests": 56604,
+        "completed_output_tps": 7298.296666666667,
+        "cache_reuse": 0.9567262730899636,
+        "uncached_tokens": 49453055,
+        "completed_request_p95_seconds": 133.88213968276978,
+        "mean_active_per_worker": 89.60190763052209,
+        "mean_queued_per_worker": 0.23569277108433734,
+        "mean_load_spread": 23.754016064257026,
+        "queued_with_spare_worker_fraction": 0.001004016064257028,
+        "all_workers_at_least_56_fraction": 0.7961847389558233,
+        "mean_decode_batch": 79.20446484372646,
+        "mean_distinct_adapters_per_decode_batch": 4.908743803014744,
+        "dominant_adapter_fraction": 0.41963895645193355,
+        "decode_iterations_per_worker_second": 23.04883178286999,
+        "worker_metrics": {
+          "ta-01M5DRDMTK741EBJ2W7NDTGSFR": {
+            "mean_active": 90.07128514056225,
+            "mean_queued": 0.20883534136546184,
+            "decode_tokens_per_second": 1980.3752508134203
+          },
+          "ta-01M5DRDMV15HZXYKVQFC10EGNR": {
+            "mean_active": 85.29518072289157,
+            "mean_queued": 0.22590361445783133,
+            "decode_tokens_per_second": 1735.5241704655537
+          },
+          "ta-01M5DRDMV18HERRSEVTZ8MSM0R": {
+            "mean_active": 90.605421686747,
+            "mean_queued": 0.21987951807228914,
+            "decode_tokens_per_second": 1769.3930364732128
+          },
+          "ta-01M5DRDMTKVVWJWD2TNJYCBQ4R": {
+            "mean_active": 92.43574297188755,
+            "mean_queued": 0.28815261044176704,
+            "decode_tokens_per_second": 1816.9890887889771
+          }
+        },
+        "observed_retractions": 0,
+        "worker_http_counters": {
+          "arrivals": 57469,
+          "http_200": 56637,
+          "http_499": 7,
+          "http_503": 824
+        },
+        "median_snapshot_ms": 313.0685609999091,
+        "inflight_requests_by_client": {
+          "0": 0,
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 1
+        },
+        "failures": [
+          {
+            "event": "failure",
+            "time": 1792543690.1960986,
+            "policy": "cache_wait",
+            "component": "grading",
+            "client": 1,
+            "step": 0,
+            "trajectory": 179,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')"
+          },
+          {
+            "event": "failure",
+            "time": 1792543690.1998441,
+            "policy": "cache_wait",
+            "component": "client",
+            "client": 1,
+            "error": "InfrastructureError('No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1')",
+            "traceback": "Traceback (most recent call last):\n  File \"/tmp/swe-real-kv-preempt-cache-1020/run.py\", line 165, in client\n    return client_loop(index, tokenizer, environments, graders, Log, STOP, tasks, prepared[index])\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 185, in client_loop\n    results = [grading[i].result(timeout=3600) for i in range(CFG[\"batch_sizes\"][index])]\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 456, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"/home/ec2-user/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/concurrent/futures/thread.py\", line 59, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 162, in grade\n    return grade_work()\n           ^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 148, in grade_work\n    result = grade_episode(\n             ^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/client_training.py\", line 26, in grade_episode\n    result = environments.grade(\n             ^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/swe-real-kv-preempt-cache-1020/swe_gym_env.py\", line 150, in grade\n    raise InfrastructureError(f\"No trustworthy test results: {path}; exit={rc}\")\nswe_gym_env.InfrastructureError: No trustworthy test results: /tmp/swe-real-kv-preempt-cache-1020/cache_wait/steps/0/attempts/0/episodes/1/179/grading-attempts/1/python__mypy-10424/test_output.txt; exit=-1\n"
+          }
+        ],
+        "latency_limit": "Completed-request latency excludes requests still in flight; inspect censoring and fixed-batch completion separately.",
+        "worker_decode_tps": 7302.281546541164
+      }
+    }
+  },
+  "progress": {
+    "Modal sessions": {
+      "60": {
+        "completed_rollouts": 1095,
+        "graded": 1071,
+        "completed_requests": 37230,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 488,
+        "oldest_incomplete_seconds": 1126.0328915119171,
+        "failures": []
+      },
+      "90": {
+        "completed_rollouts": 1646,
+        "graded": 1628,
+        "completed_requests": 51347,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 356,
+        "oldest_incomplete_seconds": 1665.3033108711243,
+        "failures": []
+      }
+    },
+    "Custom sticky": {
+      "60": {
+        "completed_rollouts": 1282,
+        "graded": 1261,
+        "completed_requests": 41836,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 479,
+        "oldest_incomplete_seconds": 1672.7286095619202,
+        "failures": []
+      },
+      "90": {
+        "completed_rollouts": 1865,
+        "graded": 1849,
+        "completed_requests": 53834,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 175,
+        "oldest_incomplete_seconds": 1475.1804230213165,
+        "failures": []
+      }
+    },
+    "Memory aware": {
+      "60": {
+        "completed_rollouts": 1439,
+        "graded": 1406,
+        "completed_requests": 46225,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 468,
+        "oldest_incomplete_seconds": 705.0689506530762,
+        "failures": []
+      },
+      "90": {
+        "completed_rollouts": 2043,
+        "graded": 2036,
+        "completed_requests": 56604,
+        "training_done": 0,
+        "step_done": 0,
+        "incomplete_requests": 1,
+        "oldest_incomplete_seconds": 160.6082742214203,
+        "failures": []
+      }
+    }
+  },
+  "notes": [
+    "Separate executions; engine configuration matches but cloud/region placement differs.",
+    "Completed-request quantiles exclude unfinished requests.",
+    "The 60-90 minute interval includes memory-aware rollout drain; do not use its TPS as a saturated serving comparison."
+  ]
+}
