@@ -11,7 +11,7 @@ class Config(BaseConfig):
     weights_revision = "60a77a60c81e63f197c33e0b427c67f26ab27147"
     max_context_length = 8192
     backend = "miles"
-    trainer_image = "miles-dsv41-lora"
+    trainer_image = "miles-v0.1.2"
     trainer_gpu = "B300"
     trainer_gpus_per_node = 8
     trainer_nodes = 2
