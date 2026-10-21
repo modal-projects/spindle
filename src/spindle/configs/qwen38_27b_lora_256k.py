@@ -6,6 +6,7 @@ class Config(Parent):
     max_context_length = 262144
     overrides = {
         "trainer_nodes": 2,
+        "trainer_gpu": "H200",
         "miles_cfg.tensor_model_parallel_size": 2,
         "miles_cfg.context_parallel_size": 8,
         "miles_cfg.max_tokens_per_gpu": 32768,
