@@ -236,19 +236,20 @@ def run_trainer(deployment, instance_id, platform=None):
         nproc=1 if recipe.backend == "miles" else recipe.trainer_gpus_per_node,
         max_models=recipe.trainer_max_clients_per_instance,
         sampler_persistence_concurrency=recipe.sampler_persistence_concurrency,
-        max_forward_backward_batch=_max_forward_backward_batch(),
+        max_forward_backward_models=_max_forward_backward_models(),
         on_startup_error=failed,
     )
 
 
-def _max_forward_backward_batch() -> int | None:
-    """How many clients' forward_backward requests the engine may run as one batch.
+def _max_forward_backward_models() -> int | None:
+    """How many clients may share one forward_backward batch on the trainer.
 
-    Unset (the default) packs every compatible queued request. ``1`` runs one client at a
-    time, so clients sharing a trainer get their results, and start their next rollouts,
-    as soon as their own batch finishes instead of when the whole pack does.
+    Unset (the default) packs every compatible queued request from every client. ``1`` runs
+    one client's step at a time (its own queued requests still pack together), so clients
+    sharing a trainer get their results, and start their next rollouts, as soon as their own
+    step finishes instead of when the whole pack does.
     """
-    value = os.environ.get("SPINDLE_MAX_FORWARD_BACKWARD_BATCH", "").strip()
+    value = os.environ.get("SPINDLE_MAX_FORWARD_BACKWARD_MODELS", "").strip()
     return int(value) if value else None
 
 

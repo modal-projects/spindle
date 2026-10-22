@@ -146,6 +146,7 @@ def run_engine_with_backend(
     max_models: int = 8,
     sampler_persistence_concurrency: int = 1,
     max_forward_backward_batch: int | None = None,
+    max_forward_backward_models: int | None = None,
     startup_timeout: float = BACKEND_STARTUP_TIMEOUT,
     operation_timeout: float = BACKEND_OPERATION_TIMEOUT,
     notify_reconciler: bool = True,
@@ -225,6 +226,7 @@ def run_engine_with_backend(
                                 max_models=max_models,
                                 sampler_persistence_concurrency=sampler_persistence_concurrency,
                                 max_forward_backward_batch=max_forward_backward_batch,
+                                max_forward_backward_models=max_forward_backward_models,
                             )
                     except httpx.TransportError:
                         pass
