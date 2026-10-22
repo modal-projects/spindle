@@ -15,6 +15,10 @@ A request moves through three layers:
 
 Both the training and sampling parts of the system are independently autoscalable: the control plane will provision new training engines for newly registered training clients, and the sampling layer will autoscale replicas based on incoming load through the Flash proxy gateway. 
 
+The diagram below shows these planes and shared state between them. Note that the LoRA pool serves all adapters for one deployed base-model configuration, whereas full-parameter models and pinned checkpoints use separate, dedicated pools (more on inference below). 
+
+![Spindle system overview: control plane, training engines, weight publication, and sampling pools](assets/design/system-overview.png)
+
 ## Control plane
 
 The control plane is a stateless, autoscaling Modal web server. Its replicas are responsible for: 
@@ -48,6 +52,18 @@ The engine exposes the command protocol in
 [`engine/api.py`](../src/spindle/engine/api.py). Its scheduler and future handling
 live in [`engine/server.py`](../src/spindle/engine/server.py).
 
+The diagram below follows requests through the engine frontend, backend
+execution, and persistence, showing the backend's per-rank orchestration.
+
+![Spindle engine: ordered requests, GPU execution, asynchronous persistence, and durable outputs](assets/design/engine-deep-dive.png)
+
+The diagram's `EngineServer` and `CommandBackend` correspond to Spindle's
+`Engine` class and `Backend` protocol. The snapshot routes are
+`/capture_snapshot` and `/persist_snapshot` in
+[`engine/backend_http.py`](../src/spindle/engine/backend_http.py). 
+
+An additional optimization we've made is to decouple checkpoint and sampler persistence threads, such that fast sampler writing does not wait on long checkpoint writes to use the writer thread resource. 
+
 ### Execution lanes
 
 In a multi-tenant engine, long synchronous checkpointing/weight sync times not only increase latency to producing new rollouts but can also potentially hinder other clients’ execution as well. To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states.
@@ -62,6 +78,11 @@ The trainer only blocks on capture before proceeding with the next
 later training without reading partially updated model state. Full checkpoints
 and sampler publication have independent persistence lanes, so a long durable
 state write cannot delay publishing weights for the next rollout.
+
+Capture backpressure bounds the number of outstanding CPU snapshots. When a
+persistence lane is full, the scheduler defers further captures for that lane
+while allowing other eligible GPU work to proceed. A save future completes only
+after persistence or sampler publication finishes.
 
 ## Weight publication
 
