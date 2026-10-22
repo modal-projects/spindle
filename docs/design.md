@@ -15,9 +15,7 @@ A request moves through three layers:
 
 Both the training and sampling parts of the system are independently autoscalable: the control plane will provision new training engines for newly registered training clients, and the sampling layer will autoscale replicas based on incoming load through the Flash proxy gateway. 
 
-The diagram below shows these planes and the shared state between them. Its
-shared LoRA pool serves adapters for one deployed base-model configuration;
-full-parameter models and pinned checkpoints use separate pools.
+The diagram below shows these planes and shared state between them. Note that the LoRA pool serves all adapters for one deployed base-model configuration, whereas full-parameter models and pinned checkpoints use separate, dedicated pools (more on inference below). 
 
 ![Spindle system overview: control plane, training engines, weight publication, and sampling pools](assets/design/system-overview.png)
 
@@ -55,15 +53,16 @@ The engine exposes the command protocol in
 live in [`engine/server.py`](../src/spindle/engine/server.py).
 
 The diagram below follows requests through the engine frontend, backend
-execution, and persistence, showing the Megatron backend's per-rank orchestration.
+execution, and persistence, showing the backend's per-rank orchestration.
 
 ![Spindle engine: ordered requests, GPU execution, asynchronous persistence, and durable outputs](assets/design/engine-deep-dive.png)
 
 The diagram's `EngineServer` and `CommandBackend` correspond to Spindle's
 `Engine` class and `Backend` protocol. The snapshot routes are
 `/capture_snapshot` and `/persist_snapshot` in
-[`engine/backend_http.py`](../src/spindle/engine/backend_http.py). Checkpoint and
-sampler persistence are shown together here; they use separate lanes in Spindle.
+[`engine/backend_http.py`](../src/spindle/engine/backend_http.py). 
+
+An additional optimization we've made is to decouple checkpoint and sampler persistence threads, such that fast sampler writing does not wait on long checkpoint writes to use the writer thread resource. 
 
 ### Execution lanes
 
