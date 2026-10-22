@@ -4,10 +4,6 @@ Spindle presents the Tinker API while separating control-plane orchestration,
 GPU execution, and sampling. Here, we describe the high-level design and interfaces
 between these components. 
 
-## How we thought about Multi-Tenancy
-
-Most open-source RL frameworks are optimized for a single training run. But with multi-tenancy, we’ve had to redesign certain components from standard RL infrastructure  to efficiently multiplex many clients on the same GPUs. Here are a few of them:
-
 ## System overview
 
 A request moves through three layers: 
@@ -135,24 +131,6 @@ This separation lets training engines scale according to active models while
 sampling scales according to rollout traffic. We best-effort sticky-route groups (GRPO) to the same container to maximize KV cache reuse. 
 
 </details>
-
-## Sharing trainer and inference compute
-
-Agentic RL spends most of its time generating rollouts, requiring both long decode times and execution latency. While a client waits on long multi-turn rollouts, its trainer GPUs mostly sit idle. Depending on the workload, we’ve observed that a trainer serving a single client (even running async RL) was only busy for less than 10% of the time.
-
-The standard approach in fully async RL to solving trainer underutilization is to scale-out inference compute to always feed the trainer. Multi-LoRA fits perfectly with this approach: for a fixed trainer size, you now have the option to *either* scale-out in the compute axis for a single run, or scale up the *amount* of runs for a fixed inference budget, or do both!
-
-Concretely, Spindle’s multi-LoRA backend puts trainer idle time to work by letting many clients share the same trainer. While one client waits on rollouts, the trainer runs another client's training step. When several clients share the same GPUs, each run costs a fraction of what it would on dedicated compute.
-
-![GRPO client-count comparison: total and per-client throughput, update intervals, and Spindle GPU cost versus the Tinker token-price estimate](assets/design/multi-client-comparison.png)
-
-Qwen3.8-27B on DAPO-math, with four H200s for training and twelve B200s for inference. Throughput uses only the windows when all clients are active; costs cover all five updates per client, including stagger and drain time but excluding infrastructure startup. Tinker costs are token-price estimates, not Tinker runs. Client starts are staggered by 300 seconds for two clients and 150 seconds for four and eight clients.
-
-![Trainer busy time split into forward/backward, optimizer, and snapshot capture for one, two, four, and eight clients](assets/design/trainer-busy-time.png)
-
-Trainer busy time comes from logged forward/backward, optimizer, and snapshot-capture intervals within the all-clients-active windows; it is not hardware SM utilization.
-
-By adding more multi-LoRA clients, you can run more experiment volume within a constrained budget. However if raw performance is your main concern, you can decrease the multi-tenancy to get higher per-client throughput while still being cost competitive!
 
 ## Relevant implementation
 
