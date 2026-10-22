@@ -4,6 +4,10 @@ Spindle presents the Tinker API while separating control-plane orchestration,
 GPU execution, and sampling. Here, we describe the high-level design and interfaces
 between these components. 
 
+## How we thought about Multi-Tenancy
+
+Most open-source RL frameworks are optimized for a single training run. But with multi-tenancy, we’ve had to redesign certain components from standard RL infrastructure  to efficiently multiplex many clients on the same GPUs. Here are a few of them:
+
 ## System overview
 
 A request moves through three layers: 
@@ -29,6 +33,8 @@ state in Modal Dicts so every replica shares the same durable state.
 
 ## Training engines
 
+In single-tenant training, the batch orchestration is simple: wait for enough ready rollouts and send them to the trainer. In the multi-tenant setting, the trainer is free to choose from any selection of multi-client batches. Each Spindle training engine that receives Tinker-style requests from the control plane features a lightweight frontend server that efficiently packs and schedules trainer batches into the backend.
+
 Client sessions are handled by the control plane. Training engines receive only
 model-scoped operations corresponding to Tinker API calls, including model
 creation, forward and backward passes, optimizer steps, checkpoints, sampler
@@ -46,6 +52,8 @@ The engine exposes the command protocol in
 live in [`engine/server.py`](../src/spindle/engine/server.py).
 
 ### Execution lanes
+
+In a multi-tenant engine, long synchronous checkpointing/weight sync times not only increase latency to producing new rollouts but can also potentially hinder other clients’ execution as well. To mitigate this, we split weight syncs/checkpointing operations into GPU-dependent device2host copy, and GPU-independent writes to remote destinations. The trainer only blocks on the first (fast) GPU→CPU transfer before proceeding with the next forward_backward/optim_step, and long-running disk/network writes are pushed to separate threads.
 
 To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations, 
 such that disk writing of checkpoints can be issued asynchronously and does not block the GPU. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states. 
@@ -79,6 +87,16 @@ To minimize transfer latency, publication format depends on the parameterization
 Publications are immutable. A version becomes visible to samplers only after
 its persistence phase completes.
 
+### Delta weight syncs
+
+For full-parameter training, publishing the entire model after every update means moving a lot of weights that haven’t changed. Instead, we keep a CPU snapshot of the previous version and compare it with the new weights on the GPU. We only encode the byte positions that changed and their new values, then compress those sparse updates before writing them to the shared volume. This is lossless: the sampler reconstructs the exact published weights, rather than an approximation of the update.
+
+We pipeline the comparison across tensors so transferring the previous snapshot onto the GPU, finding changed bytes, and copying the results back to CPU can overlap. The captured update owns its data, so writing it to the volume doesn’t need to read weights that the trainer is still modifying. Once capture finishes, the trainer can move on to another client’s work while persistence runs separately.
+
+Each published delta records the weight version it depends on. A sampler that’s behind follows that chain from its current version and applies the missing updates in place. The new version only becomes available after persistence completes. For LoRA, we publish the full adapter instead; the sparse delta path is for full-parameter training.
+
+The implementation lives in [`fft/delta.py`](../src/spindle/backends/megatron_runtime/fft/delta.py) and [`fft_publication.py`](../src/spindle/backends/fft_publication.py).
+
 ## Sampling
 
 An `asample` request creates one Modal Function call. That function owns the
@@ -86,6 +104,21 @@ sample attempt synchronously: it selects a compatible sampling replica, sends
 the generation request, reroutes retryable failures, and returns the completed
 Tinker sample response. The control plane stores the Modal Function call ID and
 uses it as the durable future for polling and retries.
+
+### Multi-LoRA inference routing
+
+In single-tenant inference, the standard approach is to route each request to whichever replica gives it the best prefix hit-rate. That way you avoid redoing prefill for KV cache you already have, while keeping all replicas load balanced.
+
+These routers don't carry over cleanly to multi-LoRA, though. With multi-LoRA, a hit not only needs the cached prefix, but it also needs the request's adapter to be loaded on that replica. Thus, we wrote our own router, inspired by other cache-aware routers, that routes on both KV cache matching and LoRA residency while keeping containers balanced.
+
+![Multi-LoRA routing comparison: output throughput, p95 latency, load imbalance, and KV cache reuse](assets/design/multi-lora-routing.png)
+
+The routing comparison above includes the final rollout drain. The multi-LoRA router implementation is in [PR #88](https://github.com/modal-projects/spindle/pull/88).
+
+<details>
+<summary>Earlier sampling topology notes</summary>
+
+The target-topology description below predates the shared LoRA sampler.
 
 The sampling topology differs by parameterization:
 
@@ -100,6 +133,26 @@ The sampling topology differs by parameterization:
 
 This separation lets training engines scale according to active models while
 sampling scales according to rollout traffic. We best-effort sticky-route groups (GRPO) to the same container to maximize KV cache reuse. 
+
+</details>
+
+## Sharing trainer and inference compute
+
+Agentic RL spends most of its time generating rollouts, requiring both long decode times and execution latency. While a client waits on long multi-turn rollouts, its trainer GPUs mostly sit idle. Depending on the workload, we’ve observed that a trainer serving a single client (even running async RL) was only busy for less than 10% of the time.
+
+The standard approach in fully async RL to solving trainer underutilization is to scale-out inference compute to always feed the trainer. Multi-LoRA fits perfectly with this approach: for a fixed trainer size, you now have the option to *either* scale-out in the compute axis for a single run, or scale up the *amount* of runs for a fixed inference budget, or do both!
+
+Concretely, Spindle’s multi-LoRA backend puts trainer idle time to work by letting many clients share the same trainer. While one client waits on rollouts, the trainer runs another client's training step. When several clients share the same GPUs, each run costs a fraction of what it would on dedicated compute.
+
+![GRPO client-count comparison: total and per-client throughput, update intervals, and Spindle GPU cost versus the Tinker token-price estimate](assets/design/multi-client-comparison.png)
+
+Qwen3.8-27B on DAPO-math, with four H200s for training and twelve B200s for inference. Throughput uses only the windows when all clients are active; costs cover all five updates per client, including stagger and drain time but excluding infrastructure startup. Tinker costs are token-price estimates, not Tinker runs. Client starts are staggered by 300 seconds for two clients and 150 seconds for four and eight clients.
+
+![Trainer busy time split into forward/backward, optimizer, and snapshot capture for one, two, four, and eight clients](assets/design/trainer-busy-time.png)
+
+Trainer busy time comes from logged forward/backward, optimizer, and snapshot-capture intervals within the all-clients-active windows; it is not hardware SM utilization.
+
+By adding more multi-LoRA clients, you can run more experiment volume within a constrained budget. However if raw performance is your main concern, you can decrease the multi-tenancy to get higher per-client throughput while still being cost competitive!
 
 ## Relevant implementation
 
