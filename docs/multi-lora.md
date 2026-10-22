@@ -76,6 +76,31 @@ Because the pricing model for Modal is fundamentally different from Tinker (comp
 output TPS = total generated tokens used by completed updates / elapsed seconds
 GPU $ per output token = GPU$ per second / output TPS
 ```
+
+For a fixed GPU allocation with one hourly rate, the cost per million output tokens is:
+
+$$
+\boxed{
+\text{\$/million output tokens} =
+\frac{
+\text{GPU count} \times \text{\$/GPU-hour} \times 1{,}000{,}000
+}{
+\text{average output TPS per client} \times \text{number of clients} \times 3{,}600
+}
+}
+$$
+
+GPU count includes both training and inference. If they use different GPU types or
+rates, replace `GPU count × $/GPU-hour` with the sum of that product across each
+GPU type. This measures GPU cost only; CPU, memory, and storage charges are separate.
+
+Measure every client's TPS over the same wall-clock window, so average TPS per
+client times the number of clients equals aggregate output TPS. For a staggered
+run's concurrency comparison, use the window when all clients are active and
+count GPU costs over that same window. For the cost of the entire run, including
+startup and drain or changes in GPU allocation, use total GPU spend divided by
+total output tokens, multiplied by 1,000,000.
+
 In this section we detail some considerations when implementing multi-lora experiments to maximize output TPS: 
 
 ### Keep clients asynchronous and measure the tradeoff
