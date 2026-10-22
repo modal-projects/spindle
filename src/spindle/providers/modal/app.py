@@ -21,6 +21,7 @@ from spindle.providers.contracts import (
 )
 from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
+from spindle.version import COMMIT_ENV, source_commit
 
 from .app_tags import app_tags
 from .checkpoint_storage import (
@@ -101,6 +102,7 @@ TRAINER_DEPLOYMENT_ENV = {
     CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
+    COMMIT_ENV: source_commit() or "",
 }
 app = modal.App(APP_NAME, tags=app_tags("frontend"))
 

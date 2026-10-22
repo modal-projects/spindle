@@ -29,6 +29,7 @@ from spindle.providers.contracts import Parameterization
 from spindle.request_timing import enabled as request_timing_enabled
 from spindle.request_timing import mark
 from spindle.telemetry.trainer import CommandMiddleware
+from spindle.version import __version__, source_commit
 
 from .deployments import DeploymentRoutes
 from .service import ControlPlane, FutureResolutionStatus
@@ -278,7 +279,11 @@ def create_control_plane_app(
 
     @app.get("/api/v1/get_server_capabilities")
     async def get_server_capabilities() -> dict[str, object]:
-        return {"supported_models": routes.capabilities()}
+        return {
+            "supported_models": routes.capabilities(),
+            "spindle_version": __version__,
+            "spindle_commit": source_commit(),
+        }
 
     @app.get("/api/v1/spindle/deployments")
     async def list_deployments():
