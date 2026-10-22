@@ -999,3 +999,136 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("failure_path", ["closed_owner_cleanup", "reconcile"])
+def test_session_reconciler_processes_other_owners_before_retry(monkeypatch, failure_path):
+    from spindle.errors import RecordUnavailable
+    from spindle.resource_scope import ResourcePolicy
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    pending = {"failed": "token-a", "healthy": "token-b"}
+    completed = []
+    visited = []
+    released = []
+    fail = True
+
+    async def no_error(_definition):
+        return None
+
+    async def owner(_kv, session_id):
+        if session_id == "failed" and failure_path == "closed_owner_cleanup":
+            raise RecordUnavailable("session", session_id, "closed")
+
+    async def resource_definition(definition_id):
+        await owner(None, definition_id)
+        return modal_app.module_for(definition_id)
+
+    async def cleanup(session_id):
+        visited.append(session_id)
+        if fail:
+            raise RuntimeError("stop failed")
+
+    async def reconcile(_kv, _engines, definition_id, **kwargs):
+        visited.append(definition_id)
+        if definition_id == "failed" and fail:
+            raise RuntimeError("reconcile failed")
+
+    async def instances():
+        return ()
+
+    async def requests():
+        return dict(pending)
+
+    async def complete(definition_id, token):
+        assert pending.pop(definition_id) == token
+        completed.append(definition_id)
+
+    async def release(call_id):
+        released.append(call_id)
+
+    monkeypatch.setattr(modal_app, "RESOURCE_POLICY", ResourcePolicy(scope="session"))
+    monkeypatch.setattr(modal_app.modal, "current_function_call_id", lambda: "call")
+    monkeypatch.setattr(modal_app, "shared_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "parameterization_for", lambda _: "lora")
+    monkeypatch.setattr(modal_app, "deployment_error", no_error)
+    monkeypatch.setattr(modal_app, "module_for", lambda name: SimpleNamespace(
+        recipe=SimpleNamespace(trainer_max_instances=1, trainer_max_clients_per_instance=1),
+        attribution=SimpleNamespace(session_id=name)))
+    monkeypatch.setattr(modal_app, "owner_attribution", owner)
+    monkeypatch.setattr(modal_app, "_resource_definition", resource_definition)
+    monkeypatch.setattr(modal_app, "_cleanup_session", cleanup)
+    monkeypatch.setattr(modal_app, "ModalEnginePlatform", lambda *args: SimpleNamespace(list_instances=instances))
+    monkeypatch.setattr(modal_app, "reconcile_trainers", reconcile)
+    monkeypatch.setattr(modal_app, "pending_reconciliations", requests)
+    monkeypatch.setattr(modal_app, "complete_reconcile", complete)
+    monkeypatch.setattr(modal_app, "release_reconcile_call", release)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        asyncio.run(modal_app.trainer_reconciler.local())
+    assert visited == ["failed", "healthy"]
+    assert completed == ["healthy"]
+    assert pending == {"failed": "token-a"}
+    assert released == ["call"]
+
+    fail = False
+    asyncio.run(modal_app.trainer_reconciler.local())
+    assert completed == ["healthy", "failed"]
+    assert pending == {}
+    assert released == ["call", "call"]
+
+
+@pytest.mark.parametrize("failure_path", ["cleanup", "owner_lookup"])
+def test_orphan_cleanup_isolates_failures_and_deduplicates_owners(monkeypatch, failure_path):
+    from spindle.errors import RecordUnavailable
+    from spindle.resource_scope import ResourcePolicy
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    kv = InMemoryKeyValueStore()
+    looked_up = []
+    cleaned = []
+    fail = True
+
+    async def noop(*args):
+        pass
+
+    async def seed():
+        for owner in ("a-failed", "b-healthy", "c-live"):
+            for role in ("trainer", "sampler"):
+                await kv.put(f"session_resource:{owner}:{role}", {"session_id": owner})
+
+    async def owner(_kv, session_id):
+        looked_up.append(session_id)
+        if session_id == "a-failed" and fail and failure_path == "owner_lookup":
+            raise RuntimeError("registry unavailable")
+        if session_id != "c-live":
+            raise RecordUnavailable("session", session_id, "closed")
+
+    async def cleanup(session_id):
+        cleaned.append(session_id)
+        if session_id == "a-failed" and fail:
+            raise RuntimeError("stop failed")
+        for key in await kv.list_keys(f"session_resource:{session_id}:"):
+            await kv.delete(key)
+
+    monkeypatch.setattr(modal_app, "RESOURCE_POLICY", ResourcePolicy(scope="session"))
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: kv)
+    monkeypatch.setattr(modal_app, "_plane", lambda: SimpleNamespace(
+        sweep_idle_sessions=noop, sweep_idle_models=noop, sweep_idle_engines=noop))
+    for name in ("_lose_undefined_models", "_cleanup_fft_pools", "_cleanup_lora_pools"):
+        monkeypatch.setattr(modal_app, name, noop)
+    monkeypatch.setattr(modal_app, "owner_attribution", owner)
+    monkeypatch.setattr(modal_app, "_cleanup_session", cleanup)
+
+    asyncio.run(seed())
+    modal_app.cleaner.local()
+    assert looked_up == ["a-failed", "b-healthy", "c-live"]
+    assert cleaned == (["a-failed", "b-healthy"] if failure_path == "cleanup" else ["b-healthy"])
+    assert len(asyncio.run(kv.list_keys("session_resource:a-failed:"))) == 2
+    assert asyncio.run(kv.list_keys("session_resource:b-healthy:")) == ()
+    assert len(asyncio.run(kv.list_keys("session_resource:c-live:"))) == 2
+
+    fail = False
+    modal_app.cleaner.local()
+    assert asyncio.run(kv.list_keys("session_resource:a-failed:")) == ()
+    assert len(asyncio.run(kv.list_keys("session_resource:c-live:"))) == 2

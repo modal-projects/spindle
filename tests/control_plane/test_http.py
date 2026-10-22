@@ -7,6 +7,7 @@ import zstandard
 from tinker.proto.response_conv import deserialize_forward_backward_output
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.resource_scope import ResourcePolicy
 from spindle.control_plane import http as control_http
 from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
 from spindle.proto import tinker_public_pb2
@@ -332,6 +333,8 @@ def test_base_sampling_session_uses_first_deployment() -> None:
 
 def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
     class CaptureControlPlane:
+        resource_policy = ResourcePolicy()
+
         def __init__(self) -> None:
             self.requests = []
 
@@ -371,6 +374,8 @@ def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
 
 def test_sample_endpoint_returns_one_sequence_id_per_requested_sample() -> None:
     class CaptureControlPlane:
+        resource_policy = ResourcePolicy()
+
         async def submit_sample(self, request):
             return "request-a"
 
@@ -613,6 +618,8 @@ def test_result_timing_counts_actual_response_bytes(monkeypatch):
     marks = []
 
     class Plane:
+        resource_policy = ResourcePolicy()
+
         async def retrieve(self, request_id, timeout):
             return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
 
@@ -659,6 +666,8 @@ def test_result_negotiation_constructs_one_response_before_timing(
     marks = []
 
     class Plane:
+        resource_policy = ResourcePolicy()
+
         async def retrieve(self, request_id, timeout):
             return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
 

@@ -134,7 +134,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer_name = recipe.name
     app = modal.App(
         deployment.trainer_app_name,
-        tags=app_tags("trainer", model=recipe.model, framework=recipe.backend),
+        tags=app_tags("trainer", model=recipe.model, framework=recipe.backend, attribution=deployment.attribution),
     )
 
     env = {
@@ -260,7 +260,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         raise ValueError("pool does not match deployment")
     app = modal.App(
         pool.app_name,
-        tags=app_tags("inference", model=recipe.model, framework="sglang"),
+        tags=app_tags("inference", model=recipe.model, framework="sglang", attribution=deployment.attribution),
     )
     options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
@@ -374,7 +374,7 @@ def build_inference_app(deployment, platform=None, *, image=None):
     @app.function(name="provision", image=image, serialized=True, timeout=1800)
     def provision(config_json: str, pool_data: dict):
         saved = DeploymentConfig.model_validate_json(config_json)
-        if saved.name != inference_name:
+        if saved.base_definition_id != inference_name:
             raise ValueError("inference settings do not match the deployed app")
         if pool_data["definition_id"] != saved.definition_id:
             raise ValueError("pool definition does not match deployment")
@@ -385,5 +385,13 @@ def build_inference_app(deployment, platform=None, *, image=None):
         return deploy_fft(
             FFTPoolSpec.from_dict(pool_data), config=saved, platform=platform
         )
+
+    @app.function(name="provision_trainer", image=image, serialized=True, timeout=1800)
+    def provision_trainer(config_json: str):
+        saved = DeploymentConfig.model_validate_json(config_json)
+        if saved.base_definition_id != inference_name or saved.attribution is None:
+            raise ValueError("trainer ownership does not match the deployed app")
+        from .session_resources import deploy_trainer
+        return deploy_trainer(saved, platform)
 
     return app, provision

@@ -31,6 +31,7 @@ from spindle.providers.contracts import (
     SessionKeyValueStores,
 )
 from spindle.telemetry.metadata import experiment_tags
+from spindle.resource_scope import ResourcePolicy, scoped_definition, definition_owner
 
 from .keys import (
     model_creation_key,
@@ -161,6 +162,9 @@ class ControlPlane:
         delete_checkpoint: Callable[[str], Awaitable[None]] | None = None,
         checkpoint_root: str = "/checkpoints",
         creation_error: Callable[[str], Awaitable[str | None]] | None = None,
+        resource_policy: ResourcePolicy | None = None,
+        resource_namespace: str = "spindle",
+        cleanup_session: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self.kv = kv
         self.engines = engines
@@ -178,6 +182,9 @@ class ControlPlane:
         self.delete_checkpoint = delete_checkpoint
         self.checkpoint_root = checkpoint_root
         self.creation_error = creation_error
+        self.resource_policy = resource_policy or ResourcePolicy()
+        self.resource_namespace = resource_namespace
+        self.cleanup_session = cleanup_session
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
         self._sampler_warm_at: dict[str, float] = {}
@@ -190,12 +197,16 @@ class ControlPlane:
         sdk_version: str | None = None,
     ) -> SessionRecord:
         now = self.clock()
+        session_id = self.session_id_factory()
         session = SessionRecord(
-            session_id=self.session_id_factory(),
+            session_id=session_id,
             created_at=now,
             tags=tags,
             user_metadata=user_metadata,
             sdk_version=sdk_version,
+            attribution=self.resource_policy.session_attribution(
+                session_id, user_metadata
+            ),
         )
         await self.kv.put_if_absent(
             session_key(session.session_id),
@@ -230,7 +241,14 @@ class ControlPlane:
             closed.model_dump(mode="json"),
         )
         await self._unload_session_models(session_id)
+        if self.cleanup_session is not None:
+            await self.cleanup_session(session_id)
         return SessionClosedRecord.model_validate(inserted.value)
+
+    def _resource_definition(self, definition_id: str, session_id: str) -> str:
+        if self.resource_policy.scope == "shared":
+            return definition_id
+        return scoped_definition(definition_id, self.resource_namespace, session_id)
 
     async def create_model(
         self,
@@ -242,6 +260,7 @@ class ControlPlane:
         model_id: str | None = None,
     ) -> ModelCreation:
         await self._touch_session(session_id)
+        definition_id = self._resource_definition(definition_id, session_id)
         mark = fingerprint(
             "create_model",
             {
@@ -432,7 +451,7 @@ class ControlPlane:
         metadata = await self.checkpoint_metadata(path)
         path = self.resolve_checkpoint_path(path)
         saved_base_model = metadata["base_model"]
-        definition_id = metadata["engine_definition_id"]
+        definition_id = definition_owner(metadata["engine_definition_id"])[0]
         parameterization = metadata["parameterization"]
         lora_config = metadata["lora_config"]
         if base_model is not None and base_model != saved_base_model:
@@ -548,6 +567,8 @@ class ControlPlane:
         engine_definition_id: str | None = None,
     ) -> SamplingSessionRecord:
         await self._touch_session(session_id)
+        if engine_definition_id is not None:
+            engine_definition_id = self._resource_definition(engine_definition_id, session_id)
         mark = fingerprint(
             "create_sampling_session",
             {"base_model": base_model, "model_path": model_path},
@@ -587,6 +608,10 @@ class ControlPlane:
         telemetry_tags = {}
         if model_path is not None:
             artifact = await self.get_sampler_artifact(model_path)
+            if self.resource_policy.scope == "session":
+                owner = await self.get_model(artifact.model_id)
+                if owner.session_id != session_id:
+                    raise ValueError("sampler weights belong to another session")
             telemetry_tags = artifact.telemetry_tags
             if base_model is not None and base_model != artifact.base_model:
                 raise ValueError("base_model does not match model_path")
@@ -1518,7 +1543,15 @@ class ControlPlane:
             closed_sessions.add(session_id)
             closed.append(session_id)
 
+        cleanup_failed = set()
         for session_id in closed_sessions:
+            if self.cleanup_session is not None:
+                try:
+                    await self.cleanup_session(session_id)
+                except Exception:
+                    logging.getLogger(__name__).exception("cleanup session %s", session_id)
+                    cleanup_failed.add(session_id)
+                    continue
             for model in models_by_session[session_id]:
                 if model.model_id not in placed:
                     continue
@@ -1527,6 +1560,8 @@ class ControlPlane:
                     placed.discard(model.model_id)
 
         for session_id in closed_sessions:
+            if session_id in cleanup_failed:
+                continue
             models = models_by_session[session_id]
             if any(model.model_id in placed for model in models):
                 continue

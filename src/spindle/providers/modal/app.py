@@ -14,6 +14,7 @@ from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
 from spindle.deployments import validate_frontend
+from spindle.errors import RecordUnavailable
 from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
@@ -21,8 +22,10 @@ from spindle.providers.contracts import (
 )
 from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
+from spindle.resource_scope import ResourcePolicy, SessionAttribution, definition_owner
 
 from .app_tags import app_tags
+from .session_resources import owner_attribution, register_resource, cleanup_resources, stop_app, finish_resource, remaining_capacity
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -81,6 +84,8 @@ validate_frontend([definition.recipe for definition in DEFINITIONS])
 SETTINGS = DEFINITIONS[0]
 PLATFORM = platform_from_env()
 APP_NAME = PLATFORM["frontend"]
+RESOURCE_POLICY = ResourcePolicy.from_platform(PLATFORM)
+RESOURCE_NAMESPACE = f"{APP_NAME}/{PLATFORM['modal']['environment']}"
 ROUTING_REGION = PLATFORM["modal"]["region"]
 MODEL_ASSET_ROOT = "/assets"
 SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
@@ -220,7 +225,7 @@ async def _last_touched(registry, spec: FFTPoolSpec, record: dict) -> float:
 @app.function(image=image, max_containers=1, timeout=20 * 60, retries=2)
 async def ensure_fft_pool(spec: dict) -> str:
     pool = FFTPoolSpec.from_dict(spec)
-    gateway = await asyncio.to_thread(deploy_pool, pool)
+    gateway = await _provision_pool(pool, deploy_pool)
     await fft_pool_kv().put(
         f"fft_pool:{pool.app_name}",
         {**pool.as_dict(), "touched_at": time.time()},
@@ -231,7 +236,7 @@ async def ensure_fft_pool(spec: dict) -> str:
 @app.function(image=image, max_containers=1, timeout=20 * 60, retries=2)
 async def ensure_lora_pool(spec: dict) -> str:
     pool = LoraPoolSpec.from_dict(spec)
-    gateway = await asyncio.to_thread(deploy_lora_pool, pool)
+    gateway = await _provision_pool(pool, deploy_lora_pool)
     await shared_kv().put(
         f"lora_pool:{pool.app_name}",
         {**pool.as_dict(), "touched_at": time.time()},
@@ -239,8 +244,44 @@ async def ensure_lora_pool(spec: dict) -> str:
     return gateway
 
 
+async def _resource_definition(definition_id):
+    definition = module_for(definition_id)
+    if definition.attribution is None:
+        return definition
+    attribution = await owner_attribution(shared_kv(), definition.attribution.session_id)
+    definition = definition.model_copy(update={"attribution": attribution})
+    saved = await shared_kv().put_if_absent(f"session_definition:{definition_id}", definition.model_dump(mode="json"))
+    return type(definition).model_validate(saved.value)
+
+
+async def _check_resource_owner(definition, app_name):
+    try:
+        await owner_attribution(shared_kv(), definition.attribution.session_id)
+    except (RecordUnavailable, ValueError):
+        await asyncio.to_thread(stop_app, app_name, PLATFORM["modal"]["environment"])
+        raise
+
+
+async def _provision_pool(pool, deploy):
+    definition = await _resource_definition(pool.definition_id)
+    if definition.attribution is None:
+        return await asyncio.to_thread(deploy, pool)
+    await register_resource(shared_kv(), definition, pool.app_name)
+    provision = modal.Function.from_name(definition.inference_app_name, "provision", environment_name=PLATFORM["modal"]["environment"])
+    gateway = await provision.remote.aio(definition.model_dump_json(), pool.as_dict())
+    await finish_resource(shared_kv(), definition, pool.app_name)
+    await _check_resource_owner(definition, pool.app_name)
+    return gateway
+
+
+async def _cleanup_session(session_id):
+    await cleanup_resources(shared_kv(), ModalEnginePlatform(shared_kv(), _spawn_engine), session_id, PLATFORM["modal"]["environment"],
+        lambda name, environment: asyncio.to_thread(stop_app, name, environment))
+
+
 async def _ensure_model_assets(definition_id: str) -> None:
     """Download the base weights once per definition; later calls skip the container start."""
+    definition_id = module_for(definition_id).base_definition_id
     key = f"model_assets_ready:{definition_id}"
     if await shared_kv().get(key) is not None:
         return
@@ -306,7 +347,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     parameterization = parameterization_for(definition_id)
     if parameterization not in {"full", "lora"}:
         raise ValueError(f"unsupported sampling definition: {definition_id}")
-    definition = module_for(definition_id)
+    definition = await _resource_definition(definition_id)
     rollout_world_size = definition.recipe.inference_gpus_per_node
     rollout_tensor_parallel_size = definition.rollout_tensor_parallel_size
     if rollout_world_size % rollout_tensor_parallel_size:
@@ -370,9 +411,18 @@ async def _model_record(kv, model_id: str):
 
 
 def module_for(definition_id: str):
+    base_id, _, owner = definition_owner(definition_id)
     for definition in DEFINITIONS:
-        if definition.definition_id == definition_id:
+        if definition.definition_id != base_id:
+            continue
+        if owner is None:
             return definition
+        if RESOURCE_POLICY.scope != "session":
+            raise KeyError(definition_id)
+        scoped = definition.for_session(RESOURCE_NAMESPACE, SessionAttribution(session_id=owner))
+        if scoped.definition_id != definition_id:
+            raise KeyError(definition_id)
+        return scoped
     raise KeyError(definition_id)
 
 
@@ -405,6 +455,19 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
             return
         module = module_for(definition_id)
         maximum_instances = module.recipe.trainer_max_instances
+        if module.attribution is not None:
+            try:
+                await owner_attribution(shared_kv(), module.attribution.session_id)
+            except (ValueError, RecordUnavailable):
+                await _cleanup_session(module.attribution.session_id)
+                await complete_reconcile(definition_id, token)
+                return
+            module = await _resource_definition(definition_id)
+            # Keep the live aggregate cap, but plan with the owner's frozen worker capacity.
+            maximum_instances = remaining_capacity(
+                await ModalEnginePlatform(shared_kv(), _spawn_engine).list_instances(),
+                definition_id, maximum_instances,
+            )
         try:
             await reconcile_trainers(
                 shared_kv(),
@@ -424,12 +487,25 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
         await complete_reconcile(definition_id, token)
 
     pending = await pending_reconciliations()
+    failure = None
     try:
-        await asyncio.gather(
-            *(run(definition_id, token) for definition_id, token in pending.items())
-        )
+        if RESOURCE_POLICY.scope == "session":
+            for definition_id, token in pending.items():
+                try:
+                    await run(definition_id, token)
+                except Exception as exc:
+                    logging.getLogger(__name__).exception(
+                        "session trainer reconcile %s", definition_id
+                    )
+                    if failure is None:
+                        failure = exc
+        else:
+            await asyncio.gather(*(run(definition_id, token) for definition_id, token in pending.items()))
     finally:
         await release_reconcile_call(call_id)
+    # Let Modal retry failed owners after every other owner has had a turn.
+    if failure is not None:
+        raise failure
     remaining = await pending_reconciliations()
     if remaining:
         await kick_trainer_reconciler(next(iter(remaining)))
@@ -449,7 +525,20 @@ async def kick_trainer_reconciler(definition_id: str) -> None:
 async def _spawn_engine(definition_id: str, instance_id: str) -> str:
     if error := await deployment_error(definition_id):
         raise ValueError(error)
-    definition = module_for(definition_id)
+    definition = await _resource_definition(definition_id)
+    if definition.attribution is not None:
+        await register_resource(shared_kv(), definition, definition.trainer_app_name)
+        provision = modal.Function.from_name(definition.inference_app_name, "provision_trainer", environment_name=PLATFORM["modal"]["environment"])
+        try:
+            await provision.remote.aio(definition.model_dump_json())
+        except Exception as exc:
+            await shared_kv().put(f"deployment_failure:{definition_id}", {
+                "failed_at": time.time(), "instance_id": instance_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            raise
+        await finish_resource(shared_kv(), definition, definition.trainer_app_name)
+        await _check_resource_owner(definition, definition.trainer_app_name)
     engine = modal.Function.from_name(
         definition.trainer_app_name,
         "trainer",
@@ -458,6 +547,8 @@ async def _spawn_engine(definition_id: str, instance_id: str) -> str:
     call = await engine.spawn.aio(
         instance_id, definition.model_dump_json(), current_app_id()
     )
+    if definition.attribution is not None:
+        await _check_resource_owner(definition, definition.trainer_app_name)
     return call.object_id
 
 
@@ -564,6 +655,9 @@ def _plane():
         checkpoint_root=CHECKPOINT_ROOT,
         reconcile_trainers=kick_trainers,
         trainer_autoscaling=trainer_autoscaling,
+        resource_policy=RESOURCE_POLICY,
+        resource_namespace=RESOURCE_NAMESPACE,
+        cleanup_session=_cleanup_session if RESOURCE_POLICY.scope == "session" else None,
     )
 
 
@@ -684,5 +778,32 @@ def cleaner():
         await _lose_undefined_models()
         await _cleanup_fft_pools()
         await _cleanup_lora_pools()
+        if RESOURCE_POLICY.scope == "session":
+            owners = {
+                record["session_id"]
+                for _, record in await shared_kv().list_items("session_resource:")
+            }
+            for session_id in sorted(owners):
+                try:
+                    try:
+                        await owner_attribution(shared_kv(), session_id)
+                    except (ValueError, RecordUnavailable):
+                        await _cleanup_session(session_id)
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "Failed to clean orphan session %s", session_id
+                    )
 
     asyncio.run(run())
+
+
+@app.function(image=image)
+async def close_resource_session(session_id: str):
+    """Operator teardown; the SDK also releases resources through idle expiry."""
+    return (await _plane().close_session(session_id, "operator requested")).model_dump(mode="json")
+
+
+@app.function(image=image)
+def deployed_resource_policy():
+    """Read back the policy from the deployed worker, including its namespace."""
+    return {"policy": RESOURCE_POLICY.model_dump(mode="json"), "namespace": RESOURCE_NAMESPACE}

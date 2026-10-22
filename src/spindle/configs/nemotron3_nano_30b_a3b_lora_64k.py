@@ -15,7 +15,7 @@ class Config(BaseConfig):
         "tensor_model_parallel_size": 2,
         "expert_model_parallel_size": 2,
         "expert_tensor_parallel_size": 1,
-        # Attention and expert MLP adapters; the Mamba state remains frozen.
+        # Attention, expert MLP, and output-head adapters; Mamba remains frozen.
         "target_modules": [
             "q_proj",
             "k_proj",
@@ -23,6 +23,7 @@ class Config(BaseConfig):
             "o_proj",
             "up_proj",
             "down_proj",
+            "lm_head",
         ],
         "max_tokens_per_gpu": 65536,
         "max_lora_slots": 6,

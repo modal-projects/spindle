@@ -1,6 +1,7 @@
 import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
+from spindle.backends.miles_config import lora_target_flags
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal.deployment_configs import configs_from_env
 
@@ -16,6 +17,9 @@ def test_all_packaged_recipes_validate_offline(path):
     assert config[spec.backend]["hf_checkpoint"] == "/assets/pending"
     serving_options(spec)
     if spec.parameterization == "lora":
+        assert lora_target_flags(tuple(config[spec.backend]["target_modules"])) == (
+            True, True, True
+        )
         resolved = DeploymentConfig.create(spec)
         # Legacy Megatron selectors also match vision layers in current Bridge.
         assert set(spec.miles_cfg["target_modules"]) == set(
