@@ -74,6 +74,7 @@ class Operation:
     kind: OperationKind
     payload: OperationPayload
     encoded_payload: bytes | None = field(default=None, compare=False, repr=False)
+    queued_at: float = field(default_factory=time.monotonic, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -781,6 +782,9 @@ class Engine:
                 ready.append(operation)
         if not ready:
             return None
+        # Serve clients in the order their work arrived, so a cap on clients per batch
+        # cannot starve a client that queued behind an earlier-created one.
+        ready.sort(key=lambda operation: operation.queued_at)
 
         selected = [ready[0]]
         if ready[0].kind == OperationKind.FORWARD_BACKWARD:
