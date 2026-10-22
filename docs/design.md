@@ -29,19 +29,20 @@ state in Modal Dicts so every replica shares the same durable state.
 
 ## Training engines
 
-In single-tenant training, the batch orchestration is simple: wait for enough ready rollouts and send them to the trainer. In the multi-tenant setting, the trainer is free to choose from any selection of multi-client batches. Each Spindle training engine that receives Tinker-style requests from the control plane features a lightweight frontend server that efficiently packs and schedules trainer batches into the backend.
-
 Client sessions are handled by the control plane. Training engines receive only
 model-scoped operations corresponding to Tinker API calls, including model
 creation, forward and backward passes, optimizer steps, checkpoints, sampler
 publication, and model unload.
 
-Each accepted operation is assigned an ordered model sequence ID and a future.
-The engine buffers later requests while the current command runs, allowing the
-next command's inputs to accumulate before the accelerator is available. The
-engine scheduler then selects the next ready command. Compatible
-`forward_backward` operations can be grouped and their variable-length
-sequences packed under the backend's token budget.
+In single-tenant training, the batch orchestration is simple: wait for enough ready rollouts and send them to the trainer. In the multi-tenant setting, the trainer is free to choose from any selection of multi-client batches.
+
+A lightweight frontend server in each engine assigns each accepted operation an
+ordered model sequence ID and a future. It buffers later requests while the
+current command runs, allowing the next command's inputs to accumulate before
+the accelerator is available. The engine scheduler then selects the next ready
+command. Compatible `forward_backward` operations from different clients can be
+grouped and their variable-length sequences packed under the backend's token
+budget.
 
 The engine exposes the command protocol in
 [`engine/api.py`](../src/spindle/engine/api.py). Its scheduler and future handling
@@ -49,21 +50,18 @@ live in [`engine/server.py`](../src/spindle/engine/server.py).
 
 ### Execution lanes
 
-In a multi-tenant engine, long synchronous checkpointing/weight sync times not only increase latency to producing new rollouts but can also potentially hinder other clients’ execution as well. To mitigate this, we split weight syncs/checkpointing operations into GPU-dependent device2host copy, and GPU-independent writes to remote destinations. The trainer only blocks on the first (fast) GPU→CPU transfer before proceeding with the next forward_backward/optim_step, and long-running disk/network writes are pushed to separate threads.
+In a multi-tenant engine, long synchronous checkpointing/weight sync times not only increase latency to producing new rollouts but can also potentially hinder other clients’ execution as well. To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states.
 
-To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations, 
-such that disk writing of checkpoints can be issued asynchronously and does not block the GPU. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states. 
+Checkpoint and sampler publication operations are split into:
 
-Disk- and network-heavy persistence runs outside the GPU lane. Full checkpoints
+1. Capture, which creates an immutable CPU snapshot while on the GPU lane.
+2. Persistence, which writes that snapshot to remote storage on separate threads, *independent* of the GPU lane.
+
+The trainer only blocks on capture before proceeding with the next
+`forward_backward`/`optim_step`. Disk- and network-heavy writes can then overlap
+later training without reading partially updated model state. Full checkpoints
 and sampler publication have independent persistence lanes, so a long durable
-state write cannot delay publishing weights for the next rollout. Each operation
-is split into:
-
-1. `capture_checkpoint`, which captures model state from the GPU onto immutable CPU buffers
-2. `persist_checkpoint`, which writes that state to persistent storage *independent* of the GPU lane. 
-
-Persistence can therefore overlap a later forward/backward or optimizer command
-without reading partially updated model state.
+state write cannot delay publishing weights for the next rollout.
 
 ## Weight publication
 
@@ -76,9 +74,7 @@ To minimize transfer latency, publication format depends on the parameterization
   written to the shared Stitch bulletin Volume and can be loaded independently
   by a sampler replica.
 - **Full fine-tuning (FFT):** publications after the base version contain sparse
-  weight deltas. Replicas discover versions through Stitch and walk the parent
-  chain of deltas, applying updates in place until they reach the requested
-  version.
+  weight deltas, as described below.
 
 Publications are immutable. A version becomes visible to samplers only after
 its persistence phase completes.
@@ -87,9 +83,9 @@ its persistence phase completes.
 
 For full-parameter training, publishing the entire model after every update means moving a lot of weights that haven’t changed. Instead, we keep a CPU snapshot of the previous version and compare it with the new weights on the GPU. We only encode the byte positions that changed and their new values, then compress those sparse updates before writing them to the shared volume. This is lossless: the sampler reconstructs the exact published weights, rather than an approximation of the update.
 
-We pipeline the comparison across tensors so transferring the previous snapshot onto the GPU, finding changed bytes, and copying the results back to CPU can overlap. The captured update owns its data, so writing it to the volume doesn’t need to read weights that the trainer is still modifying. Once capture finishes, the trainer can move on to another client’s work while persistence runs separately.
+We pipeline the comparison across tensors so transferring the previous snapshot onto the GPU, finding changed bytes, and copying the results back to CPU can overlap. The resulting delta is detached from the live weights and follows the same capture/persistence split described above.
 
-Each published delta records the weight version it depends on. A sampler that’s behind follows that chain from its current version and applies the missing updates in place. The new version only becomes available after persistence completes. For LoRA, we publish the full adapter instead; the sparse delta path is for full-parameter training.
+Each published delta records the weight version it depends on. Replicas discover versions through Stitch. A sampler that’s behind follows that chain from its current version and applies the missing updates in place until it reaches the requested version.
 
 The implementation lives in [`fft/delta.py`](../src/spindle/backends/megatron_runtime/fft/delta.py) and [`fft_publication.py`](../src/spindle/backends/fft_publication.py).
 
@@ -199,17 +195,12 @@ executor. `HttpBackendClient` in
 [`engine/backend_http.py`](../src/spindle/engine/backend_http.py) implements that
 interface across the local training subprocess boundary.
 
-To maximize GPU utilization, we separate "GPU ops" (ie. forward_backward, optim_step) from "non-GPU ops" (ie. CPU -> disk checkpoint writing). For this reason, checkpoint and sampler publication operations are split into a GPU and non-GPU component:
-
-1. `capture_*` writes out an immutable snapshot to CPU (in general can be any intermediate destination).
-2. `persist_*` writes that snapshot on to persistent storage. 
+Backends implement the capture/persistence split described in [Execution lanes](#execution-lanes).
 
 The executor names these phases `capture_snapshot` and `persist_snapshot`.
 The per-rank backend implements `persist_checkpoint` for checkpoints and
 `publish_sampler_snapshot` for sampler weights. The latter persists the snapshot
 and makes it available to samplers; checkpoint persistence does not imply sampler
 publication.
-
-`capture_*` operations hence are "GPU ops," and persistence/publication operations are "non-GPU ops" that can be run asynchronously from the GPU lane.
 
 **IMPORTANT!!** The Engine handles the asynchronous scheduling of the GPU and persistence lanes. However, it is on the backend writer to ensure that their persistence/publication methods and GPU methods do not race with each other (ie. dont have conflicting access to the same state). We recommend against using locks for this purpose and have our LoRA and FFT backends written as references of how to implement lock-free backends. In our implementation, the main pattern is that `capture_*` creates detached CPU state that the persistence/publication method exclusively owns.
