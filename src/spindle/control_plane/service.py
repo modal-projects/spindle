@@ -109,12 +109,27 @@ SAMPLER_WARM_FOR_S = 300
 SAMPLER_WARM_REFRESH_S = 60
 
 
-def starting_reason(role: str, model: str, waited: float) -> str:
+def _elapsed(waited: float) -> str:
     minutes, seconds = divmod(int(waited), 60)
-    so_far = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+
+
+def starting_reason(role: str, model: str, waited: float) -> str:
     return (
-        f"starting a {role} for {model} ({so_far} so far). The first request for a "
-        "model starts GPUs and loads weights, which can take several minutes"
+        f"starting a {role} for {model} ({_elapsed(waited)} so far). The first "
+        "request for a model starts GPUs and loads weights, which can take several "
+        "minutes"
+    )
+
+
+def gpu_capacity_reason(role: str, model: str, gpus: str, waited: float) -> str:
+    return (
+        f"waiting for {gpus} GPUs to become available to start a {role} for {model} "
+        f"({_elapsed(waited)} so far). The request stays queued and the {role} "
+        "starts automatically once GPUs free up"
     )
 
 
@@ -161,6 +176,7 @@ class ControlPlane:
         delete_checkpoint: Callable[[str], Awaitable[None]] | None = None,
         checkpoint_root: str = "/checkpoints",
         creation_error: Callable[[str], Awaitable[str | None]] | None = None,
+        trainer_gpu_wait: Callable[[str], Awaitable[str | None]] | None = None,
     ) -> None:
         self.kv = kv
         self.engines = engines
@@ -178,6 +194,7 @@ class ControlPlane:
         self.delete_checkpoint = delete_checkpoint
         self.checkpoint_root = checkpoint_root
         self.creation_error = creation_error
+        self.trainer_gpu_wait = trainer_gpu_wait
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
         self._sampler_warm_at: dict[str, float] = {}
@@ -1214,11 +1231,19 @@ class ControlPlane:
             return None
         if any(instance.state == "running" for instance in active):
             return None
-        return starting_reason(
-            "trainer",
-            str(model.spec.get("base_model") or model.engine_definition_id),
-            waited,
-        )
+        base_model = str(model.spec.get("base_model") or model.engine_definition_id)
+        if gpus := await self._trainer_gpu_wait(model.engine_definition_id):
+            return gpu_capacity_reason("trainer", base_model, gpus, waited)
+        return starting_reason("trainer", base_model, waited)
+
+    async def _trainer_gpu_wait(self, definition_id: str) -> str | None:
+        if self.trainer_gpu_wait is None:
+            return None
+        try:
+            return await self.trainer_gpu_wait(definition_id)
+        except Exception:
+            logging.getLogger(__name__).exception("trainer GPU wait %s", definition_id)
+            return None
 
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
         if self.sampling_task_stores is None:
