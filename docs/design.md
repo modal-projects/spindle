@@ -34,12 +34,15 @@ model-scoped operations corresponding to Tinker API calls, including model
 creation, forward and backward passes, optimizer steps, checkpoints, sampler
 publication, and model unload.
 
-Each accepted operation is assigned an ordered model sequence ID and a future.
-The engine buffers later requests while the current command runs, allowing the
-next command's inputs to accumulate before the accelerator is available. The
-engine scheduler then selects the next ready command. Compatible
-`forward_backward` operations can be grouped and their variable-length
-sequences packed under the backend's token budget.
+In single-tenant training, the batch orchestration is simple: wait for enough ready rollouts and send them to the trainer. In the multi-tenant setting, the trainer is free to choose from any selection of multi-client batches.
+
+A lightweight frontend server in each engine assigns each accepted operation an
+ordered model sequence ID and a future. It buffers later requests while the
+current command runs, allowing the next command's inputs to accumulate before
+the accelerator is available. The engine scheduler then selects the next ready
+command, opportunistically batching compatible ready requests. `forward_backward` operations from different clients can be
+grouped and their variable-length sequences packed under the backend's token
+budget.
 
 The engine exposes the command protocol in
 [`engine/api.py`](../src/spindle/engine/api.py). Its scheduler and future handling
@@ -47,19 +50,18 @@ live in [`engine/server.py`](../src/spindle/engine/server.py).
 
 ### Execution lanes
 
-To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations, 
-such that disk writing of checkpoints can be issued asynchronously and does not block the GPU. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states. 
+In a multi-tenant engine, long synchronous checkpointing/weight sync times not only increase latency to producing new rollouts but can also potentially hinder other clients’ execution as well. To maximize concurrency through our system, we separate "GPU" operations from "non-GPU" operations. GPU-requiring commands are serialized, which preserves ordering of training commands and avoids concurrent mutation of weights/other states.
 
-Disk- and network-heavy persistence runs outside the GPU lane. Full checkpoints
+Checkpoint and sampler publication operations are split into:
+
+1. Capture, which creates an immutable CPU snapshot while on the GPU lane.
+2. Persistence, which writes that snapshot to remote storage on separate threads, *independent* of the GPU lane.
+
+The trainer only blocks on capture before proceeding with the next
+`forward_backward`/`optim_step`. Disk- and network-heavy writes can then overlap
+later training without reading partially updated model state. Full checkpoints
 and sampler publication have independent persistence lanes, so a long durable
-state write cannot delay publishing weights for the next rollout. Each operation
-is split into:
-
-1. `capture_checkpoint`, which captures model state from the GPU onto immutable CPU buffers
-2. `persist_checkpoint`, which writes that state to persistent storage *independent* of the GPU lane. 
-
-Persistence can therefore overlap a later forward/backward or optimizer command
-without reading partially updated model state.
+state write cannot delay publishing weights for the next rollout.
 
 ## Weight publication
 
@@ -72,12 +74,20 @@ To minimize transfer latency, publication format depends on the parameterization
   written to the shared Stitch bulletin Volume and can be loaded independently
   by a sampler replica.
 - **Full fine-tuning (FFT):** publications after the base version contain sparse
-  weight deltas. Replicas discover versions through Stitch and walk the parent
-  chain of deltas, applying updates in place until they reach the requested
-  version.
+  weight deltas, as described below.
 
 Publications are immutable. A version becomes visible to samplers only after
 its persistence phase completes.
+
+### Delta weight syncs
+
+For full-parameter training, publishing the entire model after every update means moving a lot of weights that haven’t changed. Instead, we keep a CPU snapshot of the previous version and compare it with the new weights on the GPU. We only encode the byte positions that changed and their new values, then compress those sparse updates before writing them to the shared volume. This is lossless: the sampler reconstructs the exact published weights, rather than an approximation of the update.
+
+We pipeline the comparison across tensors so transferring the previous snapshot onto the GPU, finding changed bytes, and copying the results back to CPU can overlap. The resulting delta is detached from the live weights and follows the same capture/persistence split described above.
+
+Each published delta records the weight version it depends on. Replicas discover versions through Stitch. A sampler that’s behind follows that chain from its current version and applies the missing updates in place until it reaches the requested version.
+
+The implementation lives in [`fft/delta.py`](../src/spindle/backends/megatron_runtime/fft/delta.py) and [`fft_publication.py`](../src/spindle/backends/fft_publication.py).
 
 ## Sampling
 
@@ -87,19 +97,21 @@ the generation request, reroutes retryable failures, and returns the completed
 Tinker sample response. The control plane stores the Modal Function call ID and
 uses it as the durable future for polling and retries.
 
-The sampling topology differs by parameterization:
+### Multi-LoRA inference routing
 
-- **LoRA (target topology):** one autoscaling Modal server hosts the base
-  model. Adapters are loaded lazily from the bulletin Volume and retained in an
-  LRU cache, allowing many adapters to share one sampling fleet. LoRA training
-  is available today, but the Modal sample dispatcher is currently connected only
-  to FFT definitions; the shared LoRA sampler still needs to be connected.
-- **FFT:** each trained model has its own autoscaling Modal server. Stitch
-  tracks exact and latest weight versions, while replicas update their local
-  weights from the shared delta chain.
+In single-tenant inference, the standard approach is to route each request to whichever replica gives it the best prefix hit-rate. That way you avoid redoing prefill for KV cache you already have, while keeping all replicas load balanced.
 
-This separation lets training engines scale according to active models while
-sampling scales according to rollout traffic. We best-effort sticky-route groups (GRPO) to the same container to maximize KV cache reuse. 
+These routers don't carry over cleanly to multi-LoRA, though. With multi-LoRA, a hit not only needs the cached prefix, but it also needs the request's adapter to be loaded on that replica. Thus, we wrote our own router, inspired by other cache-aware routers, that routes on both KV cache matching, LoRA residency, and per-container KV pressure (ie. block occupancy of the full KV cache size) while keeping containers balanced.
+
+Our routing logic is pretty simple, but we’re able to still see some gains! The plots below our LoRA/KV-aware routing policy with two baselines, one that is purely KV-aware and one that is approximately KV-aware via sticky routing with basic backoff and load-balanced routing when a request is sent to a highly overloaded container. The workload is Qwen3.8-27B trained on a subset of SWE-Gym tasks (fully async GRPO) with 256k max context length across 20 max turns. 
+
+![Multi-LoRA routing comparison: output throughput, p95 latency, load imbalance, and KV cache reuse](assets/design/multi-lora-routing.png)
+
+We see that the KV-aware router with no load balancing eventually runs away with severe load imbalance, causing both queueing and KV thrashing on overloaded containers. Meanwhile, the sticky routing-based approach's retries enable some amount of better load balancing, but suffers from cache reuse and still increased load imbalance compared to our router. 
+
+### Full-parameter Inference
+
+In full-parameter training, each trained model has its own autoscaling Modal server for sampling. Stitch tracks exact and latest weight versions, while replicas update their local weights from a shared delta chain. 
 
 ## Relevant implementation
 
@@ -168,17 +180,12 @@ executor. `HttpBackendClient` in
 [`engine/backend_http.py`](../src/spindle/engine/backend_http.py) implements that
 interface across the local training subprocess boundary.
 
-To maximize GPU utilization, we separate "GPU ops" (ie. forward_backward, optim_step) from "non-GPU ops" (ie. CPU -> disk checkpoint writing). For this reason, checkpoint and sampler publication operations are split into a GPU and non-GPU component:
-
-1. `capture_*` writes out an immutable snapshot to CPU (in general can be any intermediate destination).
-2. `persist_*` writes that snapshot on to persistent storage. 
+Backends implement the capture/persistence split described in [Execution lanes](#execution-lanes).
 
 The executor names these phases `capture_snapshot` and `persist_snapshot`.
 The per-rank backend implements `persist_checkpoint` for checkpoints and
 `publish_sampler_snapshot` for sampler weights. The latter persists the snapshot
 and makes it available to samplers; checkpoint persistence does not imply sampler
 publication.
-
-`capture_*` operations hence are "GPU ops," and persistence/publication operations are "non-GPU ops" that can be run asynchronously from the GPU lane.
 
 **IMPORTANT!!** The Engine handles the asynchronous scheduling of the GPU and persistence lanes. However, it is on the backend writer to ensure that their persistence/publication methods and GPU methods do not race with each other (ie. dont have conflicting access to the same state). We recommend against using locks for this purpose and have our LoRA and FFT backends written as references of how to implement lock-free backends. In our implementation, the main pattern is that `capture_*` creates detached CPU state that the persistence/publication method exclusively owns.
