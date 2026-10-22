@@ -782,9 +782,17 @@ class Engine:
                 ready.append(operation)
         if not ready:
             return None
-        # Serve clients in the order their work arrived, so a cap on clients per batch
-        # cannot starve a client that queued behind an earlier-created one.
-        ready.sort(key=lambda operation: operation.queued_at)
+        # Cheap operations (optimizer steps, checkpoint and sampler-weight captures) run
+        # before queued forward_backward work so a client that just finished training
+        # can publish and start its next rollouts instead of waiting a whole round.
+        # Among forward_backward requests, serve clients in arrival order so a cap on
+        # clients per batch cannot starve a client that queued behind an earlier one.
+        ready.sort(
+            key=lambda operation: (
+                operation.kind == OperationKind.FORWARD_BACKWARD,
+                operation.queued_at,
+            )
+        )
 
         selected = [ready[0]]
         if ready[0].kind == OperationKind.FORWARD_BACKWARD:
