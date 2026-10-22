@@ -103,6 +103,8 @@ In single-tenant inference, the standard approach is to route each request to wh
 
 These routers don't carry over cleanly to multi-LoRA, though. With multi-LoRA, a hit not only needs the cached prefix, but it also needs the request's adapter to be loaded on that replica. Thus, we wrote our own router, inspired by other cache-aware routers, that routes on both KV cache matching and LoRA residency while keeping containers balanced.
 
+Our routing logic is pretty simple, but we’re able to still see some gains! The plots below our LoRA/KV-aware routing policy with two baselines, one that is purely KV-aware and one that is approximately KV-aware via sticky routing with basic backoff and load-balanced routing when a request is sent to a highly overloaded container.
+
 ![Multi-LoRA routing comparison: output throughput, p95 latency, load imbalance, and KV cache reuse](assets/design/multi-lora-routing.png)
 
 The routing comparison above includes the final rollout drain. The multi-LoRA router implementation is in [PR #88](https://github.com/modal-projects/spindle/pull/88).
