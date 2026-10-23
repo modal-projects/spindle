@@ -18,6 +18,15 @@ from spindle.configuration import BaseConfig
 # Modal's smallest ephemeral disk request.
 MIN_EPHEMERAL_DISK_MIB = 524_288
 INFERENCE_GPU_OVERRIDABLE = {"model_weights", "weights_revision", "sglang_cfg", "inference_env"}
+# Written into each downloaded weights directory once it is complete.
+WEIGHTS_MARKER = ".spindle-weights-revision"
+# The frontend routes every sampler request with the base deployment's values.
+SHARED_SERVING_SETTINGS = ("tp_size", "dp_size", "enable_dp_attention", "skip_tokenizer_init")
+
+
+def gpu_family(gpu: str) -> str:
+    """The GPU a Modal type names: A100 for "A100-80GB", H100 for "H100!"."""
+    return gpu.rstrip("!+").split("-")[0].upper()
 
 
 def _jsonable(value):
@@ -63,32 +72,49 @@ class DeploymentConfig(BaseModel):
             inference_settings=_jsonable(inference_settings),
             spindle_version=__version__,
         )
-        deployment.weight_sets()
+        deployment._check_inference_gpu_overrides()
         return deployment
 
-    def for_inference_gpu(self, gpu_name: str) -> DeploymentConfig:
-        """This deployment as a sampler scheduled on `gpu_name` serves it."""
+    def _check_inference_gpu_overrides(self) -> None:
         gpus = self.recipe.inference_gpu
         gpus = [gpus] if isinstance(gpus, str) else gpus
         for gpu, overrides in self.recipe.inference_gpu_overrides.items():
             if gpu not in gpus:
                 raise ValueError(f"inference_gpu_overrides: {gpu} is not in inference_gpu")
-            unknown = {path.split(".")[0] for path in overrides} - INFERENCE_GPU_OVERRIDABLE
-            if unknown:
-                raise ValueError(f"inference_gpu_overrides cannot set {sorted(unknown)}")
-            if gpu.upper() in gpu_name.upper():
-                recipe = BaseConfig(
-                    **{**vars(self.recipe), "inference_gpu_overrides": {}},
-                    overrides=overrides,
-                )
-                return DeploymentConfig.create(recipe)
+            keys = {path.split(".")[0] for path in overrides}
+            if keys - INFERENCE_GPU_OVERRIDABLE:
+                unknown = sorted(keys - INFERENCE_GPU_OVERRIDABLE)
+                raise ValueError(f"inference_gpu_overrides cannot set {unknown}")
+            weights = keys & {"model_weights", "weights_revision"}
+            if weights and self.parameterization != "lora":
+                raise ValueError("only LoRA samplers can serve other weights")
+            serving = self._with_overrides(overrides)
+            for key in SHARED_SERVING_SETTINGS:
+                if serving.inference_settings.get(key) != self.inference_settings.get(key):
+                    raise ValueError(f"inference_gpu_overrides cannot change {key}")
+            if not all(isinstance(v, str) for v in serving.recipe.inference_env.values()):
+                raise ValueError("inference_env values must be strings")
+        self.weight_sets()
+
+    def _with_overrides(self, overrides: dict) -> DeploymentConfig:
+        values = {**vars(self.recipe), "inference_gpu_overrides": {}}
+        if "model_weights" in overrides and "weights_revision" not in overrides:
+            values["weights_revision"] = ""
+        return DeploymentConfig.create(BaseConfig(**values, overrides=overrides))
+
+    def for_inference_gpu(self, gpu_name: str) -> DeploymentConfig:
+        """The deployment a sampler on the GPU named `gpu_name` serves."""
+        words = re.split(r"[\s-]+", gpu_name.upper())
+        for gpu, overrides in self.recipe.inference_gpu_overrides.items():
+            if gpu_family(gpu) in words:
+                return self._with_overrides(overrides)
         return self
 
     def weight_sets(self) -> list[tuple[str, str]]:
         """(repo, revision) of the base weights, then of any sampler-only weights."""
-        sets = []
-        for gpu in [None, *self.recipe.inference_gpu_overrides]:
-            serving = self if gpu is None else self.for_inference_gpu(gpu)
+        sets = [(self.weights_repo, self.recipe.weights_revision)]
+        for overrides in self.recipe.inference_gpu_overrides.values():
+            serving = self._with_overrides(overrides)
             weights = (serving.weights_repo, serving.recipe.weights_revision)
             if weights not in sets:
                 sets.append(weights)

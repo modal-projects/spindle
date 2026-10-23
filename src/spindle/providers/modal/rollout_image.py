@@ -18,8 +18,9 @@ image = (
     .apt_install("git")
     .run_commands(
         "rm -rf /tmp/spindle-sglang-overlay"
-        f" && git clone --filter=blob:none {SGLANG_REPOSITORY} /tmp/spindle-sglang-overlay"
-        f" && git -C /tmp/spindle-sglang-overlay checkout {SGLANG_COMMIT}",
+        " && git init -q /tmp/spindle-sglang-overlay"
+        f" && git -C /tmp/spindle-sglang-overlay fetch --depth=1 {SGLANG_REPOSITORY} {SGLANG_COMMIT}"
+        " && git -C /tmp/spindle-sglang-overlay checkout -q FETCH_HEAD",
         "cp -a /tmp/spindle-sglang-overlay/python/. /sgl-workspace/sglang/python/"
         " && rm -rf /tmp/spindle-sglang-overlay",
         'python -c "import sglang.srt.mem_cache.rust_tree_core.mem_cache"',

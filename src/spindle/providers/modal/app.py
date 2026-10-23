@@ -13,7 +13,7 @@ from stitch.pools.modal_flash import ModalFlashPool
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
-from spindle.deployments import validate_frontend
+from spindle.deployments import WEIGHTS_MARKER, validate_frontend
 from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
@@ -198,11 +198,17 @@ async def prepare_model_assets(definition_id: str) -> None:
             revision=revision or None,
             local_dir=checkpoint,
         )
+        _mark_weights_complete(checkpoint, revision)
         await model_assets.commit.aio()
         StartupTimeline(
             "model-assets", origin=started, labels={"path": checkpoint}
         ).mark("assets_ready")
     await shared_kv().put(_weights_ready_key(definition_id), time.time())
+
+
+def _mark_weights_complete(checkpoint: str, revision: str) -> None:
+    with open(os.path.join(checkpoint, WEIGHTS_MARKER), "w") as marker:
+        marker.write(revision)
 
 
 @app.function(image=image)

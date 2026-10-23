@@ -651,3 +651,25 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
+
+
+def test_sampler_waits_for_its_weights_to_finish_downloading(monkeypatch, tmp_path):
+    serving = SimpleNamespace(
+        asset_path=str(tmp_path),
+        weights_repo="org/fp8",
+        recipe=SimpleNamespace(weights_revision="abc123"),
+    )
+    marker = tmp_path / deployment_apps.WEIGHTS_MARKER
+    marker.write_text("old")
+    reloads = []
+
+    def reload():
+        reloads.append(1)
+        marker.write_text("abc123")
+
+    monkeypatch.setattr(deployment_apps, "WEIGHTS_POLL_S", 0)
+    deployment_apps.wait_for_weights(serving, SimpleNamespace(reload=reload), 60)
+    assert reloads == [1]
+    marker.unlink()
+    with pytest.raises(TimeoutError, match="org/fp8"):
+        deployment_apps.wait_for_weights(serving, SimpleNamespace(reload=dict), 0)

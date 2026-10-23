@@ -9,7 +9,8 @@ class Config(Parent):
     overrides = {
         # TP4 runs out of memory past about 24K tokens on H200.
         "miles_cfg.tensor_model_parallel_size": 8,
-        # The padded vocabulary must split evenly across eight TP ranks.
+        # Megatron pads the vocabulary to a multiple of this times TP; 32 x 8 keeps the
+        # checkpoint's 129,280 rows unpadded.
         "miles_cfg.cli_options.make_vocab_size_divisible_by": 32,
     }
 
