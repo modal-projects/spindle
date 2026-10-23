@@ -514,6 +514,13 @@ def test_recipes_select_trainer_images(builders, monkeypatch):
     assert trainer["image"] is trainer_image
 
 
+def test_deepseek_v41_lora_trainer_image_is_registered():
+    assert (
+        deployment_apps.image_for("miles", "miles-v0.1.2")
+        is deployment_apps.miles_v012_image
+    )
+
+
 def test_gpu_type_lists_become_modal_fallbacks(builders):
     row = deployment("qwen36-35b-a3b-lora-32k")
     row.recipe.trainer_gpu = ["H200", "B300"]
