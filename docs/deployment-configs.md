@@ -57,7 +57,7 @@ Each parent's settings and overrides apply before its child's. Constructor field
 
 `trainer_gpu` and `inference_gpu` take one GPU type or a list in preference order, such as `["H200", "B300"]`. Modal schedules the first type with capacity. GPU counts and parallelism settings apply to every entry, so list only types with at least as much memory as the first.
 
-`trainer_max_clients_per_instance` sets how many clients (LoRA adapters) share one trainer. By default the trainer packs every client's queued `forward_backward` requests into one call, so every client in the pack gets its result when the whole pack finishes. When clients run independently, as in asynchronous RL where each samples on its own schedule, set `trainer_max_clients_per_batch = 1`: each client's step runs on its own, oldest first, and the client returns to sampling as soon as its step finishes.
+When several clients share a trainer, it trains all of their queued batches together by default, and each client waits for the whole step to finish. For RL, where clients sample at different times, set `trainer_max_clients_per_batch = 1`. The trainer then runs one client at a time, so each client can go back to sampling as soon as its own step is done.
 
 ## Backend options
 
