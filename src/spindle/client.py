@@ -27,12 +27,16 @@ def _create_full_training_client_submit(
             user_metadata=user_metadata,
         )
         with service.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
-            future = await client.models.create(
-                request=request,
-                extra_body={
+            # Post the create request directly because Tinker SDK 0.26 removed
+            # extra_body, which used to carry these Spindle-only fields.
+            future = await client.post(
+                "/api/v1/create_model",
+                body={
+                    **request.model_dump(exclude_none=True, mode="json"),
                     "parameterization": {"type": "full"},
                     "rollout": rollout,
                 },
+                cast_to=types.UntypedAPIFuture,
             )
         response = await _APIFuture(
             types.CreateModelResponse,

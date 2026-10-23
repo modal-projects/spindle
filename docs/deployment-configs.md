@@ -55,6 +55,8 @@ config = Config()
 
 Each parent's settings and overrides apply before its child's. Constructor fields and overrides apply last: `Config(trainer_gpu="H200", overrides={"sglang_cfg.max_running_requests": 16})`. Assigning a dictionary or list replaces that value; `trainer_env = {}` clears inherited environment settings. Instances own independent copies of mutable values and can also be edited directly.
 
+`trainer_gpu` and `inference_gpu` take one GPU type or a list in preference order, such as `["H200", "B300"]`. Modal schedules the first type with capacity. GPU counts and parallelism settings apply to every entry, so list only types with at least as much memory as the first.
+
 ## Backend options
 
 | Setting | Consumed by |
@@ -69,6 +71,10 @@ Modal and backend libraries validate their own options. Spindle checks integrati
 `BaseConfig` does not enforce field types or reject arbitrary attributes. Extra backend options belong in the corresponding backend dictionary. A misspelled top-level attribute is ordinary Python data and may be unused.
 
 Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/miles_arguments.py). SGLang receives `ServerArgs(**settings)` in its [worker entrypoint](../src/spindle/inference/sglang.py). Backend libraries validate native options when workers start; frontend config imports remain CPU-only.
+
+### Miles options
+
+Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size`.
 
 ## Prepare and launch
 
@@ -104,6 +110,8 @@ spindle config init --preset qwen35-9b-lora-16k > my_model.py
 spindle config validate my_model.py
 spindle deploy my_model.py
 ~~~
+
+Bundled configs deploy by name, e.g. `spindle deploy qwen35-9b-lora-16k gpt-oss-20b-lora-32k`, and `spindle deploy --all` deploys every bundled config. With no arguments in a terminal, `spindle deploy` asks which models to deploy; without a terminal it exits instead of deploying.
 
 Validation loads the recipes and checks that they can share one frontend. Backend integration settings are checked when creating a DeploymentConfig at deploy time. Native backend options are checked at engine startup.
 

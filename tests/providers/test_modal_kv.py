@@ -162,3 +162,14 @@ def test_lora_pool_registry_supports_publication_and_cleanup():
         assert await routed.list_items("lora_pool:") == ()
 
     asyncio.run(run())
+
+
+def test_model_assets_ready_routes_to_the_engine_store():
+    async def run():
+        stores = {name: InMemoryKeyValueStore() for name in kv.STORE_NAMES}
+        routed = kv.RoutedKeyValueStore(stores)
+        await routed.put("model_assets_ready:test", 1.0)
+        assert await routed.get("model_assets_ready:test") == 1.0
+        assert await stores["engines"].get("model_assets_ready:test") == 1.0
+
+    asyncio.run(run())

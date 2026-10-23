@@ -237,12 +237,69 @@ def test_prepare_model_leaves_lora_pool_to_trainer_boot(
     assert spawned == ([pool] if spawns_pool else [])
 
 
+def test_prepare_model_downloads_assets_once_per_definition(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    prepared = []
+
+    async def prepare(definition_id: str) -> None:
+        prepared.append(definition_id)
+
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "ModalSessionKeyValueStores", SimpleNamespace)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+
+    async def run() -> None:
+        model = SimpleNamespace(
+            engine_definition_id=LORA_DEFINITION, model_id="session:train:0", spec={}
+        )
+        await modal_app._plane().prepare_model(model)
+        await modal_app._plane().prepare_model(model)
+
+    asyncio.run(run())
+    assert prepared == [LORA_DEFINITION]
+
+
+def test_prepare_model_downloads_assets_again_for_new_weights(monkeypatch) -> None:
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    prepared = []
+    original = modal_app.module_for(LORA_DEFINITION)
+    definition = original
+
+    async def prepare(definition_id: str) -> None:
+        prepared.append(definition.recipe.weights_revision)
+
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+    monkeypatch.setattr(
+        modal_app,
+        "prepare_model_assets",
+        SimpleNamespace(remote=SimpleNamespace(aio=prepare)),
+    )
+
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    definition = DeploymentConfig.create(
+        BaseConfig(**{**vars(original.recipe), "weights_revision": "abc123"})
+    )
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    asyncio.run(modal_app._ensure_model_assets(LORA_DEFINITION))
+    assert prepared == ["", "abc123"]
+
+
 def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     events = []
 
-    def download(*, repo_id: str, local_dir: str) -> None:
-        events.append(("download", repo_id, local_dir))
+    def download(*, repo_id: str, revision: str | None, local_dir: str) -> None:
+        events.append(("download", repo_id, revision, local_dir))
 
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
     monkeypatch.setattr(
@@ -255,7 +312,7 @@ def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> N
 
     definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
-        ("download", definition.model, definition.asset_path),
+        ("download", definition.model, None, definition.asset_path),
         ("commit",),
     ]
 

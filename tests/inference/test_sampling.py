@@ -271,6 +271,39 @@ def test_invalid_cache_affinity_key_is_rejected(key) -> None:
         asyncio.run(sample_task(request, "http://rollout"))
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("topk_sample_logprobs", 5),
+        ("target_prompt_logprobs", {"data": [1], "dtype": "int64"}),
+        ("prompt_alt_tokens_k", 2),
+        ("prompt_logprobs_last_n", 4),
+    ],
+)
+def test_unsupported_sdk_sampling_options_are_rejected(key, value) -> None:
+    request = task()
+    request["payload"][key] = value
+    with pytest.raises(ValueError, match=f"{key} is not supported"):
+        asyncio.run(sample_task(request, "http://rollout"))
+
+
+def test_inert_sdk_sampling_option_defaults_are_accepted() -> None:
+    request = task()
+    request["payload"].update(
+        topk_sample_logprobs=0,
+        target_prompt_logprobs=None,
+        prompt_alt_tokens_k=0,
+        prompt_logprobs_last_n=None,
+    )
+    asyncio.run(
+        sample_task(
+            request,
+            "http://rollout",
+            transport=httpx.MockTransport(lambda _: response(7)),
+        )
+    )
+
+
 def test_missing_max_tokens_defaults_to_remaining_context() -> None:
     request = task()
     request["payload"]["prompt"]["chunks"][0]["tokens"] = [1, 2, 3]

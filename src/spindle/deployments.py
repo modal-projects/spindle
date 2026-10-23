@@ -11,8 +11,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
+from spindle import __version__
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
+
+# Modal's smallest ephemeral disk request.
+MIN_EPHEMERAL_DISK_MIB = 524_288
 
 
 def _jsonable(value):
@@ -27,6 +31,8 @@ class DeploymentConfig(BaseModel):
     recipe: BaseConfig
     trainer_settings: dict
     inference_settings: dict
+    # Configs saved before versioning have no version and report 0.1.0.
+    spindle_version: str = "0.1.0"
 
     @field_validator("recipe", mode="before")
     @classmethod
@@ -41,6 +47,12 @@ class DeploymentConfig(BaseModel):
     def create(cls, recipe: BaseConfig) -> DeploymentConfig:
         """Copy the recipe and attach backend settings."""
         pinned = BaseConfig(**_jsonable(vars(recipe)))
+        for field in ("trainer_disk_mib", "inference_disk_mib"):
+            disk = getattr(pinned, field)
+            if disk and disk < MIN_EPHEMERAL_DISK_MIB:
+                raise ValueError(
+                    f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
+                )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
@@ -48,6 +60,7 @@ class DeploymentConfig(BaseModel):
             recipe=pinned,
             trainer_settings=_jsonable(trainer_settings),
             inference_settings=_jsonable(inference_settings),
+            spindle_version=__version__,
         )
 
     @property
@@ -99,6 +112,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -110,11 +124,13 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_nodes,
             recipe.trainer_cpu,
             recipe.trainer_memory_mib,
+            recipe.trainer_disk_mib,
             recipe.trainer_max_instances,
             recipe.trainer_max_clients_per_instance,
             recipe.trainer_timeout_s,
             recipe.trainer_env,
             self.trainer_settings,
+            self.spindle_version,
         )
 
     def inference_identity(self) -> tuple:
@@ -123,6 +139,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
@@ -130,6 +147,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_gpus_per_node,
             recipe.inference_cpu,
             recipe.inference_memory_mib,
+            recipe.inference_disk_mib,
             recipe.inference_min_replicas,
             recipe.inference_max_replicas,
             recipe.inference_target_concurrency,
@@ -137,6 +155,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
             self.inference_settings,
+            self.spindle_version,
         )
 
 

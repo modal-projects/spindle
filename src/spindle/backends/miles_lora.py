@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ from tinker import AdamParams, ForwardBackwardOutput, OptimStepResponse
 from spindle.engine.spmd import DistributedExecutor
 from spindle.errors import BackendFailed
 from spindle.inference.bulletin import SnapshotBulletin
+from spindle.startup_timing import BACKEND_COMPONENT, timeline
 
 from .contract import (
     Backend,
@@ -79,6 +81,7 @@ class MilesCommandBackend(Backend):
         self._profile = TorchProfileConfig.from_env()
         self._profiling_active = False
         self._profile_step_done = False
+        self._firsts: set[str] = set()
         self._controller_profiler: RankProfiler | None = None
         self._closed = False
         if self._profile.enabled:
@@ -152,6 +155,7 @@ class MilesCommandBackend(Backend):
             self._release(model_id, slot)
             self.jobs.pop(model_id, None)
             raise
+        self._first("first_slot_loaded", slot=slot)
 
     def forward_backward(
         self,
@@ -198,6 +202,7 @@ class MilesCommandBackend(Backend):
                         "sampling replay requires a positive finite sampling_temperature in loss_fn_config"
                     )
         phase_name = "forward_only" if batch.forward_only else "forward_backward"
+        started = time.perf_counter()
         with (
             self._timer.phase(phase_name, step, model_id=batch.items[0].model_id),
             self._record(f"spindle/{phase_name}"),
@@ -212,6 +217,11 @@ class MilesCommandBackend(Backend):
                 loss_fn_config=dict(batch.loss_fn_config),
                 forward_only=batch.forward_only,
             )
+        self._first(
+            f"first_{phase_name}_done",
+            duration_s=round(time.perf_counter() - started, 3),
+            step=step,
+        )
         raw_outputs = raw_outputs[: len(prepared.slot_rows)]
         if not batch.forward_only:
             for item in batch.items:
@@ -237,11 +247,17 @@ class MilesCommandBackend(Backend):
             self.job_to_slot[model_id]: parameters.copy() for model_id in model_ids
         }
         step = self.jobs[model_ids[0]].optimizer_step
+        started = time.perf_counter()
         with (
             self._timer.phase("optim_step", step, model_id=model_ids[0]),
             self._record("spindle/optim_step"),
         ):
             outcomes = self.runtime.optim_step(by_slot)
+        self._first(
+            "first_optim_step_done",
+            duration_s=round(time.perf_counter() - started, 3),
+            step=step,
+        )
         timing_metrics = self._timer.metrics_for_step(step)
         self._timer.pop_step(step)
         outputs = []
@@ -428,6 +444,7 @@ class MilesCommandBackend(Backend):
                 target_modules=self.config.peft_target_modules,
                 lora_dropout=self.config.lora_dropout,
             )
+        self._first("first_sampler_export_done", step=state.optimizer_step)
         self._sampler_captures[capture_id] = {
             "model_id": model_id,
             "publish_version": requested_version,
@@ -492,6 +509,11 @@ class MilesCommandBackend(Backend):
         if self._profiling_active:
             self._stop_profiling()
         self.runtime.close()
+
+    def _first(self, name: str, **fields: Any) -> None:
+        if name not in self._firsts:
+            self._firsts.add(name)
+            timeline(BACKEND_COMPONENT).mark(name, **fields)
 
     def _record(self, name: str):
         """Controller-side profiler span; inert when profiling is off."""

@@ -17,6 +17,7 @@ from typing import Any
 from spindle.backends.miles_arguments import defer_config_overrides
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.errors import BackendFailed
+from spindle.startup_timing import BACKEND_COMPONENT, timeline
 
 from .replay_data import install_bridge_replay, validate_routed_experts
 
@@ -30,7 +31,7 @@ try:
     from miles.tinker import runtime as tinker_runtime
     from miles.utils import object_store
     from miles.utils.arguments import parse_args
-    from miles.utils.audit_utils.process_identity import MainProcessIdentity
+    from miles.utils.audit_utils import process_identity
     from miles.utils.external_utils.model_args_utils import load_model_args
     from miles.utils.logging_utils import configure_logger
     from miles.utils.lora import arguments as lora_arguments
@@ -38,6 +39,15 @@ except ModuleNotFoundError as exc:
     if exc.name not in {"ray", "miles"}:
         raise
     _runtime_import_error = exc
+
+try:
+    # Miles v0.1.2 runs the trainer controller as a worker reached by handle.
+    from miles.backends.megatron_utils.megatron_config import compute_trainer_args
+    from miles.ray.placement_group import create_trainer_handles
+    from miles.ray.specs.train import ACTOR_ROLE, compute_trainer_configs
+    from miles.ray.wiring import shutdown_worker_manager
+except ImportError:
+    create_trainer_handles = None
 
 
 class MilesRuntime:
@@ -248,7 +258,9 @@ class MilesRuntime:
         args.lora_A_init_method = "kaiming"
         args.use_dynamic_global_batch_size = True
         args.delay_split_train_data_by_dp = True
-        configure_logger(args, source=MainProcessIdentity())
+        configure_logger(args, source=_main_process_identity())
+        startup = timeline(BACKEND_COMPONENT)
+        startup.mark("miles_args_parsed")
 
         if ray.is_initialized():
             raise RuntimeError("MilesRuntime requires exclusive ownership of Ray")
@@ -275,26 +287,40 @@ class MilesRuntime:
             nodes=self.config.actor_num_nodes,
             world_size=self.config.world_size,
         )
+        startup.mark("ray_started")
 
         self._worker_manager = launch_worker_manager(args)
         object_store.init_instance(args, contribute_segment=False)
         self._owns_object_store = True
-        self._trainer = TrainerController(
-            args=args,
-            role="actor",
-            with_ref=False,
-            with_opd_teacher=False,
-            inference_controller=None,
-            rollout_executor=None,
-        )
-        await self._trainer.init()
+        startup.mark("ray_workers_launched")
+        if create_trainer_handles is not None:
+            configs = compute_trainer_configs(args)
+            (actor_config,) = [c for c in configs if c.role == ACTOR_ROLE]
+            handles = create_trainer_handles(args, trainer_configs=configs)
+            self._trainer = handles[actor_config.trainer_id]
+            await self._trainer.init(compute_trainer_args(args, actor_config))
+        else:
+            self._trainer = TrainerController(
+                args=args,
+                role="actor",
+                with_ref=False,
+                with_opd_teacher=False,
+                inference_controller=None,
+                rollout_executor=None,
+            )
+            await self._trainer.init()
+        startup.mark("trainer_actors_initialized")
         self._bridge = tinker_runtime.MilesBackend(
             self._trainer, router_url="", dp_size=1
         )
+        startup.mark("miles_backend_ready")
 
     async def _close(self) -> None:
         try:
-            if self._trainer is not None:
+            if self._trainer is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await self._trainer.dispose()
+            elif self._trainer is not None:
                 cell_ids = list(self._trainer.cell_ids)
                 try:
                     await self._trainer.dispose()
@@ -303,7 +329,10 @@ class MilesRuntime:
                         with suppress(BaseException):
                             await self._worker_manager.stop_cells.remote(cell_ids)
         finally:
-            if self._worker_manager is not None:
+            if self._worker_manager is not None and create_trainer_handles is not None:
+                with suppress(BaseException):
+                    await shutdown_worker_manager(self._worker_manager)
+            elif self._worker_manager is not None:
                 with suppress(BaseException):
                     ray.kill(self._worker_manager, no_restart=True)
             if self._owns_object_store:
@@ -323,6 +352,7 @@ _WORKER_ENV_VARS = (
     "SPINDLE_BULLETIN_ROOT",
     "TRITON_CACHE_DIR",
     "TORCHINDUCTOR_CACHE_DIR",
+    "TILELANG_CACHE_DIR",
     "EXPERT_LORA_COMPAT",
 )
 
@@ -371,6 +401,13 @@ def _check_result(result) -> None:
             _check_result(item)
     if isinstance(result, dict) and "error" in result:
         raise RuntimeError(f"Miles operation failed: {result['error']}")
+
+
+def _main_process_identity():
+    # Miles v0.1.2 folded the per-process identity classes into one.
+    if hasattr(process_identity, "MainProcessIdentity"):
+        return process_identity.MainProcessIdentity()
+    return process_identity.SimpleProcessIdentity(component="main")
 
 
 def _configure_actor_spec(train_specs) -> None:

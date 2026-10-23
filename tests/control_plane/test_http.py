@@ -6,6 +6,7 @@ import pytest
 import zstandard
 from tinker.proto.response_conv import deserialize_forward_backward_output
 
+import spindle
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane import http as control_http
 from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
@@ -132,6 +133,13 @@ def test_training_round_trip_over_http() -> None:
     ("path", "body"),
     (
         (
+            "/api/v1/optim_step",
+            {
+                "seq_id": 1,
+                "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+            },
+        ),
+        (
             "/api/v1/save_weights_for_sampler",
             {"seq_id": 1, "path": "invalid/name"},
         ),
@@ -245,7 +253,9 @@ def test_pending_future_returns_try_again_408() -> None:
     asyncio.run(run())
 
 
-def test_service_endpoints() -> None:
+def test_service_endpoints(monkeypatch) -> None:
+    monkeypatch.setenv("SPINDLE_COMMIT", "abc123")
+
     async def run() -> None:
         client = http_client()
         assert (await client.get("/api/v1/healthz")).json() == {"status": "ok"}
@@ -254,6 +264,8 @@ def test_service_endpoints() -> None:
             "supported_models": [
                 {"model_name": BASE_MODEL, "max_context_length": 16_384}
             ],
+            "spindle_version": spindle.__version__,
+            "spindle_commit": "abc123",
         }
         config = await client.post("/api/v1/client/config", json={})
         assert config.json()["use_pyqwest_transport"] is False
@@ -362,6 +374,32 @@ def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
     asyncio.run(run())
 
 
+def test_sample_endpoint_returns_one_sequence_id_per_requested_sample() -> None:
+    class CaptureControlPlane:
+        async def submit_sample(self, request):
+            return "request-a"
+
+    async def run() -> None:
+        app = create_control_plane_app(CaptureControlPlane(), DEFINITIONS, api_key=None)
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            transport=httpx.ASGITransport(app=app),
+        )
+
+        response = await client.post(
+            "/api/v1/asample",
+            json={"sampling_session_id": "sample-a", "seq_id": 0, "num_samples": 3},
+        )
+
+        assert response.json() == {
+            "request_id": "request-a",
+            "sample_sequence_ids": ["request-a:0", "request-a:1", "request-a:2"],
+        }
+        await client.aclose()
+
+    asyncio.run(run())
+
+
 def test_full_model_info_is_not_lora() -> None:
     async def run() -> None:
         client = http_client()
@@ -424,6 +462,32 @@ def test_errors_map_to_status_codes() -> None:
         assert invalid_full.status_code == 400
         assert invalid_full.json()["error"] == "invalid_request"
         assert "cannot both be provided" in invalid_full.json()["message"]
+
+        dimuon = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 3,
+                "base_model": BASE_MODEL,
+                "lora_config": {"rank": 32},
+                "optimizer_config": {"type": "dimuon", "version": 1},
+            },
+        )
+        assert dimuon.status_code == 400
+        assert dimuon.json()["error"] == "invalid_request"
+        assert "optimizer family dimuon is not supported" in dimuon.json()["message"]
+
+        adamw = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 4,
+                "base_model": BASE_MODEL,
+                "lora_config": {"rank": 32},
+                "optimizer_config": {"type": "adamw"},
+            },
+        )
+        assert adamw.status_code == 200
         await client.aclose()
 
     asyncio.run(run())
@@ -659,5 +723,43 @@ def test_result_negotiation_constructs_one_response_before_timing(
                     "bytes": len(response.content),
                 }
             ]
+
+    asyncio.run(run())
+
+
+def test_pending_future_with_a_reason_reports_a_starting_queue_state() -> None:
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+        )
+
+        async def retrieve(request_id: str, timeout: float = 0.0) -> FutureResolution:
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason="starting a sampler for Qwen/Qwen3-4B (45s so far)",
+            )
+
+        plane.retrieve = retrieve
+        app = create_control_plane_app(
+            plane, DEFINITIONS, api_key="tml-test", retrieve_window=1.0
+        )
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            headers={"X-API-Key": "tml-test"},
+            transport=httpx.ASGITransport(app=app),
+        )
+        retrieved = await client.post(
+            "/api/v1/retrieve_future", json={"request_id": "sample-abc:0"}
+        )
+        assert retrieved.status_code == 408
+        assert retrieved.json() == {
+            "type": "try_again",
+            "request_id": "sample-abc:0",
+            "queue_state": "starting",
+            "queue_state_reason": "starting a sampler for Qwen/Qwen3-4B (45s so far)",
+        }
+        await client.aclose()
 
     asyncio.run(run())

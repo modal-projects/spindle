@@ -25,7 +25,9 @@ from spindle.inference.serving import (
     terminate,
     wait_http,
 )
+from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timeline
 
+from .app_tags import app_tags
 from .deployment import trainer_deployment_env
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
@@ -52,6 +54,14 @@ def image_for(backend):
     return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
         backend
     ]
+
+
+def build_sampler_image(frontend, environment):
+    """Build the pool image ahead of the first request; pools reuse the cached build."""
+    app = modal.App.lookup(
+        frontend, environment_name=environment, create_if_missing=True
+    )
+    image_for("sglang").build(app)
 
 
 def volumes_for(platform):
@@ -89,6 +99,27 @@ def server_placement(region):
     return {"routing_region": region, "compute_region": region}
 
 
+def gpu_request(gpu: str | list[str], count: int) -> str | list[str]:
+    """Modal tries list entries in order and schedules the first type with capacity."""
+    if isinstance(gpu, str):
+        return f"{gpu}:{count}"
+    return [f"{name}:{count}" for name in gpu]
+
+
+def log_scheduled_gpus(role: str) -> None:
+    try:
+        names = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        logging.getLogger(__name__).exception("query scheduled GPUs")
+        return
+    print(f"spindle {role} scheduled on {len(names)}x {', '.join(sorted(set(names)))}")
+
+
 def deployment_env(values):
     """Keep user environment overrides separate from Spindle's deployment wiring."""
     if any(key.startswith("SPINDLE_") for key in values):
@@ -101,7 +132,10 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         platform = deployment.recipe.platform
     recipe = deployment.recipe
     trainer_name = recipe.name
-    app = modal.App(deployment.trainer_app_name)
+    app = modal.App(
+        deployment.trainer_app_name,
+        tags=app_tags("trainer", model=recipe.model, framework=recipe.backend),
+    )
 
     env = {
         **trainer_deployment_env(),
@@ -110,10 +144,14 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     }
 
     def trainer(instance_id: str, config_json: str, frontend_app_id: str):
+        timeline(TRAINER_COMPONENT, instance_id=instance_id).mark(
+            "trainer_function_entered"
+        )
         saved = DeploymentConfig.model_validate_json(config_json)
         if saved.name != trainer_name:
             raise ValueError("trainer settings do not match the deployed app")
         os.environ["SPINDLE_FRONTEND_APP_ID"] = frontend_app_id
+        log_scheduled_gpus("trainer")
         run_trainer(saved, instance_id, platform)
 
     if recipe.trainer_nodes > 1:
@@ -122,10 +160,11 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         name="trainer",
         serialized=True,
         image=image if image is not None else image_for(recipe.backend),
-        gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
+        gpu=gpu_request(recipe.trainer_gpu, recipe.trainer_gpus_per_node),
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
+        ephemeral_disk=recipe.trainer_disk_mib or None,
         timeout=recipe.trainer_timeout_s,
         max_containers=None,
         min_containers=0,
@@ -145,6 +184,7 @@ def run_trainer(deployment, instance_id, platform=None):
     recipe = deployment.recipe
     settings = deployment.trainer_settings
     assets = volumes_for(platform)["/assets"]
+    startup = timeline(TRAINER_COMPONENT, instance_id=instance_id)
     if recipe.trainer_nodes > 1:
         ray_address = start_trainer_cluster(
             recipe.trainer_nodes,
@@ -153,11 +193,14 @@ def run_trainer(deployment, instance_id, platform=None):
         )
         if ray_address is None:
             return
+        startup.mark("ray_cluster_joined")
     else:
         assets.reload()
         ray_address = None
+        startup.mark("assets_reloaded")
     if recipe.parameterization == "lora":
         _warm_lora_pool(platform["frontend"], deployment.definition_id)
+        startup.mark("lora_pool_warm_requested")
     env = {
         **KERNEL_CACHE_ENV,
         **deployment_env(recipe.trainer_env),
@@ -216,7 +259,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     lora = recipe.parameterization == "lora"
     if pool.definition_id != deployment.definition_id:
         raise ValueError("pool does not match deployment")
-    app = modal.App(pool.app_name)
+    app = modal.App(
+        pool.app_name,
+        tags=app_tags("inference", model=recipe.model, framework="sglang"),
+    )
     options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
     maximum = recipe.inference_max_replicas
@@ -230,9 +276,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         name="Server",
         serialized=True,
         image=image if image is not None else image_for("sglang"),
-        gpu=f"{recipe.inference_gpu}:{recipe.inference_gpus_per_node}",
+        gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
+        ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),
@@ -250,6 +297,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         def start(self):
             self.sidecar = None
             self.sglang = None
+            log_scheduled_gpus("sampler")
+            startup = timeline(SAMPLER_COMPONENT, pool=pool.app_name)
+            startup.mark("server_enter")
 
             self.sglang = subprocess.Popen(
                 [
@@ -267,6 +317,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sglang,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sglang_healthy")
                 kwargs = dict(
                     port=8000,
                     sglang_port=8001,
@@ -288,6 +339,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sidecar,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sidecar_healthy")
             except BaseException:
                 terminate(self.sidecar)
                 terminate(self.sglang)
@@ -315,7 +367,10 @@ def build_inference_app(deployment, platform=None, *, image=None):
             )
             .add_local_python_source("spindle", copy=True, ignore=ignore_config_source)
         )
-    app = modal.App(deployment.inference_app_name)
+    app = modal.App(
+        deployment.inference_app_name,
+        tags=app_tags("inference-provisioner", model=deployment.recipe.model),
+    )
     inference_name = deployment.name
 
     @app.function(name="provision", image=image, serialized=True, timeout=1800)

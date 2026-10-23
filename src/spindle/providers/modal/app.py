@@ -19,15 +19,19 @@ from spindle.providers.contracts import (
     Parameterization,
     SamplingTask,
 )
+from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
+from spindle.version import COMMIT_ENV, source_commit
 
+from .app_tags import app_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
 )
 from .deployment import trainer_deployment_env
 from .deployment_configs import (
-    CONFIGS_ENV,
+    CONFIGS_FILE_ENV,
+    CONFIGS_IMAGE_PATH,
     PLATFORM_ENV,
     configs_from_env,
     platform_from_env,
@@ -95,11 +99,12 @@ checkpoint_volume = modal.Volume.from_name(
 )
 TRAINER_DEPLOYMENT_ENV = {
     **trainer_deployment_env(),
-    CONFIGS_ENV: os.environ[CONFIGS_ENV],
+    CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
+    COMMIT_ENV: source_commit() or "",
 }
-app = modal.App(APP_NAME)
+app = modal.App(APP_NAME, tags=app_tags("frontend"))
 
 
 async def _read_checkpoint_metadata(uri: str) -> dict[str, object]:
@@ -125,6 +130,7 @@ image = (
     .apt_install("git")
     .pip_install(*CORE_PACKAGES, TINKER_PACKAGE)
     .pip_install(STITCH_PACKAGE, "huggingface-hub")
+    .add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
     .env(TRAINER_DEPLOYMENT_ENV)
     .add_local_python_source("spindle", ignore=ignore_config_source)
 )
@@ -180,11 +186,16 @@ def prepare_model_assets(definition_id: str) -> None:
         or checkpoint == MODEL_ASSET_ROOT
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
+    started = time.time()
     snapshot_download(
         repo_id=definition.weights_repo,
+        revision=definition.recipe.weights_revision or None,
         local_dir=checkpoint,
     )
     model_assets.commit()
+    StartupTimeline("model-assets", origin=started, labels={"path": checkpoint}).mark(
+        "assets_ready"
+    )
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
@@ -229,6 +240,18 @@ async def ensure_lora_pool(spec: dict) -> str:
         {**pool.as_dict(), "touched_at": time.time()},
     )
     return gateway
+
+
+async def _ensure_model_assets(definition_id: str) -> None:
+    """Download the base weights once per definition and weights revision; later
+    calls skip the container start."""
+    definition = module_for(definition_id)
+    revision = definition.recipe.weights_revision
+    key = f"model_assets_ready:{definition_id}:{definition.weights_repo}@{revision}"
+    if await shared_kv().get(key) is not None:
+        return
+    await prepare_model_assets.remote.aio(definition_id)
+    await shared_kv().put(key, time.time())
 
 
 async def _trainer_booted(registry, definition_id: str) -> bool:
@@ -476,7 +499,7 @@ def _plane():
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
-        await prepare_model_assets.remote.aio(model.engine_definition_id)
+        await _ensure_model_assets(model.engine_definition_id)
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         elif await _trainer_booted(kv, model.engine_definition_id):
@@ -490,7 +513,7 @@ def _plane():
         parameterization = parameterization_for(definition_id)
         if parameterization == "lora":
             if session.model_id is None:
-                await prepare_model_assets.remote.aio(definition_id)
+                await _ensure_model_assets(definition_id)
             await _ready_lora_pool(LoraPoolSpec(definition_id))
             return
         if parameterization != "full":
@@ -511,7 +534,7 @@ def _plane():
         record = await registry.get(key)
         if record is None:
             if session.model_id is None:
-                await prepare_model_assets.remote.aio(definition_id)
+                await _ensure_model_assets(definition_id)
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
             await ensure_fft_pool.remote.aio(pool.as_dict())

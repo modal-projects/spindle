@@ -29,6 +29,7 @@ from spindle.providers.contracts import Parameterization
 from spindle.request_timing import enabled as request_timing_enabled
 from spindle.request_timing import mark
 from spindle.telemetry.trainer import CommandMiddleware
+from spindle.version import __version__, source_commit
 
 from .deployments import DeploymentRoutes
 from .service import ControlPlane, FutureResolutionStatus
@@ -79,6 +80,7 @@ class CreateModelBody(BaseModel):
     base_model: str
     lora_config: dict[str, Any] | None = None
     parameterization: dict[str, str] | None = None
+    optimizer_config: dict[str, Any] | None = None
     rollout: RolloutPoolBody | None = None
     user_metadata: dict[str, str] | None = None
 
@@ -277,7 +279,11 @@ def create_control_plane_app(
 
     @app.get("/api/v1/get_server_capabilities")
     async def get_server_capabilities() -> dict[str, object]:
-        return {"supported_models": routes.capabilities()}
+        return {
+            "supported_models": routes.capabilities(),
+            "spindle_version": __version__,
+            "spindle_commit": source_commit(),
+        }
 
     @app.get("/api/v1/spindle/deployments")
     async def list_deployments():
@@ -336,6 +342,13 @@ def create_control_plane_app(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
             )
+        if body.optimizer_config is not None:
+            family = body.optimizer_config.get("type")
+            if family != "adamw":
+                logging.getLogger(__name__).warning(
+                    "rejected unsupported optimizer: %s", family
+                )
+                raise ValueError(f"optimizer family {family} is not supported")
         if body.parameterization is None:
             parameterization: Parameterization | None = (
                 "lora" if body.lora_config is not None else None
@@ -423,12 +436,23 @@ def create_control_plane_app(
         }
 
     @app.post("/api/v1/asample")
-    async def asample(body: SampleEnvelope) -> dict[str, str]:
+    async def asample(body: SampleEnvelope) -> dict[str, object]:
         request = body.model_dump(mode="json")
         if body.cache_affinity_key is None:
             request.pop("cache_affinity_key")
         request_id = await control_plane.submit_sample(request)
-        return {"request_id": request_id}
+        # Return one sequence id per sample, derived from the idempotent request
+        # id so a resubmitted sample gets the same ids. Tinker SDK 0.26 and
+        # later require them.
+        num_samples = request.get("num_samples", 1)
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int):
+            num_samples = 1
+        return {
+            "request_id": request_id,
+            "sample_sequence_ids": [
+                f"{request_id}:{index}" for index in range(max(num_samples, 0))
+            ],
+        }
 
     @app.get("/api/v1/samplers/{sampling_session_id}")
     async def get_sampler(sampling_session_id: str) -> dict[str, object]:
@@ -615,14 +639,15 @@ def create_control_plane_app(
                 fields["bytes"] = len(response.body)
             mark("cp.retrieve.end", request_id=body.request_id, **fields)
         if resolution.status == FutureResolutionStatus.PENDING:
-            return JSONResponse(
-                status_code=408,
-                content={
-                    "type": "try_again",
-                    "request_id": body.request_id,
-                    "queue_state": "active",
-                },
-            )
+            content = {
+                "type": "try_again",
+                "request_id": body.request_id,
+                "queue_state": "active",
+            }
+            if resolution.reason:
+                content["queue_state"] = "starting"
+                content["queue_state_reason"] = resolution.reason
+            return JSONResponse(status_code=408, content=content)
         if response is not None:
             return response
         if resolution.status == FutureResolutionStatus.RETRYABLE:

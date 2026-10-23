@@ -38,6 +38,7 @@ from .keys import (
     placement_claim_key,
     placement_key,
     sample_task_key,
+    sampler_warm_key,
     sampler_artifact_key,
     sampler_export_result_key,
     sampler_export_submission_key,
@@ -102,6 +103,25 @@ class FutureResolutionStatus(StrEnum):
     RETRYABLE = "retryable"
 
 
+STARTING_AFTER_S = 30
+# Pools scale to zero after five idle minutes by default.
+SAMPLER_WARM_FOR_S = 300
+SAMPLER_WARM_REFRESH_S = 60
+
+
+def starting_reason(role: str, model: str, waited: float) -> str:
+    minutes, seconds = divmod(int(waited), 60)
+    so_far = f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+    return (
+        f"starting a {role} for {model} ({so_far} so far). The first request for a "
+        "model starts GPUs and loads weights, which can take several minutes"
+    )
+
+
+def sampler_pool_key(session: SamplingSessionRecord) -> str:
+    return sampler_warm_key(session.engine_definition_id or session.base_model)
+
+
 @dataclass(frozen=True)
 class FutureResolution:
     request_id: str
@@ -109,6 +129,7 @@ class FutureResolution:
     result: object | None = None
     error: str | None = None
     category: str = "server"
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +180,7 @@ class ControlPlane:
         self.creation_error = creation_error
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
+        self._sampler_warm_at: dict[str, float] = {}
 
     async def create_session(
         self,
@@ -1118,7 +1140,11 @@ class ControlPlane:
         if record.request_id != request_id:
             raise RecordNotFound("future", request_id)
         if record.task_id is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if self.sampling_tasks is None:
             return FutureResolution(
                 request_id,
@@ -1133,8 +1159,13 @@ class ControlPlane:
                 error="sampling task was lost",
             )
         if state.status == SamplingTaskStatus.PENDING:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if state.status == SamplingTaskStatus.COMPLETE:
+            await self._mark_sampler_warm(session)
             return FutureResolution(
                 request_id,
                 FutureResolutionStatus.COMPLETE,
@@ -1144,6 +1175,49 @@ class ControlPlane:
             request_id,
             FutureResolutionStatus.FAILED,
             error=state.error,
+        )
+
+    async def _sampler_starting(
+        self, session: SamplingSessionRecord, record: SampleTaskRecord
+    ) -> str | None:
+        """Explain a slow sample while its pool hasn't recently completed one."""
+        waited = self.clock() - record.created_at
+        if waited < STARTING_AFTER_S:
+            return None
+        key = sampler_pool_key(session)
+        warm_at = self._sampler_warm_at.get(key)
+        if warm_at is None or self.clock() - warm_at >= SAMPLER_WARM_FOR_S:
+            value = await self.kv.get(key)
+            if value is not None:
+                warm_at = float(value["warm_at"])
+                self._sampler_warm_at[key] = warm_at
+        if warm_at is not None and self.clock() - warm_at < SAMPLER_WARM_FOR_S:
+            return None
+        return starting_reason("sampler", session.base_model, waited)
+
+    async def _mark_sampler_warm(self, session: SamplingSessionRecord) -> None:
+        key = sampler_pool_key(session)
+        warm_at = self._sampler_warm_at.get(key)
+        if warm_at is not None and self.clock() - warm_at < SAMPLER_WARM_REFRESH_S:
+            return
+        self._sampler_warm_at[key] = self.clock()
+        await self.kv.put(key, {"warm_at": self.clock()})
+
+    async def _trainer_starting(self, model: ModelRecord) -> str | None:
+        """Explain a slow creation while no trainer for its definition is running."""
+        waited = self.clock() - model.created_at
+        if waited < STARTING_AFTER_S:
+            return None
+        try:
+            active = await self.engines.active_instances(model.engine_definition_id)
+        except Exception:
+            return None
+        if any(instance.state == "running" for instance in active):
+            return None
+        return starting_reason(
+            "trainer",
+            str(model.spec.get("base_model") or model.engine_definition_id),
+            waited,
         )
 
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
@@ -1182,7 +1256,11 @@ class ControlPlane:
                 category="user",
             )
         if placement is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._trainer_starting(model),
+            )
         try:
             await self._live_instance(placement)
         except ModelLost:

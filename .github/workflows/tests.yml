@@ -8,9 +8,15 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Run the newest Tinker SDK release as a canary that flags protocol drift
+    # without blocking merges, because Spindle does not cap the SDK version.
+    continue-on-error: ${{ matrix.tinker == 'latest' }}
     strategy:
+      fail-fast: false
       matrix:
-        tinker: ["0.24.1", "0.25.0"]
+        # The package's minimum Tinker SDK, the release the server images pin,
+        # and the newest release.
+        tinker: ["0.24.1", "image-pin", "latest"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,6 +28,14 @@ jobs:
       # Runtime GPU dependencies live in the Modal image. Use CPU tensors here
       # so the loss, gradient, and FP32-head regressions also run in CI.
       - run: uv pip install --python .venv/bin/python torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-      - run: uv pip install --python .venv/bin/python "tinker==${{ matrix.tinker }}"
+      - name: Install the Tinker SDK under test
+        run: |
+          case "${{ matrix.tinker }}" in
+            latest) requirement="tinker" ;;
+            image-pin) requirement=$(sed -n 's/^TINKER_PACKAGE = "\(.*\)"$/\1/p' src/spindle/providers/modal/image_dependencies.py) ;;
+            *) requirement="tinker==${{ matrix.tinker }}" ;;
+          esac
+          test -n "$requirement"
+          uv pip install --python .venv/bin/python "$requirement" --upgrade-package tinker
       - run: uv run --no-sync pytest -q
       - run: uv build
