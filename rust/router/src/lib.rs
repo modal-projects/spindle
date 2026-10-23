@@ -1,7 +1,9 @@
 //! One scheduler per sampling process (`_execute_sample`'s container) and
 //! inference pool. The policy does no I/O; its caller owns transport.
 mod cache_wait;
+mod native;
 
+use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -421,6 +423,11 @@ impl Router {
     fn pending(&self) -> usize {
         self.reservations.len()
     }
+}
+
+#[pymodule]
+fn spindle_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<native::NativeRuntime>()
 }
 
 #[cfg(test)]
