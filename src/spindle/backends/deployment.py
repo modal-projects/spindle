@@ -74,6 +74,11 @@ SGLANG_MANAGED = {
 
 
 def backend_config(spec, asset_path="/assets/pending"):
+    if (
+        spec.trainer_max_clients_per_batch is not None
+        and spec.trainer_max_clients_per_batch < 1
+    ):
+        raise ValueError("trainer_max_clients_per_batch must be positive")
     if spec.backend == "megatron":
         if spec.trainer_nodes != 1:
             raise ValueError("multi-node training currently requires Miles")

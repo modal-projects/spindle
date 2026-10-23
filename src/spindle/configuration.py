@@ -46,6 +46,8 @@ class BaseConfig:
     trainer_disk_mib = 0
     trainer_max_instances = 1
     trainer_max_clients_per_instance = 1
+    # Clients whose forward_backward requests may share one trainer call; None packs all.
+    trainer_max_clients_per_batch = None
     trainer_timeout_s = 86400
     trainer_env = {}
     # A name from TRAINER_IMAGES in spindle.providers.modal.deployment_apps; empty uses the default.

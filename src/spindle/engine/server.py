@@ -74,6 +74,7 @@ class Operation:
     kind: OperationKind
     payload: OperationPayload
     encoded_payload: bytes | None = field(default=None, compare=False, repr=False)
+    queued_at: float = field(default_factory=time.monotonic, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class Engine:
         observer: Observer | None = None,
         sampler_persistence_concurrency: int = 1,
         max_forward_backward_batch: int | None = None,
+        max_forward_backward_models: int | None = None,
     ) -> None:
         if sampler_persistence_concurrency < 1:
             raise ValueError("sampler_persistence_concurrency must be positive")
@@ -130,6 +132,8 @@ class Engine:
             raise ValueError("result_retention_s must not be negative")
         if max_forward_backward_batch is not None and max_forward_backward_batch < 1:
             raise ValueError("max_forward_backward_batch must be positive")
+        if max_forward_backward_models is not None and max_forward_backward_models < 1:
+            raise ValueError("max_forward_backward_models must be positive")
         self.executor = executor
         self.observer = observer
         self._persistence_active: dict[str, int] = {}
@@ -139,6 +143,7 @@ class Engine:
         self.result_retention_s = result_retention_s
         self.sampler_persistence_concurrency = sampler_persistence_concurrency
         self.max_forward_backward_batch = max_forward_backward_batch
+        self.max_forward_backward_models = max_forward_backward_models
         self._sampler_inflight: set[str] = set()
         self._serial_persistence_inflight: set[OperationKind] = set()
         self.draining = False
@@ -774,13 +779,23 @@ class Engine:
                 ready.append(operation)
         if not ready:
             return None
+        # Short operations go first so a client can start its next rollouts; then oldest first.
+        ready.sort(
+            key=lambda operation: (
+                operation.kind == OperationKind.FORWARD_BACKWARD,
+                operation.queued_at,
+            )
+        )
 
         selected = [ready[0]]
         if ready[0].kind == OperationKind.FORWARD_BACKWARD:
             limit = self.max_forward_backward_batch
+            models = self.max_forward_backward_models
             key = self._forward_backward_batch_key(ready[0])
             for operation in ready[1:]:
                 if limit is not None and len(selected) >= limit:
+                    break
+                if models is not None and len(selected) >= models:
                     break
                 if (
                     operation.kind == OperationKind.FORWARD_BACKWARD

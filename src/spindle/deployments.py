@@ -127,6 +127,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_disk_mib,
             recipe.trainer_max_instances,
             recipe.trainer_max_clients_per_instance,
+            recipe.trainer_max_clients_per_batch,
             recipe.trainer_timeout_s,
             recipe.trainer_env,
             recipe.trainer_image,
