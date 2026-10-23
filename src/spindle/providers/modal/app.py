@@ -88,7 +88,6 @@ MODEL_ASSET_ROOT = "/assets"
 SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
 FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
 FFT_POOL_TOUCH_INTERVAL = 60.0
-WEIGHTS_POLL_INTERVAL = 10.0
 LORA_POOL_CHECK_INTERVAL = 60.0
 SWEEP_PERIOD = modal.Period(seconds=SETTINGS.recipe.sweep_interval_s)
 CHECKPOINT_READ_LOCK = asyncio.Lock()
@@ -348,13 +347,19 @@ async def _start_weights_download(definition_id: str) -> float | None:
         return record["started_at"]
 
 
-async def _wait_for_weights(definition_id: str) -> bool:
-    """Wait out a running base-weight download; True if there was one."""
-    waited = False
-    while await _weights_download(definition_id) is not None:
-        waited = True
-        await asyncio.sleep(WEIGHTS_POLL_INTERVAL)
-    return waited
+async def _ensure_weights_ready(definition_id: str) -> None:
+    """Join or start the base-weight download and wait for it to finish."""
+    if await _start_weights_download(definition_id) is None:
+        return
+    record = await shared_kv().get(_weights_call_key(definition_id))
+    try:
+        await modal.FunctionCall.from_id(record["call_id"]).get.aio()
+    except Exception as exc:
+        if await _weights_are_ready(definition_id):
+            return
+        raise WeightsDownloadFailed(
+            f"Downloading weights for {definition_id} failed: {exc}"
+        ) from exc
 
 
 async def _trainer_booted(registry, definition_id: str) -> bool:
@@ -422,7 +427,8 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         raise ValueError("rollout GPU count must be divisible by tensor parallel size")
     rollout_data_parallel_size = rollout_world_size // rollout_tensor_parallel_size
     stop_token_ids_only = bool(definition.inference_settings.get("skip_tokenizer_init"))
-    waited = task["model_id"] is None and await _wait_for_weights(definition_id)
+    if task["model_id"] is None:
+        await _ensure_weights_ready(definition_id)
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
@@ -452,7 +458,11 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             version=int(task["publish_version"]),
         )
     )
-    if waited:
+    # ensure_pool skips the base pool while weights download; deploy it here if
+    # nothing has, whether or not this call waited for the download.
+    if task["model_id"] is None and (
+        await fft_pool_kv().get(f"fft_pool:{spec.app_name}") is None
+    ):
         await ensure_fft_pool.remote.aio(spec.as_dict())
     await _touch_fft_pool(spec)
     return await sample_task(

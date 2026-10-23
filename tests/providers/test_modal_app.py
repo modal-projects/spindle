@@ -420,14 +420,27 @@ def test_trainers_wait_for_the_weight_download(monkeypatch) -> None:
     assert reconciled == [LORA_DEFINITION]
 
 
-def test_execute_sample_waits_for_the_weight_download(monkeypatch) -> None:
+@pytest.mark.parametrize("downloading", [True, False])
+def test_execute_sample_waits_for_weights_and_deploys_the_base_pool(
+    monkeypatch, downloading
+) -> None:
+    # Without a download in flight, the pool can still be missing: ensure_pool
+    # skipped it while weights downloaded, and the download finished since.
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    downloads = [100.0, 100.0, None]
+    registry = InMemoryKeyValueStore()
     events = []
 
-    async def download(definition_id: str) -> float | None:
-        events.append("poll")
-        return downloads.pop(0)
+    async def start(definition_id: str) -> float | None:
+        if not downloading:
+            return None
+        await registry.put(
+            modal_app._weights_call_key(definition_id),
+            {"call_id": "fc-1", "started_at": 1.0},
+        )
+        return 1.0
+
+    async def finished():
+        events.append("wait")
 
     async def ensure(spec: dict) -> str:
         events.append("deploy")
@@ -442,8 +455,9 @@ def test_execute_sample_waits_for_the_weight_download(monkeypatch) -> None:
 
     monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
     monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
-    monkeypatch.setattr(modal_app, "WEIGHTS_POLL_INTERVAL", 0)
-    monkeypatch.setattr(modal_app, "_weights_download", download)
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(modal_app, "_start_weights_download", start)
+    call = SimpleNamespace(get=SimpleNamespace(aio=finished))
     monkeypatch.setattr(
         modal_app,
         "ensure_fft_pool",
@@ -452,8 +466,9 @@ def test_execute_sample_waits_for_the_weight_download(monkeypatch) -> None:
     monkeypatch.setattr(modal_app, "pool_gateway", gateway)
     monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
     monkeypatch.setattr(modal_app, "sample_task", sample)
-    asyncio.run(modal_app.execute_sample.local(base_task(FULL_DEFINITION)))
-    assert events == ["poll", "poll", "poll", "deploy", "sample"]
+    with patch.object(modal.FunctionCall, "from_id", return_value=call):
+        asyncio.run(modal_app.execute_sample.local(base_task(FULL_DEFINITION)))
+    assert events == (["wait"] if downloading else []) + ["deploy", "sample"]
 
 
 def base_task(definition):
@@ -561,8 +576,11 @@ def test_execute_sample_routes_base_session_without_version(monkeypatch) -> None
     monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-a")
     monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-a")
     weights_ready(monkeypatch, FULL_DEFINITION)
+    pools = InMemoryKeyValueStore()
+    base = FFTPoolSpec.base(FULL_DEFINITION)
+    asyncio.run(pools.put(f"fft_pool:{base.app_name}", base.as_dict()))
     monkeypatch.setattr(modal_app, "pool_gateway", gateway)
-    monkeypatch.setattr(modal_app, "fft_pool_kv", InMemoryKeyValueStore)
+    monkeypatch.setattr(modal_app, "fft_pool_kv", lambda: pools)
     monkeypatch.setattr(modal_app, "sample_task", sample)
     task = {
         "engine_definition_id": FULL_DEFINITION,
