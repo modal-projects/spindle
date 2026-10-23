@@ -76,6 +76,10 @@ Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/
 
 Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size`.
 
+### Images
+
+`trainer_image` selects a named trainer image instead of the backend default; the names are listed in [deployment_apps.py](../src/spindle/providers/modal/deployment_apps.py). The multi-LoRA actor runs on Miles v0.1.1 and v0.1.2.
+
 ## Prepare and launch
 
 ~~~text

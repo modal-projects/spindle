@@ -235,7 +235,8 @@ class MilesRuntime:
 
         install_bridge_replay(tinker_runtime)
         _configure_actor_spec(train_specs)
-        _allow_context_parallel_multi_lora(lora_arguments)
+        if create_trainer_handles is None:
+            _allow_context_parallel_multi_lora(lora_arguments)
         architecture = (
             shlex.split(load_model_args(self.config.model_type))
             if self.config.model_type
@@ -434,7 +435,7 @@ def _configure_actor_spec(train_specs) -> None:
 
 
 def _allow_context_parallel_multi_lora(lora_arguments) -> None:
-    """Miles rejects multi-LoRA with CP>1 because its Tinker losses zip
+    """Miles v0.1.1 rejects multi-LoRA with CP>1 because its Tinker losses zip
     full-length per-datum vectors against CP-sharded log probs. The Spindle actor
     gathers those log probs back to full response length before the loss runs,
     so the guard does not apply to this path."""

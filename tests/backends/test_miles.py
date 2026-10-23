@@ -222,6 +222,32 @@ def test_config_exports_lora_through_the_raw_converter() -> None:
         _config(megatron_to_hf_mode="direct").validate()
 
 
+def test_config_wildcard_targets_serve_by_module_suffix() -> None:
+    targets = (
+        "layers.*.attn.wq_a",
+        "layers.*.attn.wkv",
+        "layers.*.attn.wq_b",
+        "layers.*.attn.wo_b",
+        "layers.*.ffn.shared_experts.w1",
+        "layers.*.ffn.shared_experts.w2",
+        "layers.*.ffn.shared_experts.w3",
+    )
+    config = _config(target_modules=targets)
+
+    assert config.peft_target_modules == (
+        "attn.wq_a",
+        "attn.wkv",
+        "attn.wq_b",
+        "attn.wo_b",
+        "ffn.shared_experts.w1",
+        "ffn.shared_experts.w2",
+        "ffn.shared_experts.w3",
+    )
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--target-modules") + 1] == ",".join(targets)
+    assert lora_target_flags(targets) == (True, True, False)
+
+
 def test_config_context_parallel_topology() -> None:
     config = _config(
         actor_num_gpus_per_node=8,
@@ -289,6 +315,38 @@ def test_config_rejects_non_divisible_data_parallel_topology() -> None:
 
     with pytest.raises(ValueError, match="must be a multiple"):
         config.validate()
+
+
+def test_default_unembed_request_is_frozen_without_an_unembed_target(tmp_path) -> None:
+    backend = MilesCommandBackend(
+        _config(
+            target_modules=("linear_qkv", "linear_proj", "linear_fc1", "linear_fc2")
+        ),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=FakeMilesRuntime(),
+    )
+    stock = ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=8, train_unembed=True),
+    )
+    backend.accept_model("model-a", stock)
+    assert backend.jobs["model-a"].train_unembed is False
+    backend.accept_model("model-a", stock)
+
+    targeted = _backend(tmp_path)
+    targeted.accept_model("model-a", stock)
+    assert targeted.jobs["model-a"].train_unembed is True
+
+    no_mlp = ModelSpec(
+        base_model="Qwen/Qwen3-4B",
+        parameterization="lora",
+        lora_config=LoraConfig(rank=8, train_mlp=False),
+    )
+    with pytest.raises(ValueError, match="must match the deployment"):
+        backend.accept_model("model-b", no_mlp)
 
 
 def test_backend_routes_batches_and_preserves_per_model_state(tmp_path) -> None:
