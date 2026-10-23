@@ -17,11 +17,21 @@ from spindle.configuration import BaseConfig
 
 # Modal's smallest ephemeral disk request.
 MIN_EPHEMERAL_DISK_MIB = 524_288
-INFERENCE_GPU_OVERRIDABLE = {"model_weights", "weights_revision", "sglang_cfg", "inference_env"}
+INFERENCE_GPU_OVERRIDABLE = {
+    "model_weights",
+    "weights_revision",
+    "sglang_cfg",
+    "inference_env",
+}
 # Written into each downloaded weights directory once it is complete.
 WEIGHTS_MARKER = ".spindle-weights-revision"
 # The frontend routes every sampler request with the base deployment's values.
-SHARED_SERVING_SETTINGS = ("tp_size", "dp_size", "enable_dp_attention", "skip_tokenizer_init")
+SHARED_SERVING_SETTINGS = (
+    "tp_size",
+    "dp_size",
+    "enable_dp_attention",
+    "skip_tokenizer_init",
+)
 
 
 def gpu_family(gpu: str) -> str:
@@ -80,7 +90,9 @@ class DeploymentConfig(BaseModel):
         gpus = [gpus] if isinstance(gpus, str) else gpus
         for gpu, overrides in self.recipe.inference_gpu_overrides.items():
             if gpu not in gpus:
-                raise ValueError(f"inference_gpu_overrides: {gpu} is not in inference_gpu")
+                raise ValueError(
+                    f"inference_gpu_overrides: {gpu} is not in inference_gpu"
+                )
             keys = {path.split(".")[0] for path in overrides}
             if keys - INFERENCE_GPU_OVERRIDABLE:
                 unknown = sorted(keys - INFERENCE_GPU_OVERRIDABLE)
@@ -90,9 +102,13 @@ class DeploymentConfig(BaseModel):
                 raise ValueError("only LoRA samplers can serve other weights")
             serving = self._with_overrides(overrides)
             for key in SHARED_SERVING_SETTINGS:
-                if serving.inference_settings.get(key) != self.inference_settings.get(key):
+                if serving.inference_settings.get(key) != self.inference_settings.get(
+                    key
+                ):
                     raise ValueError(f"inference_gpu_overrides cannot change {key}")
-            if not all(isinstance(v, str) for v in serving.recipe.inference_env.values()):
+            if not all(
+                isinstance(v, str) for v in serving.recipe.inference_env.values()
+            ):
                 raise ValueError("inference_env values must be strings")
         self.weight_sets()
 

@@ -334,7 +334,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
             self.sglang = None
             gpus = log_scheduled_gpus("sampler")
             if recipe.inference_gpu_overrides and not gpus:
-                raise RuntimeError("cannot read the GPU type for inference_gpu_overrides")
+                raise RuntimeError(
+                    "cannot read the GPU type for inference_gpu_overrides"
+                )
             serving = deployment.for_inference_gpu(gpus[0] if gpus else "")
             if serving.asset_path != deployment.asset_path:
                 wait_for_weights(

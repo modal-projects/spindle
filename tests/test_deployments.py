@@ -154,7 +154,10 @@ def test_deepseek_v41_lora_recipe():
 def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
     row = resolved(recipe("deepseek-v41-flash-lora-32k"))
     miles = MilesBackendConfig(**row.trainer_settings["miles"])
-    assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (8, 16)
+    assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (
+        8,
+        16,
+    )
     assert row.inference_settings["context_length"] == 32768
 
 
@@ -215,7 +218,12 @@ def test_inference_gpu_overrides_apply_only_to_samplers_on_that_gpu():
     [
         (None, "B300", {"H200": H200_WEIGHTS}, "not in inference_gpu"),
         (None, ["B300", "H200"], {"H200": {"trainer_gpu": "H200"}}, "cannot set"),
-        (None, ["B300", "H200"], {"H200": {"weights_revision": "abc"}}, "different repo"),
+        (
+            None,
+            ["B300", "H200"],
+            {"H200": {"weights_revision": "abc"}},
+            "different repo",
+        ),
         (None, ["B300", "H200"], {"H200": {"inference_env.X": 1}}, "strings"),
         (None, ["B300", "H200"], {"H200": {"sglang_cfg.dp_size": 2}}, "dp_size"),
         ("qwen35-4b-fft-64k", ["H200", "B300"], {"B300": H200_WEIGHTS}, "LoRA"),
