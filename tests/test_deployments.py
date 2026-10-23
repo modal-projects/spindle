@@ -152,6 +152,15 @@ def test_deepseek_v41_lora_recipe():
     assert row.for_inference_gpu("NVIDIA B200").asset_path == row.asset_path
 
 
+def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
+    row = resolved(recipe("deepseek-v41-flash-lora-32k"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (8, 16)
+    assert miles.cli_options["make_vocab_size_divisible_by"] == 32
+    assert row.inference_settings["context_length"] == 32768
+    assert row.weight_sets() == resolved(recipe("deepseek-v41-flash-lora-8k")).weight_sets()
+
+
 def test_asset_paths_follow_the_model():
     a = resolved()
     assert a.asset_path == f"/assets/{a.recipe.model}"
