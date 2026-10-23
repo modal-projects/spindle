@@ -71,6 +71,7 @@ from .lora_pool import (
 )
 from .sampling import ModalSamplingTaskPlatform
 from .trainer_reconciler import (
+    TRANSIENT_POLL_ERRORS,
     complete_reconcile,
     pending_reconciliations,
     reconcile_trainers,
@@ -94,6 +95,8 @@ CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
 _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
+_weights_ready: set[str] = set()
+_weights_starts: dict[str, asyncio.Lock] = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
@@ -179,7 +182,7 @@ proxy_secret = modal.Secret.from_name(
     max_containers=1,
     retries=2,
 )
-def prepare_model_assets(definition_id: str) -> None:
+async def prepare_model_assets(definition_id: str) -> None:
     definition = module_for(definition_id)
     checkpoint = os.path.normpath(definition.asset_path)
     if (
@@ -188,15 +191,24 @@ def prepare_model_assets(definition_id: str) -> None:
     ):
         raise ValueError(f"invalid model asset path: {checkpoint}")
     started = time.time()
-    snapshot_download(
+    await asyncio.to_thread(
+        snapshot_download,
         repo_id=definition.weights_repo,
         revision=definition.recipe.weights_revision or None,
         local_dir=checkpoint,
     )
-    model_assets.commit()
+    await model_assets.commit.aio()
     StartupTimeline("model-assets", origin=started, labels={"path": checkpoint}).mark(
         "assets_ready"
     )
+    await shared_kv().put(_weights_ready_key(definition_id), time.time())
+
+
+@app.function(image=image)
+async def start_weights_download(definition_id: str) -> bool:
+    """Start the base-weight download for `spindle deploy`; True while it runs."""
+    module_for(definition_id)
+    return await _start_weights_download(definition_id) is not None
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
@@ -243,16 +255,112 @@ async def ensure_lora_pool(spec: dict) -> str:
     return gateway
 
 
-async def _ensure_model_assets(definition_id: str) -> None:
-    """Download the base weights once per definition and weights revision; later
-    calls skip the container start."""
+class WeightsDownloadFailed(ValueError):
+    pass
+
+
+def _weights_id(definition_id: str) -> str:
+    # A changed weights repo or revision is a new download.
     definition = module_for(definition_id)
     revision = definition.recipe.weights_revision
-    key = f"model_assets_ready:{definition_id}:{definition.weights_repo}@{revision}"
-    if await shared_kv().get(key) is not None:
+    return f"{definition_id}:{definition.weights_repo}@{revision}"
+
+
+def _weights_ready_key(definition_id: str) -> str:
+    return f"model_assets_ready:{_weights_id(definition_id)}"
+
+
+def _weights_call_key(definition_id: str) -> str:
+    return f"model_assets_call:{_weights_id(definition_id)}"
+
+
+async def _weights_are_ready(definition_id: str) -> bool:
+    weights = _weights_id(definition_id)
+    if weights in _weights_ready:
+        return True
+    if await shared_kv().get(_weights_ready_key(definition_id)) is None:
+        return False
+    _weights_ready.add(weights)
+    return True
+
+
+async def _call_running(call_id: str) -> bool:
+    """Whether a spawned call is still running; raises its error if it failed."""
+    try:
+        await modal.FunctionCall.from_id(call_id).get.aio(timeout=0)
+    except modal.exception.OutputExpiredError:
+        return False
+    except (TimeoutError, modal.exception.TimeoutError):
+        return True
+    except TRANSIENT_POLL_ERRORS:
+        logging.getLogger(__name__).exception("weights download poll %s", call_id)
+        return True
+    return False
+
+
+async def _weights_download(definition_id: str) -> float | None:
+    """When the running base-weight download started, or None if none is running."""
+    if await _weights_are_ready(definition_id):
+        return None
+    record = await shared_kv().get(_weights_call_key(definition_id))
+    if record is None:
+        return None
+    try:
+        running = await _call_running(record["call_id"])
+    except Exception as exc:
+        if await _weights_are_ready(definition_id):
+            return None
+        raise WeightsDownloadFailed(
+            f"Downloading weights for {definition_id} failed: {exc}"
+        ) from exc
+    return float(record["started_at"]) if running else None
+
+
+async def _start_weights_download(definition_id: str) -> float | None:
+    """Join the running download, or start one unless the weights are ready."""
+    lock = _weights_starts.setdefault(definition_id, asyncio.Lock())
+    async with lock:
+        if await _weights_are_ready(definition_id):
+            return None
+        store = shared_kv()
+        key = _weights_call_key(definition_id)
+        stale = await store.get(key)
+        if stale is not None:
+            try:
+                if await _call_running(stale["call_id"]):
+                    return float(stale["started_at"])
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "restarting failed weights download %s", definition_id
+                )
+            if await _weights_are_ready(definition_id):
+                return None
+        call = await prepare_model_assets.spawn.aio(definition_id)
+        record = {"call_id": call.object_id, "started_at": time.time()}
+        inserted = await store.put_if_absent(key, record)
+        if not inserted.created:
+            existing = inserted.value
+            if stale is None or existing["call_id"] != stale["call_id"]:
+                # Another API server started one first; join it instead.
+                await call.cancel.aio()
+                return float(existing["started_at"])
+            await store.put(key, record)
+        return record["started_at"]
+
+
+async def _ensure_weights_ready(definition_id: str) -> None:
+    """Join or start the base-weight download and wait for it to finish."""
+    if await _start_weights_download(definition_id) is None:
         return
-    await prepare_model_assets.remote.aio(definition_id)
-    await shared_kv().put(key, time.time())
+    record = await shared_kv().get(_weights_call_key(definition_id))
+    try:
+        await modal.FunctionCall.from_id(record["call_id"]).get.aio()
+    except Exception as exc:
+        if await _weights_are_ready(definition_id):
+            return
+        raise WeightsDownloadFailed(
+            f"Downloading weights for {definition_id} failed: {exc}"
+        ) from exc
 
 
 async def _trainer_booted(registry, definition_id: str) -> bool:
@@ -320,6 +428,8 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         raise ValueError("rollout GPU count must be divisible by tensor parallel size")
     rollout_data_parallel_size = rollout_world_size // rollout_tensor_parallel_size
     stop_token_ids_only = bool(definition.inference_settings.get("skip_tokenizer_init"))
+    if task["model_id"] is None:
+        await _ensure_weights_ready(definition_id)
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
@@ -349,6 +459,12 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             version=int(task["publish_version"]),
         )
     )
+    # ensure_pool skips the base pool while weights download; deploy it here if
+    # nothing has, whether or not this call waited for the download.
+    if task["model_id"] is None and (
+        await fft_pool_kv().get(f"fft_pool:{spec.app_name}") is None
+    ):
+        await ensure_fft_pool.remote.aio(spec.as_dict())
     await _touch_fft_pool(spec)
     return await sample_task(
         task,
@@ -407,7 +523,11 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
 
     async def run(definition_id: str, token: str) -> None:
         parameterization = parameterization_for(definition_id)
-        if parameterization is None or await deployment_error(definition_id):
+        if (
+            parameterization is None
+            or await deployment_error(definition_id)
+            or not await _weights_are_ready(definition_id)
+        ):
             await complete_reconcile(definition_id, token)
             return
         module = module_for(definition_id)
@@ -509,7 +629,8 @@ def _plane():
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
-        await _ensure_model_assets(model.engine_definition_id)
+        if await _start_weights_download(model.engine_definition_id) is not None:
+            return
         if parameterization == "full":
             await ensure_fft_pool.spawn.aio(_latest_pool(model).as_dict())
         elif await _trainer_booted(kv, model.engine_definition_id):
@@ -521,12 +642,15 @@ def _plane():
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
         parameterization = parameterization_for(definition_id)
-        if parameterization == "lora":
-            if session.model_id is None:
-                await _ensure_model_assets(definition_id)
-            await _ready_lora_pool(LoraPoolSpec(definition_id))
+        if parameterization is None:
             return
-        if parameterization != "full":
+        if (
+            session.model_id is None
+            and await _start_weights_download(definition_id) is not None
+        ):
+            return
+        if parameterization == "lora":
+            await _ready_lora_pool(LoraPoolSpec(definition_id))
             return
         if session.model_id is None:
             pool = FFTPoolSpec.base(definition_id)
@@ -543,8 +667,6 @@ def _plane():
         key = f"fft_pool:{pool.app_name}"
         record = await registry.get(key)
         if record is None:
-            if session.model_id is None:
-                await _ensure_model_assets(definition_id)
             if pool.latest:
                 pool = _latest_pool(await _model_record(kv, session.model_id))
             await ensure_fft_pool.remote.aio(pool.as_dict())
@@ -572,6 +694,7 @@ def _plane():
         session_idle_timeout=SESSION_IDLE_TIMEOUT,
         ensure_sampling_pool=ensure_pool,
         prepare_model=prepare_model,
+        downloading_weights=_weights_download,
         creation_error=deployment_error,
         sampling_task_stores=task_stores,
         read_checkpoint_metadata=_read_checkpoint_metadata,

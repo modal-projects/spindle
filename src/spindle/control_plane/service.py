@@ -125,6 +125,13 @@ def starting_reason(role: str, model: str, waited: float) -> str:
     )
 
 
+def downloading_reason(model: str, waited: float) -> str:
+    return (
+        f"downloading weights for {model} ({_elapsed(waited)} so far). Weights "
+        "download once per model; large models can take an hour or more"
+    )
+
+
 def gpu_capacity_reason(role: str, model: str, gpus: str, waited: float) -> str:
     return (
         f"waiting for {gpus} GPUs to become available to start a {role} for {model} "
@@ -171,6 +178,7 @@ class ControlPlane:
         | None = None,
         reconcile_trainers: Callable[[str], Awaitable[bool | None]] | None = None,
         prepare_model: Callable[[ModelRecord], Awaitable[None]] | None = None,
+        downloading_weights: Callable[[str], Awaitable[float | None]] | None = None,
         trainer_autoscaling: Callable[[str], bool] = lambda _: False,
         list_checkpoints: CheckpointListing | None = None,
         delete_checkpoint: Callable[[str], Awaitable[None]] | None = None,
@@ -189,6 +197,7 @@ class ControlPlane:
         self.read_checkpoint_metadata = read_checkpoint_metadata
         self.reconcile_trainers = reconcile_trainers
         self.prepare_model = prepare_model
+        self.downloading_weights = downloading_weights
         self.trainer_autoscaling = trainer_autoscaling
         self.list_checkpoints = list_checkpoints
         self.delete_checkpoint = delete_checkpoint
@@ -1198,6 +1207,15 @@ class ControlPlane:
         self, session: SamplingSessionRecord, record: SampleTaskRecord
     ) -> str | None:
         """Explain a slow sample while its pool hasn't recently completed one."""
+        if session.model_id is None:
+            try:
+                downloading = await self._downloading(
+                    session.engine_definition_id, session.base_model
+                )
+            except ValueError:
+                downloading = None
+            if downloading:
+                return downloading
         waited = self.clock() - record.created_at
         if waited < STARTING_AFTER_S:
             return None
@@ -1222,6 +1240,10 @@ class ControlPlane:
 
     async def _trainer_starting(self, model: ModelRecord) -> str | None:
         """Explain a slow creation while no trainer for its definition is running."""
+        base_model = str(model.spec.get("base_model") or model.engine_definition_id)
+        downloading = await self._downloading(model.engine_definition_id, base_model)
+        if downloading:
+            return downloading
         waited = self.clock() - model.created_at
         if waited < STARTING_AFTER_S:
             return None
@@ -1231,7 +1253,6 @@ class ControlPlane:
             return None
         if any(instance.state == "running" for instance in active):
             return None
-        base_model = str(model.spec.get("base_model") or model.engine_definition_id)
         if gpus := await self._trainer_gpu_wait(model.engine_definition_id):
             return gpu_capacity_reason("trainer", base_model, gpus, waited)
         return starting_reason("trainer", base_model, waited)
@@ -1244,6 +1265,14 @@ class ControlPlane:
         except Exception:
             logging.getLogger(__name__).exception("trainer GPU wait %s", definition_id)
             return None
+
+    async def _downloading(self, definition_id: str | None, model: str) -> str | None:
+        if self.downloading_weights is None or definition_id is None:
+            return None
+        started = await self.downloading_weights(definition_id)
+        if started is None:
+            return None
+        return downloading_reason(model, self.clock() - started)
 
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
         if self.sampling_task_stores is None:
@@ -1261,6 +1290,9 @@ class ControlPlane:
                 error = await self.creation_error(model.engine_definition_id)
                 if error:
                     raise ValueError(error)
+            reason = (
+                None if placement is not None else await self._trainer_starting(model)
+            )
         except ModelLost:
             return FutureResolution(
                 request_id,
@@ -1282,9 +1314,7 @@ class ControlPlane:
             )
         if placement is None:
             return FutureResolution(
-                request_id,
-                FutureResolutionStatus.PENDING,
-                reason=await self._trainer_starting(model),
+                request_id, FutureResolutionStatus.PENDING, reason=reason
             )
         try:
             await self._live_instance(placement)

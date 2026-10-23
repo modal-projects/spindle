@@ -34,7 +34,7 @@ class Config(BaseConfig):
 config = Config()
 ```
 
-See the [9B LoRA recipe](../src/spindle/configs/qwen35_9b_lora_16k.py) and [4B FFT recipe](../src/spindle/configs/qwen35_4b_fft_64k.py) for complete examples. Weights are downloaded to `/assets/<model id>`.
+See the [9B LoRA recipe](../src/spindle/configs/qwen35_9b_lora_16k.py) and [4B FFT recipe](../src/spindle/configs/qwen35_4b_fft_64k.py) for complete examples. `spindle deploy` downloads weights to `/assets/<model id>` in the background; requests that arrive before the download finishes wait for it.
 
 ## Variants
 

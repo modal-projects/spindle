@@ -328,19 +328,22 @@ async def _stop_empty(
         stopped += 1
 
 
+TRANSIENT_POLL_ERRORS = (
+    modal.exception.AuthError,
+    modal.exception.ConnectionError,
+    modal.exception.InternalError,
+    modal.exception.ResourceExhaustedError,
+    modal.exception.ServiceError,
+    OSError,
+)
+
+
 async def _call_finished(call_id: str) -> bool:
     try:
         await modal.FunctionCall.from_id(call_id).get.aio(timeout=0)
     except TimeoutError:
         return False
-    except (
-        modal.exception.AuthError,
-        modal.exception.ConnectionError,
-        modal.exception.InternalError,
-        modal.exception.ResourceExhaustedError,
-        modal.exception.ServiceError,
-        OSError,
-    ):
+    except TRANSIENT_POLL_ERRORS:
         _log.exception("trainer reconcile liveness poll %s", call_id)
         return False
     except Exception:

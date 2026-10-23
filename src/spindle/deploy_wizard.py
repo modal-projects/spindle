@@ -391,7 +391,7 @@ def show_plan(
 def deploy_with_progress(
     console: Console, steps, background=(), *, retry_command: str
 ) -> None:
-    """One row per step, in order; `background` (label, future) rows finish last and only warn."""
+    """One row per step, in order, with any note it returns; `background` (label, future) rows finish last and only warn."""
     console.print(
         "[dim]The first deploy in a workspace builds container images, which can take several minutes.[/dim]"
     )
@@ -404,7 +404,7 @@ def deploy_with_progress(
 
     def run(task, label, call):
         try:
-            call()
+            note = call()
         except Exception as exc:
             progress.update(task, description=f"[red]{label} failed[/red]")
             output = getattr(exc, "stderr", None) or getattr(exc, "stdout", None)
@@ -414,6 +414,8 @@ def deploy_with_progress(
                 f"Rerun with full Modal logs:\n  [bold]{retry_command}[/bold]"
             )
             raise
+        if note:
+            progress.update(task, description=f"{label} [dim]{escape(note)}[/dim]")
         progress.update(task, completed=1)
 
     def mark_done(task, future):
