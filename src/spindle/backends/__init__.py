@@ -1,9 +1,12 @@
 __all__ = [
     "Backend",
+    "DimuonParams",
     "ForwardBatch",
     "ForwardItem",
     "LossFn",
     "ModelSpec",
+    "OptimizerFamily",
+    "OptimizerParams",
     "SamplerPublication",
 ]
 

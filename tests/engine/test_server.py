@@ -373,16 +373,34 @@ def test_operations_share_one_sequence_per_model() -> None:
     asyncio.run(run())
 
 
-def test_optim_step_rejects_non_adam_optimizer_params() -> None:
+def test_optim_step_accepts_dimuon_optimizer_params() -> None:
     async def run() -> None:
         server = Engine(EchoExecutor())
         await server.accept_model("model-a", {})
-        with pytest.raises(ValueError, match="optimizer family dimuon"):
+        request_id = await server.optim_step(
+            {
+                "model_id": "model-a",
+                "seq_id": 1,
+                "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+            }
+        )
+        state = await server.retrieve_future(request_id, timeout=1.0)
+        assert state.status == FutureStatus.COMPLETE
+        await server.close()
+
+    asyncio.run(run())
+
+
+def test_optim_step_rejects_unknown_optimizer_family() -> None:
+    async def run() -> None:
+        server = Engine(EchoExecutor())
+        await server.accept_model("model-a", {})
+        with pytest.raises(ValueError, match="optimizer family lion"):
             await server.optim_step(
                 {
                     "model_id": "model-a",
                     "seq_id": 1,
-                    "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+                    "optimizer_params": {"type": "lion", "learning_rate": 1e-3},
                 }
             )
         request_id = await server.optim_step(

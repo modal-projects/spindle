@@ -13,7 +13,7 @@ from tinker.types._pydantic_types.forward_backward_input import (
 from tinker.types._pydantic_types.tensor_data import TensorData as TensorDataModel
 from tinker.types.forward_backward_input import ForwardBackwardInput
 
-from spindle.backends.contract import LossFn, ModelSpec
+from spindle.backends.contract import DimuonParams, LossFn, ModelSpec
 
 from .api import OperationKind
 
@@ -52,6 +52,7 @@ class SkipPayload(OperationPayloadModel):
 OperationPayload: TypeAlias = (
     ForwardBackwardInput
     | AdamParams
+    | DimuonParams
     | LoadCheckpointPayload
     | SaveCheckpointPayload
     | SaveWeightsForSamplerPayload
@@ -61,7 +62,7 @@ OperationPayload: TypeAlias = (
 _PAYLOAD_TYPES = {
     OperationKind.FORWARD: ForwardBackwardInput,
     OperationKind.FORWARD_BACKWARD: ForwardBackwardInput,
-    OperationKind.OPTIM_STEP: AdamParams,
+    OperationKind.OPTIM_STEP: (AdamParams, DimuonParams),
     OperationKind.LOAD_WEIGHTS: LoadCheckpointPayload,
     OperationKind.SAVE_WEIGHTS: SaveCheckpointPayload,
     OperationKind.SAVE_WEIGHTS_FOR_SAMPLER: SaveWeightsForSamplerPayload,
@@ -100,8 +101,7 @@ def parse_operation_payload(
             loss_fn_config=parsed.loss_fn_config,
         )
     if kind == OperationKind.OPTIM_STEP:
-        _reject_non_adam_params(raw)
-        return AdamParams.model_validate(raw.get("adam_params") or {})
+        return parse_optimizer_params(raw)
     if kind == OperationKind.LOAD_WEIGHTS:
         known = {
             "path",
@@ -161,31 +161,40 @@ def parse_operation_payload(
     raise ValueError(f"unsupported operation: {kind.value}")
 
 
-def _reject_non_adam_params(raw: Mapping[str, Any]) -> None:
+def parse_optimizer_params(raw: Mapping[str, Any]) -> AdamParams | DimuonParams:
+    """Parses optim_step hyperparameters from ``adam_params`` or a Dimuon ``optimizer_params``.
+
+    Raises ValueError when both keys are present, when ``optimizer_params`` names a
+    family other than dimuon, or when another ``*_params`` key is present.
+    """
+    adam_params = raw.get("adam_params")
     optimizer_params = raw.get("optimizer_params")
-    if optimizer_params is not None:
-        family = (
-            optimizer_params.get("type")
-            if isinstance(optimizer_params, Mapping)
-            else None
-        )
-        log.warning("rejected unsupported optimizer: %s", family or "unknown")
+    if adam_params is not None and optimizer_params is not None:
         raise ValueError(
-            f"optimizer family {family or 'unknown'} is not supported; "
-            "optim_step accepts only adam_params"
+            "optim_step accepts exactly one of adam_params or optimizer_params"
         )
-    if raw.get("adam_params") is None:
-        other = sorted(
-            key
-            for key, value in raw.items()
-            if key.endswith("_params") and value is not None
+    other = sorted(
+        key
+        for key, value in raw.items()
+        if key.endswith("_params")
+        and key not in {"adam_params", "optimizer_params"}
+        and value is not None
+    )
+    if other:
+        log.warning("rejected unsupported optimizer: %s", ",".join(other))
+        raise ValueError(
+            f"optim_step parameters {other} are not supported; "
+            "optim_step accepts adam_params or optimizer_params"
         )
-        if other:
-            log.warning("rejected unsupported optimizer: %s", ",".join(other))
-            raise ValueError(
-                f"optim_step parameters {other} are not supported; "
-                "optim_step accepts only adam_params"
-            )
+    if optimizer_params is None:
+        return AdamParams.model_validate(adam_params or {})
+    family = (
+        optimizer_params.get("type") if isinstance(optimizer_params, Mapping) else None
+    )
+    if family != "dimuon":
+        log.warning("rejected unsupported optimizer: %s", family or "unknown")
+        raise ValueError(f"optimizer family {family or 'unknown'} is not supported")
+    return DimuonParams.model_validate(optimizer_params)
 
 
 def serialize_operation_payload(payload: OperationPayload) -> dict[str, Any]:
@@ -215,6 +224,8 @@ def serialize_operation_payload(payload: OperationPayload) -> dict[str, Any]:
         )
     if isinstance(payload, AdamParams):
         return {"adam_params": payload.model_dump(mode="json", exclude_defaults=True)}
+    if isinstance(payload, DimuonParams):
+        return {"optimizer_params": payload.model_dump(mode="json")}
     return payload.model_dump(mode="json", exclude_defaults=True)
 
 
@@ -250,10 +261,14 @@ def parse_model_spec(value: object) -> ModelSpec:
         lora = None
     else:
         raise ValueError("lora_config must be an object")
+    raw_optimizer = value.get("optimizer_config")
+    if raw_optimizer is not None and not isinstance(raw_optimizer, Mapping):
+        raise ValueError("optimizer_config must be an object")
     return ModelSpec(
         base_model=base_model,
         parameterization=parameterization,
         lora_config=lora,
+        optimizer=(raw_optimizer or {}).get("type", "adamw"),
     )
 
 

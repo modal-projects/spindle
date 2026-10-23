@@ -136,7 +136,7 @@ def test_training_round_trip_over_http() -> None:
             "/api/v1/optim_step",
             {
                 "seq_id": 1,
-                "optimizer_params": {"type": "dimuon", "learning_rate": 1e-3},
+                "optimizer_params": {"type": "lion", "learning_rate": 1e-3},
             },
         ),
         (
@@ -473,9 +473,37 @@ def test_errors_map_to_status_codes() -> None:
                 "optimizer_config": {"type": "dimuon", "version": 1},
             },
         )
-        assert dimuon.status_code == 400
-        assert dimuon.json()["error"] == "invalid_request"
-        assert "optimizer family dimuon is not supported" in dimuon.json()["message"]
+        assert dimuon.status_code == 200
+        info = await client.post(
+            "/api/v1/get_info", json={"model_id": dimuon.json()["model_id"]}
+        )
+        assert info.json()["optimizer_config"] == {"type": "dimuon", "version": 1}
+
+        dimuon_full = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 5,
+                "base_model": BASE_MODEL,
+                "parameterization": {"type": "full"},
+                "optimizer_config": {"type": "dimuon", "version": 1},
+            },
+        )
+        assert dimuon_full.status_code == 400
+        assert "dimuon requires lora parameterization" in dimuon_full.json()["message"]
+
+        lion = await client.post(
+            "/api/v1/create_model",
+            json={
+                "session_id": session_id,
+                "model_seq_id": 6,
+                "base_model": BASE_MODEL,
+                "lora_config": {"rank": 32},
+                "optimizer_config": {"type": "lion"},
+            },
+        )
+        assert lion.status_code == 400
+        assert "optimizer family lion is not supported" in lion.json()["message"]
 
         adamw = await client.post(
             "/api/v1/create_model",
