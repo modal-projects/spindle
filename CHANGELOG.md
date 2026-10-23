@@ -4,7 +4,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
-## 0.2.0 - 2026-10-20
+## 0.1.1 - 2026-10-23
 
 The first versioned release. Deployments made before it report `0.1.0`.
 
