@@ -70,6 +70,8 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
+from .router import create_router
+from .router_image import router_image
 from .trainer_reconciler import (
     TRANSIENT_POLL_ERRORS,
     complete_reconcile,
@@ -97,6 +99,7 @@ _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
 _weights_ready: set[str] = set()
 _weights_starts: dict[str, asyncio.Lock] = {}
+_routers = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
@@ -130,8 +133,7 @@ async def _delete_checkpoint(uri: str) -> None:
 
 
 image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")
+    router_image()
     .pip_install(*CORE_PACKAGES, TINKER_PACKAGE)
     .pip_install(STITCH_PACKAGE, "huggingface-hub")
     .add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
@@ -433,6 +435,29 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
+        policy = definition.recipe.inference_lora_routing
+        if policy not in {"affinity", "cache_wait"}:
+            raise ValueError(f"unknown LoRA routing policy: {policy}")
+        router = None
+        if policy == "cache_wait" and task.get("model_id") is not None:
+            if spec.app_name not in _routers:
+                _routers[spec.app_name] = create_router(
+                    spec.app_name,
+                    gateway,
+                    policy=policy,
+                    capacity=(
+                        definition.inference_settings["max_running_requests"]
+                        + (
+                            definition.inference_settings.get("max_queued_requests")
+                            or 0
+                        )
+                    ),
+                    rates=definition.recipe.inference_routing_work_rates,
+                    balance_absolute=definition.recipe.inference_routing_balance_absolute,
+                    balance_relative=definition.recipe.inference_routing_balance_relative,
+                    cache_threshold=definition.recipe.inference_routing_cache_threshold,
+                )
+            router = _routers[spec.app_name]
 
         async def keep_pool_ready() -> None:
             # Retries can outlive the cached readiness check. The pool's URL
@@ -446,6 +471,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             headers=proxy_auth_headers(),
             context_length=definition.max_context_length,
             stop_token_ids_only=stop_token_ids_only,
+            router=router,
             on_wait=keep_pool_ready,
             stats=stats,
         )

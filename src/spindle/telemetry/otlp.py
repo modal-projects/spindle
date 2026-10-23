@@ -175,6 +175,23 @@ def record_attempt(event):
             "spindle.output_tokens": attrs.get("generated_tokens"),
             "http.response.status_code": attrs.get("http_status"),
             "error.type": attrs.get("error_type"),
+            "spindle.routing.replica": attrs.get("selected_replica"),
+            "spindle.routing.wait_s": attrs.get("routing_wait_s"),
+            **{
+                f"spindle.routing.{k}": v
+                for k, v in attrs.get("routing", {}).items()
+                if k
+                in {
+                    "policy",
+                    "reason",
+                    "available_replicas",
+                    "best_cached_tokens",
+                    "cached_tokens",
+                    "backlog_seconds",
+                    "prefill_seconds",
+                    "adapter_seconds",
+                }
+            },
             "sglang.request_id": attrs.get("sglang_request_id"),
             "sglang.queue_s": attrs.get("scheduler_queue_s"),
             "sglang.prefill_s": attrs.get("prefill_elapsed_s"),
