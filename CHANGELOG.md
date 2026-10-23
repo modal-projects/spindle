@@ -29,6 +29,7 @@ The first versioned release. Deployments made before it report `0.1.0`.
 - gpt-oss presets: train `lm_head` LoRA to match Tinker SDK defaults (#6), serve LoRA from BF16 weights (#7), and retuned trainer and sampler parallelism and admission limits (#36, #40, #45, #49).
 - Sampling: multi-turn conversations route to one sampler replica (#46), and warm sampler pools persist between training steps (#37).
 - Faster cold starts: TileLang kernels persist in the shared kernel cache (#82), the asset download is skipped once weights are on the volume (#83), and `spindle deploy` builds the sampler image up front (#95).
+- `spindle deploy` starts each model's base-weight download in the background. `create_model` and `create_sampling_client` return immediately, report download progress while they wait, and work for checkpoints that take longer than a request timeout to download (#107).
 - Deployment configs reach the frontend as a file instead of an environment variable (#94).
 - Optimizers other than AdamW are rejected instead of silently running AdamW (#78, #101).
 - A client that asks to train the unembedding, as Tinker clients do by default, keeps it frozen when the deployment doesn't target it, instead of being refused (#74).
