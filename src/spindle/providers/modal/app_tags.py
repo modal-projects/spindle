@@ -1,5 +1,7 @@
 """Attribution for every Modal app created by Spindle."""
 
+from spindle.version import version_tags
+
 JOB_TYPES = {
     "frontend": "control-plane",
     "trainer": "training_spindle",
@@ -15,6 +17,7 @@ def app_tags(role: str, *, model: str = "", framework: str = "") -> dict[str, st
         "spindle_role": role,
         # Dojo's report also matches job_type=training without checking source.
         "_modal_job_type": JOB_TYPES[role],
+        **version_tags(),
     }
     if framework:
         tags["_modal_framework"] = framework

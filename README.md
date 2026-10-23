@@ -28,8 +28,10 @@ Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a pr
 ```bash
 uv init --python 3.12 my-spindle-project
 cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.2.0'
 ```
+
+This pins a release tag. Releases and their changes are listed in [CHANGELOG.md](CHANGELOG.md), and `uv run spindle --version` prints the installed version and commit.
 
 **If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
 
@@ -142,8 +144,9 @@ before running a larger workload.
 
 Spindle-created Modal apps carry `_modal_source=spindle` and `spindle_role` tags
 for usage reporting. Roles distinguish frontend, trainer, inference,
-inference-provisioner, and combined scoped apps. No environment variables are
-needed to set these tags.
+inference-provisioner, and combined scoped apps. `spindle_version` and
+`spindle_commit` (short SHA) record the release and source commit an app was
+deployed from. No environment variables are needed to set these tags.
 
 Apps also expose reporting metadata:
 
@@ -362,6 +365,19 @@ To deploy the above config, it's just:
 ```bash
 spindle deploy config.py
 ```
+
+## Upgrade Spindle
+
+Check your current version with `uv run spindle --version`. Installs older than 0.2.0 don't have that flag; `uv pip freeze | grep modal-spindle` shows the commit they were installed from.
+
+Read the [CHANGELOG.md](CHANGELOG.md) sections between your version and the new one; minor releases can change config defaults. Then point the dependency at the new tag and redeploy:
+
+```bash
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.3.0'
+spindle deploy config.py
+```
+
+To check which release a deployment runs, read the `spindle_version` and `spindle_commit` tags on its apps (see [App attribution](#app-attribution)), or call `/api/v1/get_server_capabilities`, which reports the version and full commit SHA.
 
 ## Clean up
 
