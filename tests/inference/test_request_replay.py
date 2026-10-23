@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 
 import httpx
 from fastapi.responses import Response
@@ -58,7 +57,7 @@ def test_replayed_generation_shares_work_and_preserves_active_count(tmp_path):
             second = asyncio.create_task(client.post("/generate", json=payload))
             await wait_for_waiters(app, payload["rid"], 2)
             await asyncio.sleep(0.02)
-            state = {"active": len(app.state.request_replay.pending)}
+            state = (await client.get("/routing-state")).json()
             release.set()
             replies = await asyncio.wait_for(asyncio.gather(first, second), 1)
             assert state["active"] == 1
@@ -199,7 +198,7 @@ def test_cancelled_original_does_not_cancel_connected_replay(tmp_path):
             await wait_for_waiters(app, payload["rid"], 2)
             first.cancel()
             await asyncio.gather(first, return_exceptions=True)
-            state = {"active": len(app.state.request_replay.pending)}
+            state = (await client.get("/routing-state")).json()
             release.set()
             result = await asyncio.wait_for(second, 1)
             assert result.status_code == 200
@@ -243,10 +242,10 @@ def test_last_cancellation_is_bounded_when_engine_abort_does_not_reply(tmp_path)
             )
             assert cancelling.status_code == 409
             assert cancelling.headers["x-spindle-replay-state"] == "cancelling"
-            replica = os.environ.get("MODAL_TASK_ID", "local")
+            replica = (await client.get("/routing-state")).json()["replica"]
             assert cancelling.headers["x-spindle-replica"] == replica
             await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 3)
-            assert len(app.state.request_replay.pending) == 0
+            assert (await client.get("/routing-state")).json()["active"] == 0
             cancelled = await client.post(
                 "/generate", json={"rid": "cancel", "input_ids": [1]}
             )
