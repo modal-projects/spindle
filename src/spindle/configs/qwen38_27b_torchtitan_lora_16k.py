@@ -1,4 +1,4 @@
-"""Experimental native TorchTitan multi-LoRA trainer; validate GPU capacity before use."""
+"""Experimental TorchTitan trainer on one H200: eight slots, four-row microbatches."""
 
 from spindle.configuration import BaseConfig
 
@@ -17,7 +17,7 @@ class Config(BaseConfig):
         "max_lora_rank": 32,
         "lora_alpha": 32,
         "max_batch_tokens": 16384,
-        "max_batch_rows": 8,
+        "max_batch_rows": 4,
         "activation_checkpointing": True,
         "compile_layers": False,
     }

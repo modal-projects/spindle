@@ -1,6 +1,8 @@
+import asyncio
 from dataclasses import replace
 import json
 
+import httpx
 import pytest
 
 pytest.importorskip("torch")
@@ -13,6 +15,11 @@ from safetensors.torch import save_file
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_8 import build_model_config
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.attention.gdn import InnerGDN
+from spindle.backends.torchtitan_runtime.gdn import (
+    PackedInnerGDN,
+    configure_packed_attention,
+)
 from spindle.backends.torchtitan_runtime.model import load_hf_weights
 
 from spindle.backends.contract import ForwardBatch, ForwardItem, ModelSpec
@@ -25,6 +32,46 @@ from spindle.backends.torchtitan_runtime.lora import (
 )
 from spindle.configuration import BaseConfig
 from spindle.deployments import DeploymentConfig
+from spindle.engine import Engine, FutureStatus
+from spindle.engine.backend_http import HttpBackendClient, create_backend_app
+from spindle.engine.spmd import DistributedExecutor
+
+
+def test_gdn_preserves_varlen_kernels_for_single_sequence(monkeypatch):
+    config = build_model_config(
+        "debugmodel", parallelism=ParallelismConfig(), seq_len=16
+    )
+    config.vision_encoder = None
+    configure_packed_attention(config)
+    with torch.device("meta"):
+        model = config.build()
+    inner = next(m for m in model.modules() if isinstance(m, PackedInnerGDN))
+    assert any(
+        layer.attention.inner_attention._owner is PackedInnerGDN
+        for layer in config.layers
+    )
+    inputs = torch.randn(8, 4)
+    offsets = torch.tensor([0, 4, 8], dtype=torch.int32)
+    seen = []
+
+    def capture(self, *args, cu_seqlens, **kwargs):
+        seen.append(cu_seqlens)
+        return args[0]
+
+    monkeypatch.setattr(InnerGDN, "short_convolution", capture)
+    monkeypatch.setattr(InnerGDN, "gdn_core", capture)
+    for boundaries in (None, offsets):
+        inner.short_convolution(inputs, None, cu_seqlens=boundaries, routing=None)
+        inner.gdn_core(
+            inputs,
+            inputs,
+            inputs,
+            inputs,
+            inputs,
+            cu_seqlens=boundaries,
+            routing=None,
+        )
+    assert [value.tolist() for value in seen] == [[0, 8], [0, 8], [0, 4, 8], [0, 4, 8]]
 
 
 class TinyDecoder(nn.Module):
@@ -76,6 +123,94 @@ def spec(seed=1, rank=2):
             rank=rank, seed=seed, train_attn=False, train_mlp=True, train_unembed=False
         ),
     )
+
+
+def test_engine_http_runs_independent_adapter_updates(tmp_path):
+    backend = make_backend(tmp_path)
+
+    async def run():
+        executor = HttpBackendClient(
+            "http://backend",
+            transport=httpx.ASGITransport(
+                app=create_backend_app(DistributedExecutor(backend))
+            ),
+        )
+        engine = Engine(executor)
+        try:
+            for seed, model_id in enumerate(("a", "b")):
+                await engine.accept_model(
+                    model_id,
+                    {
+                        "base_model": "test",
+                        "parameterization": "lora",
+                        "lora_config": spec(seed).lora_config.model_dump(),
+                    },
+                )
+            requests = [
+                json.dumps(
+                    {
+                        "model_id": model_id,
+                        "seq_id": 1,
+                        "forward_backward_input": {
+                            "data": [
+                                {
+                                    "model_input": {
+                                        "chunks": [
+                                            {
+                                                "type": "encoded_text",
+                                                "tokens": [1, 2, 3, 4],
+                                            }
+                                        ]
+                                    },
+                                    "loss_fn_inputs": {
+                                        "target_tokens": {
+                                            "data": [2, 3, 4, 5],
+                                            "dtype": "int64",
+                                            "shape": [4],
+                                        },
+                                        "weights": {
+                                            "data": [1.0] * 4,
+                                            "dtype": "float32",
+                                            "shape": [4],
+                                        },
+                                    },
+                                }
+                            ],
+                            "loss_fn": "cross_entropy",
+                        },
+                    }
+                ).encode()
+                for model_id in ("a", "b")
+            ]
+            await asyncio.gather(
+                *(
+                    engine.forward_backward(body, "application/json")
+                    for body in requests
+                )
+            )
+            for model_id in ("a", "b"):
+                result = await engine.retrieve_future(f"{model_id}:1", timeout=5)
+                assert result.status == FutureStatus.COMPLETE, result
+                assert len(result.result["loss_fn_outputs"][0]["logprobs"]["data"]) == 4
+            await engine.optim_step(
+                {
+                    "model_id": "a",
+                    "seq_id": 2,
+                    "adam_params": {"learning_rate": 0.01},
+                }
+            )
+            result = await engine.retrieve_future("a:2", timeout=5)
+            assert result.status == FutureStatus.COMPLETE, result
+            assert result.result["metrics"]["update_successful:mean"] == 1
+            assert backend.jobs["a"].step == 1
+            assert backend.jobs["b"].step == 0
+            assert backend.jobs["b"].accumulating
+        finally:
+            await engine.close()
+            await executor.shutdown_backend()
+            await executor.close()
+
+    asyncio.run(run())
 
 
 def datum(tokens=(1, 2, 3, 4), weight=1.0):

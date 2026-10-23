@@ -12,7 +12,7 @@ with image.imports():
     from torchtitan.models.qwen3_8 import build_model_config
 
 
-@app.function(image=image, gpu="H200", timeout=1200)
+@app.function(image=image, gpu="H200", cpu=8, memory=16384, timeout=1200)
 def probe():
     config = build_model_config(
         "debugmodel", parallelism=ParallelismConfig(), seq_len=256
@@ -31,7 +31,7 @@ def probe():
     output = model(tokens, positions=positions, attention_metadata=metadata)
     output.float().square().mean().backward()
     return {
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "shape": list(output.shape),
         "gpu": torch.cuda.get_device_name(),
     }

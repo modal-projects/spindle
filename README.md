@@ -173,6 +173,10 @@ and the [raw Tinker RL example](https://github.com/modal-projects/spindle/blob/m
 policy update. Copy examples you want to run into your project; repository
 `scripts/` are not installed with the package.
 
+The experimental [TorchTitan multi-LoRA backend](docs/torchtitan.md) runs dense
+Qwen models on a shared frozen base, with independent adapters on one trainer GPU.
+Its documentation includes the H200 benchmark procedure and measured results.
+
 The [W&B RL example](https://github.com/modal-projects/spindle/blob/main/scripts/wandb_rl_example.py) extends it to a multi-step
 loop that logs reward, response length, and Spindle's training metrics to Weights
 & Biases from the client side; tinker-cookbook users can instead set

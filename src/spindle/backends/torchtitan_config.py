@@ -23,7 +23,7 @@ class TorchTitanConfig:
         "down_proj",
     )
     max_batch_tokens: int = 16384
-    max_batch_rows: int = 8
+    max_batch_rows: int = 4
     loss_chunk_size: int = 128
     activation_checkpointing: bool = True
     compile_layers: bool = False
@@ -38,6 +38,10 @@ class TorchTitanConfig:
             "27B",
         }:
             raise ValueError("qwen3_8 supports debugmodel and 27B")
+        if self.model_flavor == "27B" and self.max_batch_rows > 4:
+            raise ValueError(
+                "27B supports at most four rows per microbatch; max_lora_slots can be larger"
+            )
         for name, value in (
             ("max_context_length", self.max_context_length),
             ("max_lora_slots", self.max_lora_slots),

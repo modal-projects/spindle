@@ -14,6 +14,7 @@ from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.models.qwen3_8 import build_model_config as qwen38_config
 
 from .lora import install_adapters
+from .gdn import configure_packed_attention
 
 
 def build_model(config, device):
@@ -27,6 +28,7 @@ def build_model(config, device):
     # Spindle's training API supplies text tokens. Skip the unused vision tower.
     model_config.vision_encoder = None
     validate_hf_config(model_config, Path(config.hf_checkpoint))
+    configure_packed_attention(model_config)
     with torch.device("meta"):
         model = model_config.build()
     model.to(dtype=torch.bfloat16)

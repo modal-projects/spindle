@@ -14,6 +14,15 @@ class AdapterBatch:
     slots: tuple[str, ...] = ()
 
 
+def lora_bmm(left, right):
+    # CUDA bmm switches to GEMM at B=1. The different reduction can change
+    # BF16 updates enough to amplify through a deep GDN model. An unused
+    # second row keeps the batched dispatch; its backward contribution is zero.
+    if left.is_cuda and left.shape[0] == 1:
+        return torch.bmm(left.expand(2, -1, -1), right.expand(2, -1, -1))[:1]
+    return torch.bmm(left, right)
+
+
 class MultiLoRALinear(nn.Module):
     def __init__(self, base: nn.Linear, batch: AdapterBatch, max_rank: int):
         super().__init__()
@@ -65,10 +74,10 @@ class MultiLoRALinear(nn.Module):
         b = torch.stack([self.b[slot] for slot in slots]).to(inputs.dtype)
         scales = inputs.new_tensor([self.scales[slot] for slot in slots])[:, None, None]
         if self.num_linears == 1:
-            delta = torch.bmm(torch.bmm(x, a.transpose(1, 2)), b.transpose(1, 2))
+            delta = lora_bmm(lora_bmm(x, a.transpose(1, 2)), b.transpose(1, 2))
             return output + (delta * scales).reshape_as(output)
         updates = [
-            torch.bmm(torch.bmm(x, a[:, i].transpose(1, 2)), b[:, i].transpose(1, 2))
+            lora_bmm(lora_bmm(x, a[:, i].transpose(1, 2)), b[:, i].transpose(1, 2))
             * scales
             for i in range(self.num_linears)
         ]

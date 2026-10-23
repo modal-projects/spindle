@@ -38,7 +38,7 @@ def make_data(index, sequence_length):
     )
 
 
-def check_packed_gradients(backend, items):
+def check_packed_gradients(backend, items, *, validate=True):
     backend.forward_backward(ForwardBatch(items, "cross_entropy"))
     expected = {
         item.model_id: [
@@ -62,16 +62,190 @@ def check_packed_gradients(backend, items):
             difference += (serial_gradient - packed_gradient).square().sum().item()
             reference += serial_gradient.square().sum().item()
         relative_error = (difference / max(reference, 1e-30)) ** 0.5
-        assert relative_error < 0.025, (
-            f"packed gradients differ for {item.model_id}: {relative_error}"
-        )
+        if validate:
+            assert relative_error < 0.025, (
+                f"packed gradients differ for {item.model_id}: {relative_error}"
+            )
         errors[item.model_id] = relative_error
         state.optimizer.zero_grad(set_to_none=True)
         state.accumulating = False
     return errors
 
 
-def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_layers):
+def logprob_difference(packed, serial):
+    packed = torch.tensor(packed.loss_fn_outputs[0]["logprobs"].data)
+    serial = torch.tensor(serial.loss_fn_outputs[0]["logprobs"].data)
+    return tensor_difference(packed, serial)
+
+
+def tensor_difference(packed, serial):
+    packed, serial = packed.float(), serial.float()
+    difference = packed - serial
+    return {
+        "max_absolute": difference.abs().max().item(),
+        "mean_absolute": difference.abs().mean().item(),
+        "relative_l2": (difference.norm() / serial.norm()).item(),
+    }
+
+
+def check_packed_logprobs(backend, items, sequence_length):
+    def forward(rows):
+        return backend.forward_backward(
+            ForwardBatch(rows, "cross_entropy", forward_only=True)
+        )
+
+    packed = forward(items)
+    adapter_errors = [
+        logprob_difference(output, forward((item,))[0])
+        for item, output in zip(items, packed, strict=True)
+    ]
+    saved_scales = [dict(module.scales) for module in backend.projections.values()]
+    try:
+        for module in backend.projections.values():
+            module.scales = dict.fromkeys(module.scales, 0.0)
+        base_packed = forward(items)
+        base_errors = [
+            logprob_difference(output, forward((item,))[0])
+            for item, output in zip(items, base_packed, strict=True)
+        ]
+    finally:
+        for module, scales in zip(
+            backend.projections.values(), saved_scales, strict=True
+        ):
+            module.scales = scales
+    results = {}
+    for index, (item, adapter, base) in enumerate(
+        zip(items, adapter_errors, base_errors, strict=True)
+    ):
+        # Native BF16 Qwen3.8-27B itself changes slightly with batch size.
+        # Bound that baseline, then require LoRA not to materially worsen it.
+        assert base["relative_l2"] < 0.005 and base["max_absolute"] < 1.0, base
+        assert adapter["relative_l2"] <= 1.25 * base["relative_l2"] + 1e-4, (
+            item.model_id,
+            adapter,
+            base,
+        )
+        assert adapter["max_absolute"] <= 1.25 * base["max_absolute"] + 0.05, (
+            item.model_id,
+            adapter,
+            base,
+        )
+        # At a fixed batch shape, changing other clients must have NO effect.
+        changed = tuple(
+            row
+            if i == index
+            else ForwardItem(row.model_id, (make_data(100 + i, sequence_length),))
+            for i, row in enumerate(items)
+        )
+        token_isolation = logprob_difference(packed[index], forward(changed)[index])
+        assert token_isolation["max_absolute"] == 0, token_isolation
+        try:
+            for module in backend.projections.values():
+                module.scales = {
+                    slot: scale if slot == backend.jobs[item.model_id].slot else 0.0
+                    for slot, scale in module.scales.items()
+                }
+            adapter_isolation = logprob_difference(packed[index], forward(items)[index])
+            assert adapter_isolation["max_absolute"] == 0, adapter_isolation
+        finally:
+            for module, scales in zip(
+                backend.projections.values(), saved_scales, strict=True
+            ):
+                module.scales = scales
+        results[item.model_id] = {
+            "adapter_error": adapter,
+            "frozen_base_error": base,
+            "companion_tokens_max_error": token_isolation["max_absolute"],
+            "companion_adapters_max_error": adapter_isolation["max_absolute"],
+        }
+    return results
+
+
+def diagnose_batching(backend, items, sequence_length):
+    layer_outputs = []
+
+    def capture(module, args, output):
+        layer_outputs.append(output[:sequence_length].detach().cpu())
+
+    handles = [
+        layer.register_forward_hook(capture) for layer in backend.model.layers.values()
+    ]
+
+    def forward(rows):
+        layer_outputs.clear()
+        return backend.forward_backward(
+            ForwardBatch(rows, "cross_entropy", forward_only=True)
+        )
+
+    result = {}
+    for label in ("trained_adapters", "frozen_base"):
+        if label == "frozen_base":
+            saved_scales = [
+                dict(module.scales) for module in backend.projections.values()
+            ]
+            for module in backend.projections.values():
+                module.scales = dict.fromkeys(module.scales, 0.0)
+        packed = forward(items)
+        packed_layers = list(layer_outputs)
+        result[label] = []
+        for index, (item, output) in enumerate(zip(items, packed, strict=True)):
+            result[label].append(logprob_difference(output, forward((item,))[0]))
+            if index == 0:
+                result[label + "_layers"] = [
+                    tensor_difference(left, right)
+                    for left, right in zip(packed_layers, layer_outputs, strict=True)
+                ]
+        if label == "frozen_base":
+            for module, scales in zip(
+                backend.projections.values(), saved_scales, strict=True
+            ):
+                module.scales = scales
+    for handle in handles:
+        handle.remove()
+    layer_outputs.clear()
+    packed = forward(items)
+    result["changed_companion_tokens"] = []
+    result["changed_companion_adapters"] = []
+    for index, item in enumerate(items):
+        changed = tuple(
+            row
+            if i == index
+            else ForwardItem(row.model_id, (make_data(100 + i, sequence_length),))
+            for i, row in enumerate(items)
+        )
+        result["changed_companion_tokens"].append(
+            logprob_difference(packed[index], forward(changed)[index])
+        )
+        saved_scales = [dict(module.scales) for module in backend.projections.values()]
+        for module in backend.projections.values():
+            module.scales = {
+                slot: scale if slot == backend.jobs[item.model_id].slot else 0.0
+                for slot, scale in module.scales.items()
+            }
+        result["changed_companion_adapters"].append(
+            logprob_difference(packed[index], forward(items)[index])
+        )
+        for module, scales in zip(
+            backend.projections.values(), saved_scales, strict=True
+        ):
+            module.scales = scales
+    result["gradient_relative_errors"] = check_packed_gradients(
+        backend, items, validate=False
+    )
+    return result
+
+
+def run(
+    model_name,
+    flavor,
+    sequence_length,
+    adapter_counts,
+    steps,
+    compile_layers,
+    diagnose=False,
+    max_batch_tokens=0,
+    max_batch_rows=4,
+):
     print(f"Downloading {model_name}", flush=True)
     cached = Path("/assets") / model_name
     if not (cached / "config.json").exists():
@@ -85,8 +259,8 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
         max_context_length=sequence_length,
         max_lora_slots=max(adapter_counts),
         max_lora_rank=32,
-        max_batch_rows=max(adapter_counts),
-        max_batch_tokens=sequence_length * max(adapter_counts),
+        max_batch_rows=max_batch_rows,
+        max_batch_tokens=max_batch_tokens or sequence_length * max(adapter_counts),
         compile_layers=compile_layers,
     )
     device = torch.device("cuda", 0)
@@ -130,20 +304,20 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
             for _ in range(2):
                 backend.forward_backward(batch)
                 backend.optim_step(ids, adam)
-            # Compare a nonzero trained adapter, including document isolation.
-            packed = backend.forward_backward(
-                ForwardBatch(items, "cross_entropy", forward_only=True)
-            )
-            for item, output in zip(items, packed, strict=True):
-                (serial,) = backend.forward_backward(
-                    ForwardBatch((item,), "cross_entropy", forward_only=True)
+            if diagnose:
+                reduced = (
+                    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
                 )
-                torch.testing.assert_close(
-                    torch.tensor(output.loss_fn_outputs[0]["logprobs"].data),
-                    torch.tensor(serial.loss_fn_outputs[0]["logprobs"].data),
-                    atol=0.05,
-                    rtol=0.005,
+                diagnostic = diagnose_batching(backend, items, sequence_length)
+                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+                    False
                 )
+                precise = diagnose_batching(backend, items, sequence_length)
+                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+                    reduced
+                )
+                return {"default_reduction": diagnostic, "fp32_reduction": precise}
+            logprob_checks = check_packed_logprobs(backend, items, sequence_length)
             gradient_errors = check_packed_gradients(backend, items)
             print(f"Measuring {count} adapters", flush=True)
             # A publication must survive a subsequent optimizer update unchanged.
@@ -189,9 +363,14 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
                 "serial_tokens_per_s": count * sequence_length * steps / serial_elapsed,
                 "speedup_over_serial": serial_elapsed / elapsed,
                 "packed_gradient_relative_errors": gradient_errors,
+                "packed_serial_max_logprob_error": max(
+                    check["adapter_error"]["max_absolute"]
+                    for check in logprob_checks.values()
+                ),
+                "logprob_checks": logprob_checks,
                 "peak_allocated_bytes": packed_peak_allocated,
                 "peak_reserved_bytes": packed_peak_reserved,
-                "packed_serial_logprobs_match": True,
+                "packed_serial_logprobs_within_native_bf16_baseline": True,
                 "detached_export_matches": True,
                 "publication_optimizer_step": receipt.optimizer_step,
             }
@@ -220,6 +399,9 @@ if __name__ == "__main__":
     parser.add_argument("--adapter-counts", default="1,2,4,8")
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--compile-layers", action="store_true")
+    parser.add_argument("--diagnose", action="store_true")
+    parser.add_argument("--max-batch-tokens", type=int, default=0)
+    parser.add_argument("--max-batch-rows", type=int, default=4)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     result = run(
@@ -229,5 +411,8 @@ if __name__ == "__main__":
         tuple(map(int, args.adapter_counts.split(","))),
         args.steps,
         args.compile_layers,
+        args.diagnose,
+        args.max_batch_tokens,
+        args.max_batch_rows,
     )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
