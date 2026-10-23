@@ -18,6 +18,8 @@ from spindle.startup_timing import timeline
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
 
+FETCH_METRICS_TIMEOUT_SECONDS = 2.0
+
 
 def create_app(
     bulletin: SnapshotBulletin,
@@ -49,6 +51,20 @@ def create_app(
             await app.state.client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        try:
+            response = await app.state.client.get(
+                "/metrics", timeout=FETCH_METRICS_TIMEOUT_SECONDS
+            )
+        except httpx.RequestError:
+            return Response(status_code=503)
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type"),
+        )
 
     @app.get("/health")
     async def health() -> Response:
