@@ -38,7 +38,41 @@ def make_data(index, sequence_length):
     )
 
 
+def check_packed_gradients(backend, items):
+    backend.forward_backward(ForwardBatch(items, "cross_entropy"))
+    expected = {
+        item.model_id: [
+            p.grad.detach().cpu()
+            for p in backend.parameters_for(backend.jobs[item.model_id].slot)
+        ]
+        for item in items
+    }
+    for state in backend.jobs.values():
+        state.optimizer.zero_grad(set_to_none=True)
+        state.accumulating = False
+    errors = {}
+    for item in items:
+        backend.forward_backward(ForwardBatch((item,), "cross_entropy"))
+        state = backend.jobs[item.model_id]
+        difference = reference = 0.0
+        for parameter, packed_gradient in zip(
+            backend.parameters_for(state.slot), expected.pop(item.model_id), strict=True
+        ):
+            serial_gradient = parameter.grad.detach().cpu()
+            difference += (serial_gradient - packed_gradient).square().sum().item()
+            reference += serial_gradient.square().sum().item()
+        relative_error = (difference / max(reference, 1e-30)) ** 0.5
+        assert relative_error < 0.025, (
+            f"packed gradients differ for {item.model_id}: {relative_error}"
+        )
+        errors[item.model_id] = relative_error
+        state.optimizer.zero_grad(set_to_none=True)
+        state.accumulating = False
+    return errors
+
+
 def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_layers):
+    print(f"Downloading {model_name}", flush=True)
     cached = Path("/assets") / model_name
     if not (cached / "config.json").exists():
         cached = Path(
@@ -56,7 +90,9 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
         compile_layers=compile_layers,
     )
     device = torch.device("cuda", 0)
+    print(f"Building {model_name} on {torch.cuda.get_device_name()}", flush=True)
     model, routing, projections = build_model(config, device)
+    print("Model loaded", flush=True)
     backend = TorchTitanBackend(
         config,
         base_model=model_name,
@@ -69,6 +105,7 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
     results = []
     try:
         for count in adapter_counts:
+            print(f"Validating {count} adapters", flush=True)
             ids = tuple(f"adapter-{i}" for i in range(count))
             for i, model_id in enumerate(ids):
                 backend.accept_model(
@@ -107,6 +144,8 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
                     atol=0.05,
                     rtol=0.005,
                 )
+            gradient_errors = check_packed_gradients(backend, items)
+            print(f"Measuring {count} adapters", flush=True)
             # A publication must survive a subsequent optimizer update unchanged.
             receipt = backend.capture_sampler_snapshot(ids[0], "validation-export", 1)
             saved = {
@@ -124,6 +163,17 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
                 assert all(o.metrics["update_successful:mean"] == 1 for o in outcomes)
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
+            packed_peak_allocated = torch.cuda.max_memory_allocated()
+            packed_peak_reserved = torch.cuda.max_memory_reserved()
+            torch.cuda.synchronize()
+            serial_started = time.perf_counter()
+            for _ in range(steps):
+                for item in items:
+                    backend.forward_backward(ForwardBatch((item,), "cross_entropy"))
+                    (outcome,) = backend.optim_step((item.model_id,), adam)
+                    assert outcome.metrics["update_successful:mean"] == 1
+            torch.cuda.synchronize()
+            serial_elapsed = time.perf_counter() - serial_started
             for key, value in backend.sampler_captures.pop("validation-export")[
                 2
             ].items():
@@ -135,8 +185,12 @@ def run(model_name, flavor, sequence_length, adapter_counts, steps, compile_laye
                 "elapsed_s": elapsed,
                 "step_s": elapsed / steps,
                 "tokens_per_s": count * sequence_length * steps / elapsed,
-                "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
-                "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+                "serial_step_s": serial_elapsed / steps,
+                "serial_tokens_per_s": count * sequence_length * steps / serial_elapsed,
+                "speedup_over_serial": serial_elapsed / elapsed,
+                "packed_gradient_relative_errors": gradient_errors,
+                "peak_allocated_bytes": packed_peak_allocated,
+                "peak_reserved_bytes": packed_peak_reserved,
                 "packed_serial_logprobs_match": True,
                 "detached_export_matches": True,
                 "publication_optimizer_step": receipt.optimizer_step,

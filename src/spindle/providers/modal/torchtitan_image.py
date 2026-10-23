@@ -24,6 +24,9 @@ image = (
     .pip_install(
         *CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE, "transformers==5.12.1", "pytest"
     )
+    .pip_install(
+        "flash-attn-3==3.0.0", extra_index_url="https://download.pytorch.org/whl/cu130"
+    )
     .env(
         {
             "SPINDLE_TORCHTITAN_COMMIT": TORCHTITAN_COMMIT,

@@ -73,9 +73,8 @@ checkpoint resume, immutable captures, fused-MLP exports, native 27B constructio
 and native HF weight conversion (including tied embeddings and split shards).
 Model construction uses meta tensors and does not allocate 27B weights.
 
-GPU validation is pending authorization to upload this worktree's Python source
-and allocate an H200 in the existing Modal `lilo-deploy` environment. The commands
-below are prepared but have not completed a GPU run. Run them sequentially and
+GPU validation is pending. The commands below target the existing Modal
+`lilo-deploy` environment and have not completed a GPU run. Run them sequentially and
 stop on a failure; neither launcher retries a failed or OOM run automatically.
 
 From the worktree root, using an environment with the repository dependencies:
@@ -96,8 +95,9 @@ model-assets volume or shared deployment.
 
 Default benchmark settings: sequence length 1024; 1, 2, 4, and 8 adapters; rank 16;
 two warmup steps and three measured steps per adapter count. The runner checks
-packed-versus-serial log probabilities after training, detached exports, successful
-updates, token throughput, and peak CUDA memory. It records the exact runtime and
+packed-versus-serial log probabilities and gradients after training, detached
+exports, successful updates, packed and serial training throughput, and peak CUDA
+memory. It records the exact runtime and
 configuration in JSON. A failed run produces no successful benchmark report.
 
 This is a **synchronized packed-backend benchmark**. It does not establish
