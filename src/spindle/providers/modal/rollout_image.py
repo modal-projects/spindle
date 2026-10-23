@@ -9,7 +9,8 @@ from .image_dependencies import (
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-SGLANG_BRANCH = "spindle-sglang-v0.5.21"
+# A commit, not a branch: Modal caches the clone layer, so a branch can stay stale.
+SGLANG_COMMIT = "9fa429d9bc6d34e93d43cc81610ce2c0c7315b2d"
 
 image = (
     modal.Image.from_registry(SGLANG_IMAGE)
@@ -17,8 +18,8 @@ image = (
     .apt_install("git")
     .run_commands(
         "rm -rf /tmp/spindle-sglang-overlay"
-        f" && git clone --filter=blob:none --single-branch --branch {SGLANG_BRANCH}"
-        f" {SGLANG_REPOSITORY} /tmp/spindle-sglang-overlay",
+        f" && git clone --filter=blob:none {SGLANG_REPOSITORY} /tmp/spindle-sglang-overlay"
+        f" && git -C /tmp/spindle-sglang-overlay checkout {SGLANG_COMMIT}",
         "cp -a /tmp/spindle-sglang-overlay/python/. /sgl-workspace/sglang/python/"
         " && rm -rf /tmp/spindle-sglang-overlay",
         'python -c "import sglang.srt.mem_cache.rust_tree_core.mem_cache"',

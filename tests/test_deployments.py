@@ -141,10 +141,15 @@ def test_deepseek_v41_lora_recipe():
     assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
     assert serving["weight_loader_disable_mmap"] is False
     assert row.recipe.trainer_image == "miles-v0.1.2"
-    assert row.recipe.trainer_gpu == ["B300", "H200"]
+    assert row.recipe.trainer_gpu == ["B300", "B200", "H200"]
     assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash"
     assert row.asset_path == "/assets/PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
+
+    h200 = row.for_inference_gpu("NVIDIA H200")
+    assert h200.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash"
+    assert h200.recipe.inference_env["SGLANG_DSV4_FP4_DEQUANT"] == "1"
+    assert row.for_inference_gpu("NVIDIA B200").asset_path == row.asset_path
 
 
 def test_asset_paths_follow_the_model():
