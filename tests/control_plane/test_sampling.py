@@ -26,13 +26,13 @@ DEFINITION = "qwen3_8b"
 BASE_MODEL = "Qwen/Qwen3-8B"
 
 
-async def sampling_plane(runner=None):
+async def sampling_plane(runner=None, kv=None):
     if runner is None:
         runner = TinkerStubSampler()
     tasks = LocalSamplingTaskPlatform(runner)
     task_stores = InMemorySessionKeyValueStores()
     plane = ControlPlane(
-        InMemoryKeyValueStore(),
+        kv if kv is not None else InMemoryKeyValueStore(),
         LocalEnginePlatform(DEFINITION, EchoExecutor),
         sampling_tasks=tasks,
         sampling_task_stores=task_stores,
@@ -284,7 +284,8 @@ def test_submit_sample_checks_the_session_once_and_records_the_touch() -> None:
     asyncio.run(run())
 
 
-def test_slow_samples_explain_startup_until_the_pool_completes_one() -> None:
+@pytest.mark.parametrize("routed", [False, True])
+def test_slow_samples_explain_startup_until_the_pool_completes_one(routed) -> None:
     async def run() -> None:
         gates: dict[tuple[str, int], asyncio.Event] = {}
 
@@ -293,7 +294,14 @@ def test_slow_samples_explain_startup_until_the_pool_completes_one() -> None:
             await gates.setdefault(key, asyncio.Event()).wait()
             return {"type": "sample", "sequences": []}
 
-        plane, _, session_id, sampling_session_id = await sampling_plane(gated)
+        from spindle.providers.modal.kv import RoutedKeyValueStore, STORE_NAMES
+
+        kv = (
+            RoutedKeyValueStore({name: InMemoryKeyValueStore() for name in STORE_NAMES})
+            if routed
+            else None
+        )
+        plane, _, session_id, sampling_session_id = await sampling_plane(gated, kv=kv)
         now = [time.time()]
         plane.clock = lambda: now[0]
 
