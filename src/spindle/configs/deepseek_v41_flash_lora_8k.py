@@ -12,7 +12,8 @@ class Config(BaseConfig):
     max_context_length = 8192
     backend = "miles"
     trainer_image = "miles-v0.1.2"
-    trainer_gpu = "B300"
+    # Not B200: the trainer deadlocks there in cross-node expert all-to-alls.
+    trainer_gpu = ["B300", "H200"]
     trainer_gpus_per_node = 8
     trainer_nodes = 2
     trainer_cpu = 64

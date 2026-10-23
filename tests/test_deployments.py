@@ -141,6 +141,7 @@ def test_deepseek_v41_lora_recipe():
     assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
     assert serving["weight_loader_disable_mmap"] is False
     assert row.recipe.trainer_image == "miles-v0.1.2"
+    assert row.recipe.trainer_gpu == ["B300", "H200"]
     assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash"
     assert row.asset_path == "/assets/PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
