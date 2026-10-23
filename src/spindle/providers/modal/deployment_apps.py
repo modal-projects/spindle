@@ -42,15 +42,19 @@ from .megatron_image import image as megatron_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
+from .torchtitan_image import image as torchtitan_image
 from .serve import run_engine_with_backend
 
 
 def image_for(backend):
     if not modal.is_local():
         return modal.Image.debian_slim()
-    return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
-        backend
-    ]
+    return {
+        "miles": miles_image,
+        "megatron": megatron_image,
+        "sglang": rollout_image,
+        "torchtitan": torchtitan_image,
+    }[backend]
 
 
 def volumes_for(platform):
@@ -163,11 +167,11 @@ def run_trainer(deployment, instance_id, platform=None):
     }
     if ray_address is not None:
         env["SPINDLE_RAY_ADDRESS"] = ray_address
-    executor = (
-        "spindle.backends.miles_lora:build_executor"
-        if recipe.backend == "miles"
-        else "spindle.backends.megatron_fft:build_executor"
-    )
+    executor = {
+        "miles": "spindle.backends.miles_lora:build_executor",
+        "megatron": "spindle.backends.megatron_fft:build_executor",
+        "torchtitan": "spindle.backends.torchtitan_lora:build_executor",
+    }[recipe.backend]
 
     async def failed(error):
         await shared_kv().put(
