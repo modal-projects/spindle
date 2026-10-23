@@ -29,6 +29,8 @@ class BaseConfig:
     }
 
     name = ""
+    # Extra Modal app tags for this recipe's trainer and inference apps.
+    tags = {}
     model = ""
     # Hugging Face repo for base weights; defaults to ``model``.
     model_weights = ""
