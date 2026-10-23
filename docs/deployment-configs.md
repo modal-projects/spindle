@@ -72,6 +72,10 @@ Modal and backend libraries validate their own options. Spindle checks integrati
 
 Miles argument conversion lives in [miles_arguments.py](../src/spindle/backends/miles_arguments.py). SGLang receives `ServerArgs(**settings)` in its [worker entrypoint](../src/spindle/inference/sglang.py). Backend libraries validate native options when workers start; frontend config imports remain CPU-only.
 
+### Miles options
+
+Besides the LoRA settings, `miles_cfg` accepts `megatron_to_hf_mode` (`bridge`, the default, or `raw`: the converter Miles uses to export weights, for models without a Megatron-Bridge mapping) and `dynamic_batch_size`.
+
 ## Prepare and launch
 
 ~~~text

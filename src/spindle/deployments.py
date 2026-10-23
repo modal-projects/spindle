@@ -15,6 +15,9 @@ from spindle import __version__
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
 
+# Modal's smallest ephemeral disk request.
+MIN_EPHEMERAL_DISK_MIB = 524_288
+
 
 def _jsonable(value):
     return json.loads(json.dumps(value))
@@ -44,6 +47,12 @@ class DeploymentConfig(BaseModel):
     def create(cls, recipe: BaseConfig) -> DeploymentConfig:
         """Copy the recipe and attach backend settings."""
         pinned = BaseConfig(**_jsonable(vars(recipe)))
+        for field in ("trainer_disk_mib", "inference_disk_mib"):
+            disk = getattr(pinned, field)
+            if disk and disk < MIN_EPHEMERAL_DISK_MIB:
+                raise ValueError(
+                    f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
+                )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
@@ -103,6 +112,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -114,6 +124,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_nodes,
             recipe.trainer_cpu,
             recipe.trainer_memory_mib,
+            recipe.trainer_disk_mib,
             recipe.trainer_max_instances,
             recipe.trainer_max_clients_per_instance,
             recipe.trainer_timeout_s,
@@ -128,6 +139,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
@@ -135,6 +147,7 @@ class DeploymentConfig(BaseModel):
             recipe.inference_gpus_per_node,
             recipe.inference_cpu,
             recipe.inference_memory_mib,
+            recipe.inference_disk_mib,
             recipe.inference_min_replicas,
             recipe.inference_max_replicas,
             recipe.inference_target_concurrency,

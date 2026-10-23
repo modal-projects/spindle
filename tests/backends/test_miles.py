@@ -193,6 +193,35 @@ def test_config_translates_stable_fields_to_miles_arguments() -> None:
     assert capture_dir == Path("/tmp/spindle-miles-captures")
 
 
+def test_config_static_micro_batches_replace_dynamic_batching() -> None:
+    arguments = _config(dynamic_batch_size=False).miles_arguments()
+
+    assert "--use-dynamic-batch-size" not in arguments
+    assert "--max-tokens-per-gpu" not in arguments
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert "--use-dynamic-batch-size" in _config().miles_arguments()
+
+
+def test_config_points_reference_load_at_the_hf_checkpoint() -> None:
+    arguments = _config().miles_arguments()
+
+    assert (
+        arguments[arguments.index("--ref-load") + 1]
+        == arguments[arguments.index("--hf-checkpoint") + 1]
+    )
+
+
+def test_config_exports_lora_through_the_raw_converter() -> None:
+    config = _config(megatron_to_hf_mode="raw")
+    config.validate()
+
+    arguments = config.miles_arguments()
+    assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
+    assert "--multi-lora-n-adapters" in arguments
+    with pytest.raises(ValueError, match="bridge or raw"):
+        _config(megatron_to_hf_mode="direct").validate()
+
+
 def test_config_context_parallel_topology() -> None:
     config = _config(
         actor_num_gpus_per_node=8,

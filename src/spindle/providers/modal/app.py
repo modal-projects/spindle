@@ -189,6 +189,7 @@ def prepare_model_assets(definition_id: str) -> None:
     started = time.time()
     snapshot_download(
         repo_id=definition.weights_repo,
+        revision=definition.recipe.weights_revision or None,
         local_dir=checkpoint,
     )
     model_assets.commit()
@@ -242,8 +243,11 @@ async def ensure_lora_pool(spec: dict) -> str:
 
 
 async def _ensure_model_assets(definition_id: str) -> None:
-    """Download the base weights once per definition; later calls skip the container start."""
-    key = f"model_assets_ready:{definition_id}"
+    """Download the base weights once per definition and weights revision; later
+    calls skip the container start."""
+    definition = module_for(definition_id)
+    revision = definition.recipe.weights_revision
+    key = f"model_assets_ready:{definition_id}:{definition.weights_repo}@{revision}"
     if await shared_kv().get(key) is not None:
         return
     await prepare_model_assets.remote.aio(definition_id)
