@@ -29,6 +29,13 @@ PERSISTED_OPERATIONS = {
     OperationKind.SAVE_WEIGHTS,
     OperationKind.SAVE_WEIGHTS_FOR_SAMPLER,
 }
+# Quick operations that send a client back to sampling. They run ahead of other queued work.
+# Saves only take a snapshot here; writing it out happens in the background.
+SHORT_OPERATIONS = {
+    OperationKind.OPTIM_STEP,
+    OperationKind.SAVE_WEIGHTS,
+    OperationKind.SAVE_WEIGHTS_FOR_SAMPLER,
+}
 PERSIST_LANES = {
     OperationKind.SAVE_WEIGHTS: "checkpoint",
     OperationKind.SAVE_WEIGHTS_FOR_SAMPLER: "sampler",
@@ -779,10 +786,9 @@ class Engine:
                 ready.append(operation)
         if not ready:
             return None
-        # Short operations go first so a client can start its next rollouts; then oldest first.
         ready.sort(
             key=lambda operation: (
-                operation.kind == OperationKind.FORWARD_BACKWARD,
+                operation.kind not in SHORT_OPERATIONS,
                 operation.queued_at,
             )
         )

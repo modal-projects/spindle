@@ -848,6 +848,65 @@ def test_short_operations_run_first_then_forward_backward_oldest_first() -> None
     asyncio.run(run())
 
 
+def test_forward_and_load_wait_their_turn_behind_older_forward_backward() -> None:
+    async def run() -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        order: list[tuple[str, str]] = []
+
+        class RecordingExecutor(EchoExecutor):
+            async def execute(self, model_id, kind, payload):
+                if kind != OperationKind.FORWARD_BACKWARD:
+                    order.append((model_id, kind.value))
+                return await super().execute(model_id, kind, payload)
+
+            async def execute_forward_backward_batch(self, executions):
+                order.extend((item.model_id, "forward_backward") for item in executions)
+                if len(order) == 1:
+                    first_started.set()
+                    await release_first.wait()
+                return await super().execute_forward_backward_batch(executions)
+
+        server = Engine(RecordingExecutor(), max_forward_backward_models=1)
+        for model_id in ("model-a", "model-b", "model-c", "model-d"):
+            await server.accept_model(model_id, {})
+
+        await forward_backward(server, 1)
+        await first_started.wait()
+        await forward_backward(server, 1, model_id="model-b")
+        await server.forward(
+            {
+                "model_id": "model-c",
+                "seq_id": 1,
+                "forward_input": {
+                    "data": [
+                        {
+                            "model_input": {"chunks": [{"tokens": [1]}]},
+                            "loss_fn_inputs": {},
+                        }
+                    ],
+                    "loss_fn": "cross_entropy",
+                },
+            }
+        )
+        await server.load_weights(
+            {"model_id": "model-d", "seq_id": 1, "path": "weights/0001"}
+        )
+
+        release_first.set()
+        for request_id in ("model-b:1", "model-c:1", "model-d:1"):
+            await server.retrieve_future(request_id, timeout=1.0)
+        assert order == [
+            ("model-a", "forward_backward"),
+            ("model-b", "forward_backward"),
+            ("model-c", "forward"),
+            ("model-d", "load_weights"),
+        ]
+        await server.close()
+
+    asyncio.run(run())
+
+
 def test_forward_backward_models_limit_must_be_positive() -> None:
     with pytest.raises(ValueError, match="max_forward_backward_models"):
         Engine(EchoExecutor(), max_forward_backward_models=0)
