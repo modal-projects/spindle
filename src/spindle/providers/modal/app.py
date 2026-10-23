@@ -56,6 +56,7 @@ from .kv import (
     fft_pool_kv,
     shared_kv,
 )
+from .capacity import gpu_label, gpu_wait
 from .lora_pool import (
     LoraPoolSpec,
 )
@@ -455,16 +456,25 @@ async def kick_trainer_reconciler(definition_id: str) -> None:
 async def _spawn_engine(definition_id: str, instance_id: str) -> str:
     if error := await deployment_error(definition_id):
         raise ValueError(error)
-    definition = module_for(definition_id)
-    engine = modal.Function.from_name(
-        definition.trainer_app_name,
+    call = await _trainer_function(definition_id).spawn.aio(
+        instance_id, module_for(definition_id).model_dump_json(), current_app_id()
+    )
+    return call.object_id
+
+
+def _trainer_function(definition_id: str) -> modal.Function:
+    return modal.Function.from_name(
+        module_for(definition_id).trainer_app_name,
         "trainer",
         environment_name=PLATFORM["modal"]["environment"],
     )
-    call = await engine.spawn.aio(
-        instance_id, definition.model_dump_json(), current_app_id()
+
+
+def _trainer_gpus(definition_id: str) -> str:
+    recipe = module_for(definition_id).recipe
+    return gpu_label(
+        recipe.trainer_gpu, recipe.trainer_gpus_per_node, recipe.trainer_nodes
     )
-    return call.object_id
 
 
 async def deployment_error(definition_id: str) -> str | None:
@@ -570,6 +580,7 @@ def _plane():
         checkpoint_root=CHECKPOINT_ROOT,
         reconcile_trainers=kick_trainers,
         trainer_autoscaling=trainer_autoscaling,
+        trainer_gpu_wait=gpu_wait(_trainer_function, _trainer_gpus),
     )
 
 
