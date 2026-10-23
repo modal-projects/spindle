@@ -14,6 +14,19 @@ of measurements:
 
 Spindle sends these measurements via OTLP (export off by default), from which Datadog or another compatible service can be used to receive and display these traces.
 
+## Sampler inference metrics
+
+Samplers enable SGLang's Prometheus metrics by default and expose them at
+`/metrics` through the sampler sidecar. Modal's inference-metrics collector can
+scrape these for the sampler's **Inference metrics** dashboard, including
+throughput, latency, queue depth, and KV-cache reuse. This does not require an
+AutoInference recipe or the OTLP configuration below. Metrics describe the
+shared inference replicas, rather than individual LoRA training jobs.
+
+Redeploy with fresh sampler containers to enable collection on an existing
+deployment. To disable engine metrics, set `sglang_cfg["enable_metrics"] = False`
+in the deployment recipe.
+
 ## Setup
 
 ### Modal to Datadog

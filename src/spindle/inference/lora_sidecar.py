@@ -50,6 +50,18 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        try:
+            response = await app.state.client.get("/metrics", timeout=2.0)
+        except httpx.RequestError:
+            return Response(status_code=503)
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type"),
+        )
+
     @app.get("/health")
     async def health() -> Response:
         response = await app.state.client.get("/health")

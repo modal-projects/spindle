@@ -145,6 +145,7 @@ def resolve_backend_settings(spec, asset_path):
         "tp_size": spec.inference_gpus_per_node,
         "mem_fraction_static": 0.8,
         "max_running_requests": 32,
+        "enable_metrics": True,
         "weight_loader_disable_mmap": True,
         **serving_options(spec),
     }
