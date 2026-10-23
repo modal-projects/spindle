@@ -184,23 +184,24 @@ proxy_secret = modal.Secret.from_name(
 )
 async def prepare_model_assets(definition_id: str) -> None:
     definition = module_for(definition_id)
-    checkpoint = os.path.normpath(definition.asset_path)
-    if (
-        os.path.commonpath((MODEL_ASSET_ROOT, checkpoint)) != MODEL_ASSET_ROOT
-        or checkpoint == MODEL_ASSET_ROOT
-    ):
-        raise ValueError(f"invalid model asset path: {checkpoint}")
-    started = time.time()
-    await asyncio.to_thread(
-        snapshot_download,
-        repo_id=definition.weights_repo,
-        revision=definition.recipe.weights_revision or None,
-        local_dir=checkpoint,
-    )
-    await model_assets.commit.aio()
-    StartupTimeline("model-assets", origin=started, labels={"path": checkpoint}).mark(
-        "assets_ready"
-    )
+    for repo, revision in definition.weight_sets():
+        checkpoint = os.path.normpath(f"{MODEL_ASSET_ROOT}/{repo}")
+        if (
+            os.path.commonpath((MODEL_ASSET_ROOT, checkpoint)) != MODEL_ASSET_ROOT
+            or checkpoint == MODEL_ASSET_ROOT
+        ):
+            raise ValueError(f"invalid model asset path: {checkpoint}")
+        started = time.time()
+        await asyncio.to_thread(
+            snapshot_download,
+            repo_id=repo,
+            revision=revision or None,
+            local_dir=checkpoint,
+        )
+        await model_assets.commit.aio()
+        StartupTimeline(
+            "model-assets", origin=started, labels={"path": checkpoint}
+        ).mark("assets_ready")
     await shared_kv().put(_weights_ready_key(definition_id), time.time())
 
 
@@ -261,9 +262,8 @@ class WeightsDownloadFailed(ValueError):
 
 def _weights_id(definition_id: str) -> str:
     # A changed weights repo or revision is a new download.
-    definition = module_for(definition_id)
-    revision = definition.recipe.weights_revision
-    return f"{definition_id}:{definition.weights_repo}@{revision}"
+    weights = module_for(definition_id).weight_sets()
+    return f"{definition_id}:" + "+".join(f"{repo}@{rev}" for repo, rev in weights)
 
 
 def _weights_ready_key(definition_id: str) -> str:

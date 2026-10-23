@@ -57,6 +57,20 @@ Each parent's settings and overrides apply before its child's. Constructor field
 
 `trainer_gpu` and `inference_gpu` take one GPU type or a list in preference order, such as `["H200", "B300"]`. Modal schedules the first type with capacity. GPU counts and parallelism settings apply to every entry, so list only types with at least as much memory as the first.
 
+A fallback sampler GPU can serve different weights or settings, such as a quantized release that fits in less memory. Set `inference_gpu_overrides` with one entry per GPU type from `inference_gpu`. Each entry holds dotted overrides of `model_weights`, `weights_revision`, `sglang_cfg` and `inference_env`:
+
+```python
+inference_gpu = ["B300", "H200"]
+inference_gpu_overrides = {
+    "H200": {
+        "model_weights": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "sglang_cfg.mem_fraction_static": 0.9,
+    }
+}
+```
+
+A sampler checks its GPU when it starts and applies the matching entry. The trainer always uses the base weights. `spindle deploy` downloads every weight set before training or sampling starts. Adapters trained on the base weights run unchanged on the other weights, so sampled log-probs can differ slightly between GPU types.
+
 When several clients share a trainer, it trains all of their queued batches together by default, and each client waits for the whole step to finish. For RL, where clients sample at different times, set `trainer_max_clients_per_batch = 1`. The trainer then runs one client at a time, so each client can go back to sampling as soon as its own step is done.
 
 ## Backend options

@@ -169,6 +169,46 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.inference_identity() != resolved().inference_identity()
 
 
+H200_WEIGHTS = {
+    "model_weights": "org/model-fp8",
+    "sglang_cfg.mem_fraction_static": 0.9,
+    "inference_env.FP8": "1",
+}
+
+
+def test_inference_gpu_overrides_apply_only_to_samplers_on_that_gpu():
+    base = resolved(inference_gpu=["B300", "H200"])
+    row = resolved(
+        inference_gpu=["B300", "H200"], inference_gpu_overrides={"H200": H200_WEIGHTS}
+    )
+    assert row.for_inference_gpu("NVIDIA B300 SXM6 AC") is row
+    h200 = row.for_inference_gpu("NVIDIA H200")
+    assert h200.asset_path == "/assets/org/model-fp8"
+    assert h200.inference_settings["mem_fraction_static"] == 0.9
+    assert h200.recipe.inference_env["FP8"] == "1"
+    assert row.asset_path == base.asset_path
+    assert row.trainer_settings == base.trainer_settings
+    assert row.weight_sets() == [(row.weights_repo, ""), ("org/model-fp8", "")]
+    assert row.inference_identity() != base.inference_identity()
+
+
+@pytest.mark.parametrize(
+    "gpus, overrides, match",
+    [
+        ("B300", {"H200": H200_WEIGHTS}, "not in inference_gpu"),
+        (["B300", "H200"], {"H200": {"trainer_gpu": "H200"}}, "cannot set"),
+        (
+            ["B300", "H200"],
+            {"H200": {"weights_revision": "abc123"}},
+            "different repo",
+        ),
+    ],
+)
+def test_invalid_inference_gpu_overrides_fail_at_deploy(gpus, overrides, match):
+    with pytest.raises(ValueError, match=match):
+        resolved(inference_gpu=gpus, inference_gpu_overrides=overrides)
+
+
 def test_trainer_image_is_part_of_trainer_identity():
     trainer = resolved(recipe(trainer_image="trainer-x"))
     assert trainer.trainer_identity() != resolved().trainer_identity()

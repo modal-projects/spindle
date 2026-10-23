@@ -4,6 +4,7 @@ import sys
 import threading
 import types
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -105,6 +106,11 @@ def _load_actor(monkeypatch):
     _module(monkeypatch, "modal")
     torch = _module(monkeypatch, "torch")
     _module(monkeypatch, "torch.distributed")
+    _module(monkeypatch, "torch.distributed.constants").default_pg_timeout = timedelta(
+        minutes=30
+    )
+    _module(monkeypatch, "miles.ray.train_actor")
+    _module(monkeypatch, "miles.utils.distributed_utils").GLOO_GROUP = None
     megatron_bridge = _module(monkeypatch, "megatron.bridge")
     megatron_bridge.AutoBridge = type("AutoBridge", (), {})
     _module(monkeypatch, "megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model")
@@ -226,6 +232,18 @@ class _FakeVolume:
 
     def copy_files(self, src_paths, dst_path, recursive=False) -> None:
         self.events.append(("copy", tuple(src_paths), dst_path, recursive))
+
+
+@pytest.mark.parametrize("minutes, expected", [(120, 120), (10, 30)])
+def test_gloo_group_waits_as_long_as_the_distributed_timeout(
+    monkeypatch, minutes, expected
+) -> None:
+    actor = _load_actor(monkeypatch)
+    groups = []
+    actor.dist.new_group = lambda **kwargs: groups.append(kwargs) or "gloo"
+    actor._use_distributed_timeout_for_gloo(minutes)
+    assert sys.modules["miles.ray.train_actor"].init_gloo_group() == "gloo"
+    assert groups == [{"backend": "gloo", "timeout": timedelta(minutes=expected)}]
 
 
 def test_checkpoint_is_published_from_committed_state(monkeypatch, tmp_path) -> None:

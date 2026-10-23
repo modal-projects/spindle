@@ -116,7 +116,7 @@ def gpu_request(gpu: str | list[str], count: int) -> str | list[str]:
     return [f"{name}:{count}" for name in gpu]
 
 
-def log_scheduled_gpus(role: str) -> None:
+def log_scheduled_gpus(role: str) -> list[str]:
     try:
         names = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -126,8 +126,9 @@ def log_scheduled_gpus(role: str) -> None:
         ).stdout.splitlines()
     except (OSError, subprocess.CalledProcessError):
         logging.getLogger(__name__).exception("query scheduled GPUs")
-        return
+        return []
     print(f"spindle {role} scheduled on {len(names)}x {', '.join(sorted(set(names)))}")
+    return names
 
 
 def deployment_env(values):
@@ -278,7 +279,6 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         pool.app_name,
         tags=app_tags("inference", model=recipe.model, framework="sglang"),
     )
-    options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
     maximum = recipe.inference_max_replicas
     window = recipe.inference_scaledown_window_s
@@ -312,7 +312,8 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         def start(self):
             self.sidecar = None
             self.sglang = None
-            log_scheduled_gpus("sampler")
+            gpus = log_scheduled_gpus("sampler")
+            serving = deployment.for_inference_gpu(gpus[0] if gpus else "")
             startup = timeline(SAMPLER_COMPONENT, pool=pool.app_name)
             startup.mark("server_enter")
 
@@ -321,9 +322,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     sys.executable,
                     "-m",
                     "spindle.inference.sglang",
-                    deployment.asset_path,
-                    json.dumps(options),
+                    serving.asset_path,
+                    json.dumps(serving.inference_settings),
                 ],
+                env={**os.environ, **serving.recipe.inference_env},
                 start_new_session=True,
             )
             try:

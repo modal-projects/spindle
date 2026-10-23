@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+from torch.distributed.constants import default_pg_timeout
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl import model as qwen3_vl_model
 from megatron.core import dist_checkpointing
@@ -11,6 +13,8 @@ from miles.backends.megatron_utils.lora import checkpoint
 from miles.backends.megatron_utils.lora import model as lora_model
 from miles.backends.megatron_utils.lora.actor import MultiLoRATrainRayActor
 from miles.backends.training_utils.weight_update import snapshot_publisher
+from miles.ray import train_actor
+from miles.utils import distributed_utils
 from miles.utils.replay_base import routing_replay_manager
 from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
@@ -68,6 +72,21 @@ def _sync_checkpoint_volume(action: str) -> None:
     sync_checkpoint_volume(action)
 
 
+def _use_distributed_timeout_for_gloo(minutes: int) -> None:
+    # Miles' gloo group otherwise gets torch's 30-minute default. Ranks that load
+    # weights first wait in it while ranks on cold hosts are still reading them.
+    timeout = max(timedelta(minutes=minutes), default_pg_timeout)
+
+    def init_gloo_group():
+        if distributed_utils.GLOO_GROUP is None:
+            distributed_utils.GLOO_GROUP = dist.new_group(
+                backend="gloo", timeout=timeout
+            )
+        return distributed_utils.GLOO_GROUP
+
+    train_actor.init_gloo_group = init_gloo_group
+
+
 def _mark_actor_initialized() -> None:
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
@@ -78,6 +97,7 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
     """Upstream multi-LoRA actor with Qwen MTP and weights-only save support."""
 
     def init(self, args, role, **kwargs):
+        _use_distributed_timeout_for_gloo(args.distributed_timeout_minutes)
         # Miles's LoRA builder inherits checkpoint MTP heads without honoring
         # enable_mtp_training. Qwen3.5 then injects an auxiliary backward loss
         # even for a client datum whose weights are all zero.

@@ -509,6 +509,42 @@ def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> N
     assert asyncio.run(registry.get(modal_app._weights_ready_key(FULL_DEFINITION)))
 
 
+def test_sampler_only_weights_download_before_weights_are_ready(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    original = modal_app.module_for(LORA_DEFINITION)
+    recipe = original.recipe
+    definition = DeploymentConfig.create(
+        type(recipe)(
+            **{
+                **vars(recipe),
+                "inference_gpu": [recipe.inference_gpu, "H200"],
+                "inference_gpu_overrides": {"H200": {"model_weights": "org/fp8"}},
+            }
+        )
+    )
+    downloads = []
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+    monkeypatch.setattr(
+        "spindle.providers.modal.app.snapshot_download",
+        lambda **kwargs: downloads.append(kwargs["local_dir"]),
+    )
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(
+        modal_app,
+        "model_assets",
+        SimpleNamespace(commit=SimpleNamespace(aio=AsyncMock())),
+    )
+
+    assert modal_app._weights_id(LORA_DEFINITION) != (
+        f"{LORA_DEFINITION}:{original.weights_repo}@{recipe.weights_revision}"
+    )
+    asyncio.run(modal_app.prepare_model_assets.local(LORA_DEFINITION))
+
+    assert downloads == [original.asset_path, "/assets/org/fp8"]
+    assert asyncio.run(modal_app._weights_are_ready(LORA_DEFINITION))
+
+
 def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     kv = InMemoryKeyValueStore()

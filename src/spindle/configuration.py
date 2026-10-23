@@ -65,6 +65,9 @@ class BaseConfig:
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}
+    # Per inference_gpu entry: dotted overrides of model_weights, weights_revision,
+    # sglang_cfg and inference_env applied when a sampler runs on that GPU type.
+    inference_gpu_overrides = {}
 
     miles_cfg = {}
     megatron_cfg = {}
