@@ -161,6 +161,26 @@ def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
     assert row.inference_settings["context_length"] == 32768
 
 
+@pytest.mark.parametrize("context, tp", [("8k", 4), ("32k", 8)])
+def test_deepseek_v41_1017_recipes_load_1017_weights_everywhere(context, tp):
+    row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert miles.tensor_model_parallel_size == tp
+    assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    assert row.weight_sets() == [
+        (
+            "EnvLoop/DeepSeek-V4.1-Flash-1017-bf16",
+            "04bad68f50984a6e84ed4a7b436d3d75168a97b8",
+        ),
+        (
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "1bae0e1088993b9b82de08f59de5be5a34e42170",
+        ),
+    ]
+    h200 = row.for_inference_gpu("NVIDIA H200").recipe
+    assert h200.inference_env["SGLANG_DSV4_FP4_DEQUANT"] == "1"
+
+
 def test_asset_paths_follow_the_model():
     a = resolved()
     assert a.asset_path == f"/assets/{a.recipe.model}"

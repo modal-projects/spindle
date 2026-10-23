@@ -9,6 +9,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 - `inference_gpu_overrides` gives samplers on one GPU type their own weights, environment and SGLang settings. `spindle deploy` downloads every weight set.
 - `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers. H200 samplers serve DeepSeek's FP8/FP4 release.
 - DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four.
+- DeepSeek-V4.1-Flash-1017 LoRA recipes, `deepseek_v41_flash_1017_lora_8k` and `deepseek_v41_flash_1017_lora_32k`, trained from an exact BF16 export of the 1017 release.
 
 ### Fixed
 
