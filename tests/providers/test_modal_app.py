@@ -39,7 +39,9 @@ def reset_lora_pool_cache(monkeypatch):
 
 def weights_ready(monkeypatch, *definitions):
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    monkeypatch.setattr(modal_app, "_weights_ready", set(definitions))
+    monkeypatch.setattr(
+        modal_app, "_weights_ready", {modal_app._weights_id(d) for d in definitions}
+    )
 
 
 def test_definitions_come_only_from_the_configured_records() -> None:
@@ -303,12 +305,36 @@ def test_ready_weights_skip_the_download(monkeypatch) -> None:
     spawned = weight_downloads(monkeypatch, registry, {})
 
     async def run() -> None:
-        await registry.put(f"model_assets_ready:{LORA_DEFINITION}", 1.0)
+        await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
         assert await modal_app._start_weights_download(LORA_DEFINITION) is None
         assert await modal_app._weights_download(LORA_DEFINITION) is None
 
     asyncio.run(run())
     assert spawned == []
+
+
+def test_new_weights_revision_downloads_again(monkeypatch) -> None:
+    from spindle.configuration import BaseConfig
+    from spindle.deployments import DeploymentConfig
+
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = weight_downloads(monkeypatch, registry, {})
+    original = modal_app.module_for(LORA_DEFINITION)
+    definition = original
+    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
+
+    async def run() -> None:
+        nonlocal definition
+        await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
+        assert await modal_app._start_weights_download(LORA_DEFINITION) is None
+        definition = DeploymentConfig.create(
+            BaseConfig(**{**vars(original.recipe), "weights_revision": "abc123"})
+        )
+        assert await modal_app._start_weights_download(LORA_DEFINITION) is not None
+
+    asyncio.run(run())
+    assert spawned == [LORA_DEFINITION]
 
 
 def test_failed_weight_download_is_reported_and_restarted(monkeypatch) -> None:
@@ -333,7 +359,7 @@ def test_download_started_by_another_server_is_joined(monkeypatch) -> None:
     registry = InMemoryKeyValueStore()
     calls = {}
     spawned = weight_downloads(monkeypatch, registry, calls)
-    key = f"model_assets_call:{LORA_DEFINITION}"
+    key = modal_app._weights_call_key(LORA_DEFINITION)
     spawn = modal_app.prepare_model_assets.spawn.aio
 
     async def racing_spawn(definition_id: str):
@@ -454,8 +480,8 @@ def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> N
     registry = InMemoryKeyValueStore()
     events = []
 
-    def download(*, repo_id: str, local_dir: str) -> None:
-        events.append(("download", repo_id, local_dir))
+    def download(*, repo_id: str, revision: str | None, local_dir: str) -> None:
+        events.append(("download", repo_id, revision, local_dir))
 
     async def commit() -> None:
         events.append(("commit",))
@@ -472,10 +498,10 @@ def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> N
 
     definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
-        ("download", definition.model, definition.asset_path),
+        ("download", definition.model, None, definition.asset_path),
         ("commit",),
     ]
-    assert asyncio.run(registry.get(f"model_assets_ready:{FULL_DEFINITION}"))
+    assert asyncio.run(registry.get(modal_app._weights_ready_key(FULL_DEFINITION)))
 
 
 def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) -> None:

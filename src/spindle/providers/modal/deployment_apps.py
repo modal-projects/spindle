@@ -42,15 +42,25 @@ from .kv import shared_kv
 from .lora_pool import LoraPoolSpec
 from .lora_pool import deploy_pool as deploy_lora
 from .megatron_image import image as megatron_image
+from .miles_v012_image import image as miles_v012_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
 
-def image_for(backend):
+TRAINER_IMAGES = {"miles-v0.1.2": miles_v012_image}
+
+
+def image_for(backend, name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
+    if name:
+        if name not in TRAINER_IMAGES:
+            raise ValueError(
+                f"unknown trainer image {name!r}; choose from {sorted(TRAINER_IMAGES)}"
+            )
+        return TRAINER_IMAGES[name]
     return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
         backend
     ]
@@ -159,11 +169,16 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer = app.function(
         name="trainer",
         serialized=True,
-        image=image if image is not None else image_for(recipe.backend),
+        image=(
+            image
+            if image is not None
+            else image_for(recipe.backend, recipe.trainer_image)
+        ),
         gpu=gpu_request(recipe.trainer_gpu, recipe.trainer_gpus_per_node),
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
+        ephemeral_disk=recipe.trainer_disk_mib or None,
         timeout=recipe.trainer_timeout_s,
         max_containers=None,
         min_containers=0,
@@ -278,6 +293,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
+        ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),

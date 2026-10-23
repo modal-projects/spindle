@@ -276,6 +276,23 @@ def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
     assert deployed.calls == []
 
 
+def test_new_spindle_version_redeploys_trainer_and_inference(deployed):
+    row = deployment()
+    cli.deploy([row])
+    deployed.configs = [
+        {**config, "spindle_version": "0.1.0"} for config in deployed.configs
+    ]
+    deployed.calls.clear()
+    cli.deploy([row])
+    assert deployed.calls == ["trainer", "inference", "frontend"]
+
+
+def test_configs_saved_before_versioning_report_0_1_0():
+    saved = deployment().model_dump(mode="json")
+    del saved["spindle_version"]
+    assert DeploymentConfig.model_validate(saved).spindle_version == "0.1.0"
+
+
 def test_deploy_reuses_unchanged_apps(deployed):
     row = deployment()
     cli.deploy([row])

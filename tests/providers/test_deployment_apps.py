@@ -11,6 +11,7 @@ import modal
 import pytest
 from modal._serialization import serialize
 
+import spindle
 import spindle.backends.deployment as backend
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.local import InMemoryKeyValueStore
@@ -83,6 +84,7 @@ def test_trainer_declaration_and_executor_configuration(
     assert app.tags["spindle_role"] == "trainer"
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
+    assert declaration["ephemeral_disk"] is None
     assert declaration["region"] is None
     assert declaration["max_containers"] is None
     assert declaration["single_use_containers"] is True
@@ -241,7 +243,7 @@ def test_real_modal_app_constructs_from_configs_without_legacy_catalog(tmp_path)
             """
 import importlib, sys, modal
 from spindle.providers.modal import deployment_apps, deployment_configs
-deployment_apps.image_for = lambda backend: modal.Image.debian_slim()
+deployment_apps.image_for = lambda backend, name="": modal.Image.debian_slim()
 app = importlib.import_module('spindle.providers.modal.app')
 assert len(app.DEFINITIONS) == 1
 assert app.APP_NAME == 'spindle'
@@ -470,15 +472,18 @@ def test_declared_compute_settings_reach_modal(builders):
     spec.trainer_timeout_s = 90
     spec.trainer_cpu = 12
     spec.trainer_memory_mib = 123456
+    spec.trainer_disk_mib = 600_000
     spec.inference_startup_timeout_s = 90
     spec.inference_min_replicas = 1
     spec.inference_max_replicas = 3
     spec.inference_cpu = 6
     spec.inference_memory_mib = 45000
+    spec.inference_disk_mib = 550_000
     row = DeploymentConfig.create(spec)
     trainer_app, _ = deployment_apps.build_trainer_app(row, image="test")
     trainer, _ = trainer_app.functions["trainer"]
     assert (trainer["cpu"], trainer["memory"], trainer["timeout"]) == (12, 123456, 90)
+    assert trainer["ephemeral_disk"] == 600_000
     pool_app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
@@ -489,6 +494,31 @@ def test_declared_compute_settings_reach_modal(builders):
         90,
     )
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
+    assert server["ephemeral_disk"] == 550_000
+
+
+def test_recipes_select_trainer_images(builders, monkeypatch):
+    image_for = deployment_apps.image_for
+    assert image_for("miles") is deployment_apps.miles_image
+    assert image_for("sglang") is deployment_apps.rollout_image
+    with pytest.raises(ValueError, match="unknown trainer image"):
+        image_for("miles", "missing")
+
+    trainer_image = object()
+    monkeypatch.setitem(deployment_apps.TRAINER_IMAGES, "trainer-x", trainer_image)
+    spec = deepcopy(deployment().recipe)
+    spec.trainer_image = "trainer-x"
+    row = DeploymentConfig.create(spec)
+    trainer_app, _ = deployment_apps.build_trainer_app(row)
+    trainer, _ = trainer_app.functions["trainer"]
+    assert trainer["image"] is trainer_image
+
+
+def test_deepseek_v41_lora_trainer_image_is_registered():
+    assert (
+        deployment_apps.image_for("miles", "miles-v0.1.2")
+        is deployment_apps.miles_v012_image
+    )
 
 
 def test_gpu_type_lists_become_modal_fallbacks(builders):
@@ -501,6 +531,21 @@ def test_gpu_type_lists_become_modal_fallbacks(builders):
     )
     assert trainer_app.functions["trainer"][0]["gpu"] == ["H200:8", "B300:8"]
     assert pool_app.servers["Server"][0]["gpu"] == ["H200:2", "B200:2"]
+
+
+def test_deployed_apps_carry_version_tags(builders, monkeypatch):
+    monkeypatch.setenv("SPINDLE_COMMIT", "54ba00b8cf90d3bead803e334bfdad56584da548")
+    row = deployment()
+    apps = [
+        deployment_apps.build_trainer_app(row, image="test")[0],
+        deployment_apps.build_inference_app(row, image="test")[0],
+        deployment_apps.build_rollout_app(
+            row, LoraPoolSpec(row.definition_id), image="test"
+        )[0],
+    ]
+    for app in apps:
+        assert app.tags["spindle_version"] == spindle.__version__
+        assert app.tags["spindle_commit"] == "54ba00b"
 
 
 def test_gpu_type_lists_survive_saved_config_round_trip():

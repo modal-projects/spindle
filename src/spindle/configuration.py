@@ -32,6 +32,8 @@ class BaseConfig:
     model = ""
     # Hugging Face repo for base weights; defaults to ``model``.
     model_weights = ""
+    # Commit of the weights repo to download; empty follows its default branch.
+    weights_revision = ""
     max_context_length = 16384
     parameterization = "lora"
     backend = "miles"
@@ -41,16 +43,20 @@ class BaseConfig:
     trainer_nodes = 1
     trainer_cpu = 8
     trainer_memory_mib = 32768
+    trainer_disk_mib = 0
     trainer_max_instances = 1
     trainer_max_clients_per_instance = 1
     trainer_timeout_s = 86400
     trainer_env = {}
+    # A name from TRAINER_IMAGES in spindle.providers.modal.deployment_apps; empty uses the default.
+    trainer_image = ""
     sampler_persistence_concurrency = 8
 
     inference_gpu = "H100"
     inference_gpus_per_node = 1
     inference_cpu = 8
     inference_memory_mib = 32768
+    inference_disk_mib = 0
     inference_min_replicas = 0
     inference_max_replicas = 8
     inference_target_concurrency = 16

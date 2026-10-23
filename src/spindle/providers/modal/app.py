@@ -21,6 +21,7 @@ from spindle.providers.contracts import (
 )
 from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
+from spindle.version import COMMIT_ENV, source_commit
 
 from .app_tags import app_tags
 from .checkpoint_storage import (
@@ -105,6 +106,7 @@ TRAINER_DEPLOYMENT_ENV = {
     CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
     PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
     "SPINDLE_APP_NAME": APP_NAME,
+    COMMIT_ENV: source_commit() or "",
 }
 app = modal.App(APP_NAME, tags=app_tags("frontend"))
 
@@ -192,6 +194,7 @@ async def prepare_model_assets(definition_id: str) -> None:
     await asyncio.to_thread(
         snapshot_download,
         repo_id=definition.weights_repo,
+        revision=definition.recipe.weights_revision or None,
         local_dir=checkpoint,
     )
     await model_assets.commit.aio()
@@ -256,20 +259,28 @@ class WeightsDownloadFailed(ValueError):
     pass
 
 
+def _weights_id(definition_id: str) -> str:
+    # A changed weights repo or revision is a new download.
+    definition = module_for(definition_id)
+    revision = definition.recipe.weights_revision
+    return f"{definition_id}:{definition.weights_repo}@{revision}"
+
+
 def _weights_ready_key(definition_id: str) -> str:
-    return f"model_assets_ready:{definition_id}"
+    return f"model_assets_ready:{_weights_id(definition_id)}"
 
 
 def _weights_call_key(definition_id: str) -> str:
-    return f"model_assets_call:{definition_id}"
+    return f"model_assets_call:{_weights_id(definition_id)}"
 
 
 async def _weights_are_ready(definition_id: str) -> bool:
-    if definition_id in _weights_ready:
+    weights = _weights_id(definition_id)
+    if weights in _weights_ready:
         return True
     if await shared_kv().get(_weights_ready_key(definition_id)) is None:
         return False
-    _weights_ready.add(definition_id)
+    _weights_ready.add(weights)
     return True
 
 
