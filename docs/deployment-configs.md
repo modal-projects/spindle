@@ -57,6 +57,8 @@ Each parent's settings and overrides apply before its child's. Constructor field
 
 `trainer_gpu` and `inference_gpu` take one GPU type or a list in preference order, such as `["H200", "B300"]`. Modal schedules the first type with capacity. GPU counts and parallelism settings apply to every entry, so list only types with at least as much memory as the first.
 
+When several clients share a trainer, it trains all of their queued batches together by default, and each client waits for the whole step to finish. For RL, where clients sample at different times, set `trainer_max_clients_per_batch = 1`. The trainer then runs one client at a time, so each client can go back to sampling as soon as its own step is done.
+
 ## Backend options
 
 | Setting | Consumed by |

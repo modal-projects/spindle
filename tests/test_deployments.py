@@ -97,6 +97,7 @@ def test_no_model_catalog_required():
         ({"sglang_cfg": {"model_path": "other"}}, "managed"),
         ({"sglang_cfg": {"tp_size": 2}}, "replica GPU"),
         ({"trainer_max_clients_per_instance": 7}, "max_lora_slots"),
+        ({"trainer_max_clients_per_batch": 0}, "trainer_max_clients_per_batch"),
     ],
 )
 def test_invalid_integrations_fail_when_building_backend_settings(changes, match):
