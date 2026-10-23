@@ -299,21 +299,9 @@ def base_session(definition):
     )
 
 
-def test_ready_weights_skip_the_download(monkeypatch) -> None:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    registry = InMemoryKeyValueStore()
-    spawned = weight_downloads(monkeypatch, registry, {})
-
-    async def run() -> None:
-        await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
-        assert await modal_app._start_weights_download(LORA_DEFINITION) is None
-        assert await modal_app._weights_download(LORA_DEFINITION) is None
-
-    asyncio.run(run())
-    assert spawned == []
-
-
-def test_new_weights_revision_downloads_again(monkeypatch) -> None:
+def test_ready_weights_skip_the_download_until_the_revision_changes(
+    monkeypatch,
+) -> None:
     from spindle.configuration import BaseConfig
     from spindle.deployments import DeploymentConfig
 
@@ -328,6 +316,8 @@ def test_new_weights_revision_downloads_again(monkeypatch) -> None:
         nonlocal definition
         await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
         assert await modal_app._start_weights_download(LORA_DEFINITION) is None
+        assert await modal_app._weights_download(LORA_DEFINITION) is None
+        assert spawned == []
         definition = DeploymentConfig.create(
             BaseConfig(**{**vars(original.recipe), "weights_revision": "abc123"})
         )

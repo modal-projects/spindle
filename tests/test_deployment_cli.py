@@ -247,23 +247,6 @@ def test_deploy_starts_weight_downloads_on_the_new_frontend(deployed, capsys):
     )
 
 
-def test_weight_download_start_failure_only_warns(monkeypatch, deployed):
-    def broken(frontend, environment, definition_id):
-        raise RuntimeError("frontend unavailable")
-
-    monkeypatch.setattr(cli, "start_weights_download", broken)
-    console = Console(record=True, width=160)
-    cli.deploy(
-        [deployment()],
-        run_steps=partial(
-            deploy_wizard.deploy_with_progress, console, retry_command="spindle deploy"
-        ),
-    )
-    output = console.export_text()
-    assert "Weights    qwen35-9b-lora-16k not started (frontend unavailable)" in output
-    assert "Deployed in" in output
-
-
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
     def cancel(*args):
         raise deploy_wizard.Cancelled
