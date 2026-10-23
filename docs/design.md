@@ -10,7 +10,7 @@ A request moves through three layers:
 
 1. The stateless control plane owns the Tinker-facing API, session lifecycle,
    model placement, and sampling orchestration.
-2. A training engine owns one or more model states as well as the actual distributed training backend (Megatron) that holds per-rank GPU workers. A frontend server in each engine turns ordered API calls into commands for the GPU workers, similar to the "broadcast" orchestration of RL libraries. 
+2. A training engine owns one or more model states and a training backend. Its frontend turns ordered API calls into backend commands. Miles manages its GPU workers through Ray; the direct Megatron backend uses Spindle's per-rank command broadcasts.
 3. The sampling plane loads published weights from the trainer via a shared Modal volume (the stitch "bulletin")and serves `sample` requests independent from the training engine. 
 
 Both the training and sampling parts of the system are independently autoscalable: the control plane will provision new training engines for newly registered training clients, and the sampling layer will autoscale replicas based on incoming load through the Flash proxy gateway. 
@@ -70,7 +70,7 @@ In a multi-tenant engine, long synchronous checkpointing/weight sync times not o
 
 Checkpoint and sampler publication operations are split into:
 
-1. Capture, which creates an immutable CPU snapshot while on the GPU lane.
+1. Capture, which detaches an immutable snapshot while on the GPU lane. Depending on the backend, the snapshot consists of CPU tensors or staged files.
 2. Persistence, which writes that snapshot to remote storage on separate threads, *independent* of the GPU lane.
 
 The trainer only blocks on capture before proceeding with the next
@@ -79,10 +79,52 @@ later training without reading partially updated model state. Full checkpoints
 and sampler publication have independent persistence lanes, so a long durable
 state write cannot delay publishing weights for the next rollout.
 
-Capture backpressure bounds the number of outstanding CPU snapshots. When a
+Capture backpressure bounds the number of outstanding snapshots. When a
 persistence lane is full, the scheduler defers further captures for that lane
 while allowing other eligible GPU work to proceed. A save future completes only
 after persistence or sampler publication finishes.
+
+### Supported training backends
+
+Standard deployment recipes select the backend with `backend` and
+`parameterization`. The supported combinations are enforced in
+[`backends/deployment.py`](../src/spindle/backends/deployment.py):
+
+| Backend | Parameterization | Execution |
+| --- | --- | --- |
+| `miles` | `lora` | One Miles trainer group serves one or more LoRA clients, on one or multiple nodes. |
+| `megatron` | `full` | Spindle coordinates per-rank Megatron workers for one full-parameter client per trainer, on one node. |
+
+### Miles LoRA backend
+
+[`MilesCommandBackend`](../src/spindle/backends/miles_lora.py) implements the same
+`Backend` interface used by the engine. Spindle launches one backend bridge
+process, whose [`MilesRuntime`](../src/spindle/backends/miles_runtime/runtime.py)
+drives a Miles Ray trainer group using Miles's Megatron-based multi-LoRA actors.
+The runtime exposes synchronous calls to Spindle while running Miles's
+asynchronous controller on a dedicated event-loop thread. Spindle retains request
+ordering, futures, and scheduling; Miles owns distributed training execution.
+
+Each accepted model maps to a LoRA slot with its own adapter and optimizer state,
+sharing the deployed base model with other slots. When the engine groups
+compatible clients' `forward_backward` requests, the backend converts their
+examples into slot-tagged rows and maps the returned losses and log probabilities
+back to the original requests. An `optim_step` updates only the requested slots;
+clients do not need to advance their optimizer steps together. Unloading a model
+releases its slot for another client.
+
+Miles uses the capture/persistence split with staged files: checkpoint capture
+saves the slot's training state, and sampler capture exports a PEFT adapter.
+These operations finish materializing their files before releasing the GPU lane.
+Persistence then installs and commits the checkpoint, or publishes the adapter
+through the Stitch bulletin, without revisiting live GPU state. Capture therefore
+includes file-writing work; only the subsequent persistence phase overlaps later
+training. Sampling remains in Spindle's separate SGLang fleet.
+
+Recipes configure trainer capacity with `trainer_max_clients_per_instance` and
+Miles options through `miles_cfg`, including `max_lora_slots`, LoRA settings,
+parallelism, and `max_tokens_per_gpu`. The client limit cannot exceed the slot
+count. See [deployment configs](deployment-configs.md) for a complete recipe.
 
 ## Weight publication
 
@@ -169,18 +211,19 @@ Set each configuration's trainer limit with `trainer.max_instances` and its infe
 
 ## Adding a new backend
 
-Each backend implements the synchronous per-rank interface in
+Each backend implements the synchronous interface in
 [`backends/contract.py`](../src/spindle/backends/contract.py). `Engine`
-handles asynchronous scheduling and calls the backend in rank lockstep.
+handles asynchronous scheduling. A backend can execute on each rank, as the
+direct Megatron backend does, or manage its own worker group, as Miles does.
 
 Create a backend module that provides:
 
 - a `Backend` implementation for model acceptance, forward/backward,
   optimizer steps, checkpoints, sampler publication, unload, and shutdown;
-- `build_executor()`, which initializes distributed communication, constructs
+- `build_executor()`, which initializes the backend runtime, constructs
   the backend, and returns its `DistributedExecutor`.
 
-Use [`backends/megatron_lora.py`](../src/spindle/backends/megatron_lora.py) and
+Use [`backends/miles_lora.py`](../src/spindle/backends/miles_lora.py) and
 [`backends/megatron_fft.py`](../src/spindle/backends/megatron_fft.py) as the LoRA
 and FFT references. A model definition passes its `module:build_executor` path
 to `run_engine_with_backend`:
@@ -193,7 +236,7 @@ run_engine_with_backend(
 )
 ```
 
-**Distributed Executor**: All ranks participate in commands through
+**Distributed Executor**: For the direct Megatron backend, all ranks participate in commands through
 [`engine/spmd.py`](../src/spindle/engine/spmd.py). Rank zero exposes the backend
 HTTP bridge while the other ranks follow its broadcasts through `run_follower_loop`.
 The `Engine` schedules operations and passes `Command` values to its
@@ -204,9 +247,13 @@ interface across the local training subprocess boundary.
 Backends implement the capture/persistence split described in [Execution lanes](#execution-lanes).
 
 The executor names these phases `capture_snapshot` and `persist_snapshot`.
-The per-rank backend implements `persist_checkpoint` for checkpoints and
+The backend implements `persist_checkpoint` for checkpoints and
 `publish_sampler_snapshot` for sampler weights. The latter persists the snapshot
 and makes it available to samplers; checkpoint persistence does not imply sampler
 publication.
 
-**IMPORTANT!!** The Engine handles the asynchronous scheduling of the GPU and persistence lanes. However, it is on the backend writer to ensure that their persistence/publication methods and GPU methods do not race with each other (ie. dont have conflicting access to the same state). We recommend against using locks for this purpose and have our LoRA and FFT backends written as references of how to implement lock-free backends. In our implementation, the main pattern is that `capture_*` creates detached CPU state that the persistence/publication method exclusively owns.
+The engine schedules GPU and persistence lanes asynchronously, but backend authors
+must ensure these methods do not race. Persistence must use detached snapshots
+rather than live model, gradient, or optimizer buffers, and must not issue GPU
+collectives. Shared storage operations may still need synchronization: the Miles
+backend uses a lock to prevent checkpoint-volume reloads from racing with writes.
