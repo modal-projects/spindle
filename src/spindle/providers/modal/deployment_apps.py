@@ -296,7 +296,16 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
-        env=deployment_env(recipe.inference_env),
+        env=deployment_env(
+            recipe.inference_env
+            | (
+                {
+                    "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
+                }
+                if lora and recipe.inference_lora_routing == "cache_wait"
+                else {}
+            )
+        ),
         min_containers=minimum,
         max_containers=maximum,
         target_concurrency=recipe.inference_target_concurrency,

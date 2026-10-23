@@ -1,6 +1,8 @@
 //! One scheduler per frontend process and inference pool; native owns transport.
 mod cache_wait;
+mod native;
 
+use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
@@ -497,6 +499,11 @@ impl Router {
     fn pending(&self) -> usize {
         self.reservations.len()
     }
+}
+
+#[pymodule]
+fn spindle_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<native::NativeRuntime>()
 }
 
 #[cfg(test)]
