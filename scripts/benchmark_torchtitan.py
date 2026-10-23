@@ -3,6 +3,7 @@
 import argparse
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import tempfile
 import time
@@ -235,6 +236,62 @@ def diagnose_batching(backend, items, sequence_length):
     return result
 
 
+def measure_training(backend, items, adam, steps, *, serial):
+    phase = "serial" if serial else "packed"
+    batches = (
+        [ForwardBatch((item,), "cross_entropy") for item in items]
+        if serial
+        else [ForwardBatch(items, "cross_entropy")]
+    )
+    history = []
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    started = time.perf_counter()
+    for step in range(1, steps + 1):
+        step_started = time.perf_counter()
+        losses, norms = {}, {}
+        for batch in batches:
+            outputs = backend.forward_backward(batch)
+            ids = tuple(item.model_id for item in batch.items)
+            outcomes = backend.optim_step(ids, adam)
+            for model_id, output, outcome in zip(ids, outputs, outcomes, strict=True):
+                assert outcome.metrics["update_successful:mean"] == 1, model_id
+                losses[model_id] = output.metrics["loss:sum"]
+                norms[model_id] = outcome.metrics["grad_norm:mean"]
+                assert math.isfinite(losses[model_id]), (model_id, losses[model_id])
+        torch.cuda.synchronize()
+        record = {
+            "step": step,
+            "step_s": time.perf_counter() - step_started,
+            "loss_by_adapter": losses,
+            "gradient_norm_by_adapter": norms,
+            "allocated_bytes": torch.cuda.memory_allocated(),
+            "reserved_bytes": torch.cuda.memory_reserved(),
+        }
+        history.append(record)
+        if step == 1 or step % 10 == 0 or step == steps:
+            print(
+                json.dumps(
+                    {
+                        "phase": phase,
+                        "step": step,
+                        "total_steps": steps,
+                        "step_s": record["step_s"],
+                        "mean_loss": sum(losses.values()) / len(losses),
+                        "max_gradient_norm": max(norms.values()),
+                        "allocated_gib": record["allocated_bytes"] / 2**30,
+                    }
+                ),
+                flush=True,
+            )
+    return {
+        "elapsed_s": time.perf_counter() - started,
+        "history": history,
+        "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+        "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+    }
+
+
 def run(
     model_name,
     flavor,
@@ -319,6 +376,15 @@ def run(
                 return {"default_reduction": diagnostic, "fp32_reduction": precise}
             logprob_checks = check_packed_logprobs(backend, items, sequence_length)
             gradient_errors = check_packed_gradients(backend, items)
+            # Compare both schedules from the same warmed parameters and Adam state.
+            for model_id in ids:
+                backend.capture_checkpoint(
+                    model_id,
+                    model_id,
+                    destination=model_id,
+                    include_optimizer=True,
+                )
+                backend.persist_checkpoint(model_id, model_id, overwrite=True)
             print(f"Measuring {count} adapters", flush=True)
             # A publication must survive a subsequent optimizer update unchanged.
             receipt = backend.capture_sampler_snapshot(ids[0], "validation-export", 1)
@@ -328,26 +394,20 @@ def run(
                     2
                 ].items()
             }
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.synchronize()
-            started = time.perf_counter()
-            for _ in range(steps):
-                backend.forward_backward(batch)
-                outcomes = backend.optim_step(ids, adam)
-                assert all(o.metrics["update_successful:mean"] == 1 for o in outcomes)
-            torch.cuda.synchronize()
-            elapsed = time.perf_counter() - started
-            packed_peak_allocated = torch.cuda.max_memory_allocated()
-            packed_peak_reserved = torch.cuda.max_memory_reserved()
-            torch.cuda.synchronize()
-            serial_started = time.perf_counter()
-            for _ in range(steps):
-                for item in items:
-                    backend.forward_backward(ForwardBatch((item,), "cross_entropy"))
-                    (outcome,) = backend.optim_step((item.model_id,), adam)
-                    assert outcome.metrics["update_successful:mean"] == 1
-            torch.cuda.synchronize()
-            serial_elapsed = time.perf_counter() - serial_started
+            packed_run = measure_training(backend, items, adam, steps, serial=False)
+            assert all(backend.jobs[model_id].step == steps + 2 for model_id in ids)
+            print("Checking correctness after packed training", flush=True)
+            final_logprob_checks = check_packed_logprobs(
+                backend, items, sequence_length
+            )
+            final_gradient_errors = check_packed_gradients(backend, items)
+            for model_id in ids:
+                backend.load_checkpoint(model_id, model_id, restore_optimizer=True)
+                assert backend.jobs[model_id].step == 2
+            serial_run = measure_training(backend, items, adam, steps, serial=True)
+            assert all(backend.jobs[model_id].step == steps + 2 for model_id in ids)
+            elapsed = packed_run["elapsed_s"]
+            serial_elapsed = serial_run["elapsed_s"]
             for key, value in backend.sampler_captures.pop("validation-export")[
                 2
             ].items():
@@ -368,8 +428,13 @@ def run(
                     for check in logprob_checks.values()
                 ),
                 "logprob_checks": logprob_checks,
-                "peak_allocated_bytes": packed_peak_allocated,
-                "peak_reserved_bytes": packed_peak_reserved,
+                "peak_allocated_bytes": packed_run["peak_allocated_bytes"],
+                "peak_reserved_bytes": packed_run["peak_reserved_bytes"],
+                "packed_history": packed_run["history"],
+                "serial_history": serial_run["history"],
+                "serial_starts_from_same_checkpoint": True,
+                "post_training_logprob_checks": final_logprob_checks,
+                "post_training_gradient_relative_errors": final_gradient_errors,
                 "packed_serial_logprobs_within_native_bf16_baseline": True,
                 "detached_export_matches": True,
                 "publication_optimizer_step": receipt.optimizer_step,

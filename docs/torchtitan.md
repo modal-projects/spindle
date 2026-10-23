@@ -100,8 +100,9 @@ PYTHONPATH=src modal run --env lilo-deploy scripts/modal_torchtitan_benchmark.py
   --model Qwen/Qwen3.8-27B --flavor 27B --output torchtitan-27b.json
 ```
 
-The probe has a 20-minute GPU timeout; each model benchmark has a 20-minute GPU
-timeout. These are per-call limits; an experiment budget also needs to cover
+The probe has a 20-minute GPU timeout; model benchmarks default to 20 minutes.
+`--timeout-seconds` can extend a benchmark to at most 2,700 seconds (45 minutes).
+These are per-call limits; an experiment budget also needs to cover
 retries and additional configurations. Each call releases its GPU on completion.
 The benchmark downloads public model weights into its ephemeral container; it
 does not modify an existing model-assets volume or shared deployment.
@@ -195,3 +196,24 @@ PYTHONPATH=src modal run --env lilo-deploy scripts/modal_torchtitan_benchmark.py
 ```
 
 Raw result: [27B at 16K](benchmarks/torchtitan-h200-2026-10-23-27b-16k.json).
+
+## Longer training validation
+
+The current runner records every step's per-adapter loss and gradient norm,
+duration, and allocated/reserved memory. It repeats forward isolation and gradient
+checks after the packed phase and restores the same warmed parameters and Adam
+state before timing the serial phase. Checkpoint I/O and correctness checks are
+outside the timed regions. Progress is printed every ten steps; failed updates or
+nonfinite losses stop the run, without automatic retries.
+
+```bash
+PYTHONPATH=src modal run --env lilo-deploy scripts/modal_torchtitan_benchmark.py \
+  --model Qwen/Qwen3.8-27B --flavor 27B --sequence-length 1024 \
+  --adapter-counts 8 --steps 100 --max-batch-rows 4 \
+  --timeout-seconds 2700 --output torchtitan-27b-100-steps.json
+```
+
+This runs 100 packed steps and 100 serial steps from matching checkpoints. Each
+adapter repeatedly sees its own fixed synthetic token sequence; loss reduction
+measures fitting that sequence, not downstream task quality. The run retains the
+synchronized packed-backend scheduling described above.

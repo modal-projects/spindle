@@ -27,6 +27,7 @@ def benchmark(
     diagnose: bool,
     max_batch_tokens: int,
     max_batch_rows: int,
+    timeout_seconds: int,
 ):
     command = [
         sys.executable,
@@ -52,7 +53,7 @@ def benchmark(
         command.append("--compile-layers")
     if diagnose:
         command.append("--diagnose")
-    subprocess.run(command, check=True, timeout=1100)
+    subprocess.run(command, check=True, timeout=timeout_seconds - 60)
     return json.loads(Path("/tmp/result.json").read_text())
 
 
@@ -67,9 +68,14 @@ def main(
     diagnose: bool = False,
     max_batch_tokens: int = 0,
     max_batch_rows: int = 4,
+    timeout_seconds: int = 1200,
     output: str = "torchtitan-benchmark.json",
 ):
-    result = benchmark.remote(
+    if not 120 <= timeout_seconds <= 2700:
+        raise ValueError("timeout_seconds must be between 120 and 2700 (45 minutes)")
+    result = benchmark.with_options(
+        timeout=timeout_seconds, max_containers=1, retries=0
+    ).remote(
         model,
         flavor,
         sequence_length,
@@ -79,6 +85,7 @@ def main(
         diagnose,
         max_batch_tokens,
         max_batch_rows,
+        timeout_seconds,
     )
     Path(output).write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
