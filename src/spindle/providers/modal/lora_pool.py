@@ -98,12 +98,12 @@ def stop_pool(spec: LoraPoolSpec) -> None:
     stop_app(spec.app_name)
 
 
-def stop_app(app_name: str) -> None:
+def stop_app(app_name: str, environment: str | None = None) -> None:
     modal_cli = shutil.which("modal")
     if modal_cli is None:
         raise RuntimeError("modal CLI is unavailable")
     command = [modal_cli, "app", "stop", "-y", app_name]
-    environment = os.environ.get("MODAL_ENVIRONMENT")
+    environment = environment or os.environ.get("MODAL_ENVIRONMENT")
     if environment:
         command.extend(["--env", environment])
     result = subprocess.run(command, capture_output=True, text=True)

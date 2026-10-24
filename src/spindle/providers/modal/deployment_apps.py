@@ -29,7 +29,7 @@ from spindle.inference.serving import (
 from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timeline
 
 from .app_tags import app_tags
-from .deployment import trainer_deployment_env
+from .deployment import FORWARDED_DEPLOYMENT_ENVS, trainer_deployment_env
 from .deployment_configs import PLATFORM_ENV, TRAINER_CONFIG_ENV
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
@@ -420,16 +420,16 @@ def build_inference_app(deployment, platform=None, *, image=None):
         )
 
     @app.function(name="provision_trainer", image=image, serialized=True, timeout=1800)
-    def provision_trainer(config_json: str):
+    def provision_trainer(config_json: str, forwarded_env: dict[str, str]):
         saved = DeploymentConfig.model_validate_json(config_json)
         if saved.name != inference_name or saved.run is None:
             raise ValueError("per-run trainer does not match the deployed app")
-        deploy_run_trainer(saved, platform)
+        deploy_run_trainer(saved, platform, forwarded_env)
 
     return app, provision
 
 
-def deploy_run_trainer(deployment, platform):
+def deploy_run_trainer(deployment, platform, forwarded_env=None):
     """Deploy a per-run trainer app from the provisioner, like a sampler pool."""
     modal_cli = shutil.which("modal")
     if modal_cli is None:
@@ -447,6 +447,11 @@ def deploy_run_trainer(deployment, platform):
         command.extend(["--env", environment])
     env = {
         **os.environ,
+        **{
+            name: value
+            for name, value in (forwarded_env or {}).items()
+            if name in FORWARDED_DEPLOYMENT_ENVS
+        },
         TRAINER_CONFIG_ENV: deployment.model_dump_json(),
         PLATFORM_ENV: json.dumps(platform),
     }

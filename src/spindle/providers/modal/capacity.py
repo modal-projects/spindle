@@ -28,7 +28,11 @@ def gpu_wait(
         cached = checked.get(definition_id)
         if cached is not None and clock() - cached[0] < CHECK_INTERVAL_S:
             return cached[1]
-        stats = await function_for(definition_id).get_current_stats.aio()
+        try:
+            stats = await function_for(definition_id).get_current_stats.aio()
+        except modal.exception.NotFoundError:
+            # A per-run trainer app that is still being deployed.
+            return None
         queued = stats.backlog > 0 and stats.num_total_runners == 0
         result = label_for(definition_id) if queued else None
         checked[definition_id] = (clock(), result)

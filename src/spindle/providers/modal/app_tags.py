@@ -30,6 +30,20 @@ def validate_user_tags(tags: dict[str, str]) -> None:
             raise ValueError(f"app tag key {key!r} is reserved for Spindle")
 
 
+def metadata_tags(metadata: dict[str, object]) -> dict[str, str]:
+    """Tags from Tinker user_metadata, rewriting what Modal would reject."""
+    tags = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        key, value = (
+            re.sub(r"[^a-zA-Z0-9._-]", "-", text)[:63] for text in (key, value)
+        )
+        if key and value and not key.startswith(RESERVED_PREFIXES):
+            tags[key] = value
+    return tags
+
+
 def app_tags(
     role: str,
     *,

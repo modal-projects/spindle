@@ -686,21 +686,22 @@ def test_run_apps_carry_run_tags_and_only_run_their_own_definition(
 
     provisioner_app, _ = deployment_apps.build_inference_app(base, image="test")
     _, provision_trainer = provisioner_app.functions["provision_trainer"]
-    deployed = []
+    commands = []
+    monkeypatch.setattr(deployment_apps.shutil, "which", lambda _: "modal")
     monkeypatch.setattr(
-        deployment_apps,
-        "deploy_run_trainer",
-        lambda config, platform: deployed.append(config.definition_id),
+        deployment_apps.subprocess,
+        "run",
+        lambda command, env, check: commands.append((command, env)),
     )
-    provision_trainer(run.model_dump_json())
-    assert deployed == [run.definition_id]
+    forwarded = {"SPINDLE_REQUEST_TIMING": "1", "LD_PRELOAD": "x"}
+    provision_trainer(run.model_dump_json(), forwarded)
+    command, env = commands[0]
+    assert command[command.index("--name") + 1] == run.trainer_app_name
+    assert env["SPINDLE_REQUEST_TIMING"] == "1"
+    assert env.get("LD_PRELOAD") != "x"
+    assert (
+        DeploymentConfig.model_validate_json(env["SPINDLE_TRAINER_DEPLOYMENT"]).app_tags
+        == run.app_tags
+    )
     with pytest.raises(ValueError, match="per-run trainer"):
-        provision_trainer(base.model_dump_json())
-
-
-@pytest.mark.parametrize("key", ["spindle_role", "_modal_source"])
-def test_recipe_tags_cannot_override_spindle_tags(builders, key):
-    row = deployment()
-    row.recipe.tags = {key: "other"}
-    with pytest.raises(ValueError, match="reserved"):
-        deployment_apps.build_trainer_app(row, image="test")
+        provision_trainer(base.model_dump_json(), {})

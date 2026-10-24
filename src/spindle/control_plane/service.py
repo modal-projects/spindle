@@ -271,9 +271,9 @@ class ControlPlane:
         spec: dict[str, object],
         model_id: str | None = None,
     ) -> ModelCreation:
-        await self._touch_session(session_id)
+        session = await self._open_session(session_id)
+        await self._share_session_touch(session_id)
         if self.run_definition is not None:
-            session = await self._open_session(session_id)
             metadata = {
                 **(session.user_metadata or {}),
                 **(spec.get("user_metadata") or {}),

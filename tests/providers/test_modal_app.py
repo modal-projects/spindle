@@ -11,7 +11,7 @@ import pytest
 
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
-from spindle.deployments import DeploymentConfig, config_path, load
+from spindle.deployments import DeploymentConfig, config_path, load, run_key
 from spindle.errors import RecordNotFound
 from spindle.providers.local import InMemoryKeyValueStore
 from spindle.providers.modal import fft_pool
@@ -1258,10 +1258,35 @@ def test_runs_get_their_own_tagged_definitions(per_run):
         assert config.app_tags == {"run_id": "run-a", "team": "ranking"}
         assert (await app._run_config(unnamed)).app_tags == {"run_id": "session-3"}
         assert app._weights_id(run_a) == app._weights_id(LORA_DEFINITION)
-        assert app.parameterization_for(run_a) == "lora"
         assert await app._run_definition(FULL_DEFINITION, "s", {}) == FULL_DEFINITION
-        with pytest.raises(ValueError, match="invalid app tag"):
-            await app._run_definition(LORA_DEFINITION, "s", {"run_id": "a/b"})
+
+    asyncio.run(check())
+
+
+def test_any_tinker_metadata_becomes_valid_tags(per_run):
+    app, _ = per_run
+    metadata = {
+        "run_id": "org/run 1",
+        "url": "https://wandb.ai/x",
+        "step": 5,
+        "spindle_role": "x",
+        "long": "v" * 100,
+    }
+
+    async def check():
+        run = await app._run_definition(LORA_DEFINITION, "s", metadata)
+        tags = (await app._run_config(run)).app_tags
+        assert tags == {
+            "run_id": "org-run-1",
+            "url": "https---wandb.ai-x",
+            "long": "v" * 63,
+        }
+        assert (
+            run
+            == app.module_for(LORA_DEFINITION)
+            .for_run(run_key("org/run 1"))
+            .definition_id
+        )
 
     asyncio.run(check())
 
@@ -1283,7 +1308,9 @@ def test_first_trainer_spawn_deploys_the_run_trainer_app(per_run, monkeypatch):
     trainer.hydrate = SimpleNamespace(aio=trainer.hydrate_aio)
     trainer.spawn = SimpleNamespace(aio=trainer.spawn_aio)
     provision = SimpleNamespace(
-        remote=SimpleNamespace(aio=AsyncMock(side_effect=deployed.append))
+        remote=SimpleNamespace(
+            aio=AsyncMock(side_effect=lambda config, env: deployed.append(config))
+        )
     )
 
     def from_name(app_name, name, environment_name=None):
@@ -1303,6 +1330,40 @@ def test_first_trainer_spawn_deploys_the_run_trainer_app(per_run, monkeypatch):
         assert saved.definition_id == run
         assert saved.run_tags == {"run_id": "run-a"}
         assert [args[0] for args in spawned] == ["engine-1", "engine-2"]
+
+        # A redeploy that changes trainer settings rebuilds the run's app.
+        for definition in app.DEFINITIONS:
+            definition.recipe.trainer_cpu += 1
+        await app._spawn_engine(run, "engine-3")
+        assert len(deployed) == 2
+
+    asyncio.run(check())
+
+
+def test_failed_run_trainer_deploy_is_reported_to_clients(per_run, monkeypatch):
+    app, registry = per_run
+
+    async def missing():
+        raise modal.exception.NotFoundError("missing")
+
+    async def fail(*args):
+        raise RuntimeError("tag rejected")
+
+    trainer = SimpleNamespace(hydrate=SimpleNamespace(aio=missing))
+    provision = SimpleNamespace(remote=SimpleNamespace(aio=fail))
+    monkeypatch.setattr(
+        app.modal.Function,
+        "from_name",
+        lambda app_name, name, environment_name=None: (
+            provision if name == "provision_trainer" else trainer
+        ),
+    )
+
+    async def check():
+        run = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "run-a"})
+        with pytest.raises(RuntimeError):
+            await app._ensure_run_trainer(run)
+        assert "tag rejected" in await app.deployment_error(run)
 
     asyncio.run(check())
 
@@ -1339,10 +1400,49 @@ def test_cleanup_stops_trainer_apps_of_finished_runs_only(per_run, monkeypatch):
                 created_at=0.0,
             ).model_dump(mode="json"),
         )
-        assert await app._cleanup_run_apps() == (app.module_for(idle).trainer_app_name,)
-        assert stopped == [app.module_for(idle).trainer_app_name]
-        assert await registry.get(f"run_apps:{idle}") is None
-        assert await registry.get(f"run_apps:{busy}") is not None
-        assert await registry.get(f"run_apps:{fresh}") is not None
+        idle_app = app.module_for(idle).trainer_app_name
+        assert await app._cleanup_run_apps() == (idle_app,)
+        assert await app._cleanup_run_apps() == ()
+        assert stopped == [idle_app]
+        assert (await registry.get(f"run_apps:{busy}"))["touched_at"] == 0.0
+        assert not (await registry.get(f"run_apps:{fresh}")).get("stopped")
+        # The retired run's checkpoints still sample on an app with its tags.
+        assert (await app._run_config(idle)).app_tags == {"run_id": "idle"}
+        # Training again under the same run_id reopens its apps.
+        await app._run_definition(LORA_DEFINITION, "s2", {"run_id": "idle"})
+        assert not (await registry.get(f"run_apps:{idle}")).get("stopped")
+
+    asyncio.run(check())
+
+
+def test_cleanup_skips_a_run_that_restarts_during_the_sweep(per_run, monkeypatch):
+    app, registry = per_run
+    stopped = []
+
+    async def no_instances():
+        return ()
+
+    monkeypatch.setattr(
+        app,
+        "ModalEnginePlatform",
+        lambda *args: SimpleNamespace(list_instances=no_instances),
+    )
+
+    async def check():
+        run = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "run-a"})
+        key = f"run_apps:{run}"
+        await registry.put(key, {**await registry.get(key), "touched_at": 0.0})
+        real_get = registry.get
+
+        async def get(name):
+            if name == key and not stopped:
+                stopped.append("restart")
+                await app._run_definition(LORA_DEFINITION, "s2", {"run_id": "run-a"})
+            return await real_get(name)
+
+        monkeypatch.setattr(registry, "get", get)
+        monkeypatch.setattr(app, "stop_app", lambda name: stopped.append(name))
+        assert await app._cleanup_run_apps() == ()
+        assert stopped == ["restart"]
 
     asyncio.run(check())

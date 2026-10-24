@@ -22,6 +22,7 @@ from spindle.deployments import (
     DeploymentConfig,
     config_path,
     load,
+    split_run_definition,
     validate_frontend,
 )
 from spindle.providers.modal.app_tags import validate_user_tags
@@ -40,7 +41,7 @@ from spindle.providers.modal.deployment_configs import (
     start_weights_download,
 )
 from spindle.providers.modal.fft_pool import FFTPoolSpec
-from spindle.providers.modal.lora_pool import LoraPoolSpec
+from spindle.providers.modal.lora_pool import LoraPoolSpec, stop_app
 from spindle.version import __version__, source_commit
 
 
@@ -126,6 +127,8 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
     trainers, inference = apps_to_publish(
         configs, current_configs, environment, trainers, inference
     )
+    # Per-run trainer apps are deployed from the provisioner's copy of Spindle.
+    inference |= {d.name for d in configs if d.recipe.per_run_apps} & trainers
     pools = deployed_pools(platform["frontend"], environment) if inference else []
 
     def deploy_trainer(deployment):
@@ -136,6 +139,13 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
             environment_name=environment
         )
         for record in pools:
+            name, run = split_run_definition(record["definition_id"])
+            if run is not None and name == deployment.name:
+                # The frontend redeploys a run's pool with its tags on next use.
+                pool = LoraPoolSpec.from_dict(record)
+                if not app_is_missing(pool.app_name, environment):
+                    stop_app(pool.app_name, environment)
+                continue
             if record["definition_id"] != deployment.definition_id:
                 continue
             pool = (

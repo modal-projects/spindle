@@ -196,18 +196,20 @@ training = service.create_lora_training_client(
 
 Training clients with the same `run_id` share one set of apps, so a resumed run
 keeps its tags and its warm trainer. A client without a `run_id` gets its own
-apps, tagged with its session ID. Tag keys and values may use only letters,
-digits, `.`, `_`, and `-`, up to 63 characters. Spindle rejects a training client
-whose metadata breaks these rules. Keys starting with `_modal_` or `spindle_`
-are reserved.
+apps, tagged with its session ID. Modal tags allow only letters, digits, `.`,
+`_`, and `-`, up to 63 characters, so Spindle replaces other characters with `-`
+and shortens long values. It skips values that are not strings and keys that
+start with `_modal_` or `spindle_`.
 
 The trade-off is sharing. A per-run trainer serves only that run's adapters, and
 each new run pays a trainer and sampler cold start. Sampling the base model,
 without trained weights, still uses the recipe's shared sampler. When a run has
 no models left, its sampler stops after `pool_idle_timeout_s` and the cleaner
 stops its trainer app after `session_idle_timeout_s`. Each run can use up to
-`trainer_max_instances` trainers. Runs in progress during a `spindle deploy`
-keep their current apps until they finish.
+`trainer_max_instances` trainers. Sampling a finished run's saved weights starts
+its sampler again, still tagged. If `spindle deploy` changes the recipe's sampler
+settings, each run's sampler restarts on next use. If it changes trainer
+settings, a run's trainer app is rebuilt the next time the run starts a trainer.
 
 Read the tags of a deployed app with the Modal SDK:
 

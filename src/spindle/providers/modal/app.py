@@ -13,9 +13,11 @@ from stitch.pools.modal_flash import ModalFlashPool
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
+from spindle.encoding import fingerprint
 from spindle.deployments import (
     modal_app_name,
     run_key,
+    RUN_SEPARATOR,
     split_run_definition,
     validate_frontend,
 )
@@ -28,7 +30,7 @@ from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
 from spindle.version import COMMIT_ENV, source_commit
 
-from .app_tags import app_tags, validate_user_tags
+from .app_tags import app_tags, metadata_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -505,12 +507,8 @@ async def _model_record(kv, model_id: str):
 def module_for(definition_id: str):
     name, run = split_run_definition(definition_id)
     for definition in DEFINITIONS:
-        if definition.definition_id != name:
-            continue
-        if run is None:
-            return definition
-        if definition.recipe.per_run_apps:
-            return definition.for_run(run)
+        if definition.definition_id == name:
+            return definition if run is None else definition.for_run(run)
     raise KeyError(definition_id)
 
 
@@ -525,12 +523,15 @@ async def _run_definition(
     definition = module_for(definition_id)
     if not definition.recipe.per_run_apps:
         return definition_id
-    tags = {"run_id": session_id, **metadata}
-    validate_user_tags(tags)
-    run = definition.for_run(run_key(tags["run_id"]), tags)
-    await shared_kv().put(
-        _run_apps_key(run.definition_id), {"tags": tags, "touched_at": time.time()}
-    )
+    run_id = metadata.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        run_id = session_id
+    tags = metadata_tags({**metadata, "run_id": run_id})
+    run = definition.for_run(run_key(run_id), tags)
+    key = _run_apps_key(run.definition_id)
+    record = await shared_kv().get(key) or {}
+    record.pop("stopped", None)
+    await shared_kv().put(key, {**record, "tags": tags, "touched_at": time.time()})
     return run.definition_id
 
 
@@ -538,27 +539,50 @@ async def _run_config(definition_id: str):
     definition = module_for(definition_id)
     if definition.run is None:
         return definition
-    record = await shared_kv().get(_run_apps_key(definition_id))
-    if record is None:
-        raise ValueError(f"no run is registered for {definition_id}")
-    return definition.for_run(definition.run, record["tags"])
+    record = await shared_kv().get(_run_apps_key(definition_id)) or {}
+    return definition.for_run(definition.run, record.get("tags"))
 
 
 async def _ensure_run_trainer(definition_id: str) -> None:
+    """Deploy the run's trainer app if it is missing or built from older settings."""
     lock = _run_trainer_deploys.setdefault(definition_id, asyncio.Lock())
     async with lock:
-        try:
-            await _trainer_function(definition_id).hydrate.aio()
-            return
-        except modal.exception.NotFoundError:
-            pass
+        registry = shared_kv()
+        key = _run_apps_key(definition_id)
         config = await _run_config(definition_id)
+        identity = fingerprint("run-trainer", list(config.trainer_identity()))
+        if ((await registry.get(key)) or {}).get("trainer_identity") == identity:
+            try:
+                await _trainer_function(definition_id).hydrate.aio()
+                return
+            except modal.exception.NotFoundError:
+                pass
         provision = modal.Function.from_name(
             config.inference_app_name,
             "provision_trainer",
             environment_name=PLATFORM["modal"]["environment"],
         )
-        await provision.remote.aio(config.model_dump_json())
+        try:
+            await provision.remote.aio(
+                config.model_dump_json(), trainer_deployment_env()
+            )
+        except Exception as exc:
+            await registry.put(
+                f"deployment_failure:{definition_id}",
+                {
+                    "error": f"deploying the run's trainer app failed: {exc}",
+                    "instance_id": "provision_trainer",
+                    "failed_at": time.time(),
+                },
+            )
+            raise
+        record = (await registry.get(key)) or {}
+        await registry.put(key, {**record, "trainer_identity": identity})
+
+
+@app.function(image=image, timeout=30 * 60)
+async def ensure_run_trainer(definition_id: str) -> None:
+    await _ensure_run_trainer(definition_id)
 
 
 def parameterization_for(definition_id: str) -> Parameterization | None:
@@ -676,8 +700,14 @@ async def deployment_error(definition_id: str) -> str | None:
 @app.function(image=image)
 async def clear_deployment_failure(definition_id: str) -> None:
     module_for(definition_id)
-    await shared_kv().delete(f"deployment_failure:{definition_id}")
+    registry = shared_kv()
+    await registry.delete(f"deployment_failure:{definition_id}")
     await kick_trainer_reconciler(definition_id)
+    for key in await registry.list_keys(
+        f"deployment_failure:{definition_id}{RUN_SEPARATOR}"
+    ):
+        await registry.delete(key)
+        await kick_trainer_reconciler(key.removeprefix("deployment_failure:"))
 
 
 def _plane():
@@ -693,6 +723,8 @@ def _plane():
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
+        if module_for(model.engine_definition_id).run is not None:
+            await ensure_run_trainer.spawn.aio(model.engine_definition_id)
         if await _start_weights_download(model.engine_definition_id) is not None:
             return
         if parameterization == "full":
@@ -898,8 +930,10 @@ async def _cleanup_run_apps() -> tuple[str, ...]:
     stopped = []
     for key, value in runs:
         definition_id = key.removeprefix("run_apps:")
-        if definition_id in active or float(value["touched_at"]) > (
-            time.time() - SESSION_IDLE_TIMEOUT
+        if (
+            value.get("stopped")
+            or definition_id in active
+            or float(value["touched_at"]) > time.time() - SESSION_IDLE_TIMEOUT
         ):
             continue
         try:
@@ -908,8 +942,18 @@ async def _cleanup_run_apps() -> tuple[str, ...]:
                 continue
             app_name = modal_app_name("spindle-trainer-", definition_id)
             await asyncio.to_thread(stop_app, app_name)
+            # Keep the tags: the run's checkpoints can still be sampled.
+            record = {k: v for k, v in value.items() if k != "trainer_identity"}
             if await registry.get(key) == value:
-                await registry.delete(key)
+                await registry.put(key, {**record, "stopped": True})
+            for prefix in (
+                "trainer_reconcile_request:",
+                "trainer_reconcile_complete:",
+                "trainer_plan:",
+                "engine_current:",
+                "deployment_failure:",
+            ):
+                await registry.delete(f"{prefix}{definition_id}")
             stopped.append(app_name)
         except Exception:
             logging.getLogger(__name__).exception("Failed to clean run %s", key)
