@@ -11,6 +11,7 @@ from pathlib import Path
 import modal
 from stitch.pools.modal_flash import ModalFlashPool
 
+from spindle.deployments import modal_app_name
 from spindle.startup_timing import StartupTimeline
 
 from .deployment_configs import (
@@ -36,7 +37,7 @@ class LoraPoolSpec:
 
     @property
     def app_name(self) -> str:
-        return f"spindle-lora-{self.definition_id}"
+        return modal_app_name("spindle-lora-", self.definition_id)
 
     def as_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -52,7 +53,7 @@ async def pool_gateway(spec: LoraPoolSpec) -> str:
     return await ModalFlashPool(spec.app_name, "Server").gateway_url_async()
 
 
-def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
+def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None, saved=None) -> str:
     pool = ModalFlashPool(spec.app_name, "Server")
     try:
         return pool.gateway_url()
@@ -60,7 +61,7 @@ def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
         if not isinstance(exc, modal.exception.NotFoundError):
             raise
     if config is None:
-        saved = pool_config(spec.definition_id)
+        saved = saved or pool_config(spec.definition_id)
         if saved is None:
             raise ValueError(f"missing deployment config: {spec.definition_id}")
         return provision_pool(saved, spec, platform or platform_from_env())
@@ -94,10 +95,14 @@ def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
 
 
 def stop_pool(spec: LoraPoolSpec) -> None:
+    stop_app(spec.app_name)
+
+
+def stop_app(app_name: str) -> None:
     modal_cli = shutil.which("modal")
     if modal_cli is None:
         raise RuntimeError("modal CLI is unavailable")
-    command = [modal_cli, "app", "stop", "-y", spec.app_name]
+    command = [modal_cli, "app", "stop", "-y", app_name]
     environment = os.environ.get("MODAL_ENVIRONMENT")
     if environment:
         command.extend(["--env", environment])

@@ -25,6 +25,7 @@ from spindle.deployments import (
     DeploymentConfig,
     config_path,
     load,
+    split_run_definition,
     validate_frontend,
 )
 from spindle.providers.local import InMemoryKeyValueStore
@@ -610,3 +611,29 @@ def test_override_values_replace_dictionaries_and_lists():
     )
     assert config.inference_gpu == "H200"
     assert config.sglang_cfg == {}
+
+
+def test_runs_get_their_own_short_app_names_and_tags():
+    base = resolved(
+        recipe("nemotron3-super-120b-a12b-lora-64k-b300", tags={"team": "a"})
+    )
+    run = base.for_run("0123456789ab", {"run_id": "run-1"})
+    assert run.definition_id == f"{base.name}.run-0123456789ab"
+    assert run.name == base.name
+    assert run.inference_app_name == base.inference_app_name
+    assert run.trainer_app_name != base.trainer_app_name
+    assert len(run.trainer_app_name) <= 63
+    assert run.app_tags == {"team": "a", "run_id": "run-1"}
+    assert split_run_definition(run.definition_id) == (base.name, "0123456789ab")
+    assert split_run_definition(base.definition_id) == (base.name, None)
+    saved = DeploymentConfig.model_validate_json(run.model_dump_json())
+    assert saved.definition_id == run.definition_id
+    assert saved.app_tags == run.app_tags
+
+
+def test_per_run_apps_are_lora_only_and_names_stay_parseable():
+    with pytest.raises(ValueError, match="LoRA"):
+        validate_frontend([recipe("qwen35-4b-fft-64k", per_run_apps=True)])
+    with pytest.raises(ValueError, match="cannot contain"):
+        validate_frontend([recipe(name="a.run-b")])
+    validate_frontend([recipe(per_run_apps=True)])

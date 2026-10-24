@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import runpy
@@ -17,10 +18,30 @@ from spindle.configuration import BaseConfig
 
 # Modal's smallest ephemeral disk request.
 MIN_EPHEMERAL_DISK_MIB = 524_288
+MODAL_APP_NAME_MAX = 63
+RUN_SEPARATOR = ".run-"
 
 
 def _jsonable(value):
     return json.loads(json.dumps(value))
+
+
+def run_key(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode()).hexdigest()[:12]
+
+
+def split_run_definition(definition_id: str) -> tuple[str, str | None]:
+    """Return the recipe name and run key of a per-run definition ID."""
+    name, separator, run = definition_id.partition(RUN_SEPARATOR)
+    return name, (run if separator else None)
+
+
+def modal_app_name(prefix: str, definition_id: str) -> str:
+    name = f"{prefix}{definition_id}"
+    if len(name) <= MODAL_APP_NAME_MAX:
+        return name
+    digest = hashlib.sha256(definition_id.encode()).hexdigest()[:10]
+    return f"{name[: MODAL_APP_NAME_MAX - len(digest) - 1]}-{digest}"
 
 
 class DeploymentConfig(BaseModel):
@@ -33,6 +54,12 @@ class DeploymentConfig(BaseModel):
     inference_settings: dict
     # Configs saved before versioning have no version and report 0.1.0.
     spindle_version: str = "0.1.0"
+    # Set on a per-run copy of a recipe with per_run_apps enabled.
+    run: str | None = None
+    run_tags: dict[str, str] = {}
+
+    def for_run(self, run: str, tags: dict[str, str] | None = None):
+        return self.model_copy(update={"run": run, "run_tags": dict(tags or {})})
 
     @field_validator("recipe", mode="before")
     @classmethod
@@ -81,11 +108,17 @@ class DeploymentConfig(BaseModel):
 
     @property
     def definition_id(self) -> str:
-        return self.recipe.name
+        if self.run is None:
+            return self.recipe.name
+        return f"{self.recipe.name}{RUN_SEPARATOR}{self.run}"
+
+    @property
+    def app_tags(self) -> dict[str, str]:
+        return {**self.recipe.tags, **self.run_tags}
 
     @property
     def trainer_app_name(self) -> str:
-        return f"spindle-trainer-{self.recipe.name}"
+        return modal_app_name("spindle-trainer-", self.definition_id)
 
     @property
     def inference_app_name(self) -> str:
@@ -196,6 +229,10 @@ def validate_frontend(recipes: list[BaseConfig]) -> None:
         raise ValueError("duplicate deployment name")
     first = recipes[0]
     for recipe in recipes:
+        if RUN_SEPARATOR in recipe.name:
+            raise ValueError(f"deployment names cannot contain {RUN_SEPARATOR!r}")
+        if recipe.per_run_apps and recipe.parameterization != "lora":
+            raise ValueError("per_run_apps requires a LoRA deployment")
         if recipe.platform != first.platform:
             raise ValueError("deployments on one frontend must share platform settings")
         if (

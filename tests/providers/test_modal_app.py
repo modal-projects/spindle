@@ -668,7 +668,7 @@ def test_ensure_lora_pool_records_deployment(monkeypatch) -> None:
     monkeypatch.setattr(
         modal_app,
         "deploy_lora_pool",
-        lambda pool: f"https://{pool.app_name}",
+        lambda pool, saved: f"https://{pool.app_name}",
     )
 
     gateway = asyncio.run(modal_app.ensure_lora_pool.local(spec.as_dict()))
@@ -1222,5 +1222,127 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         monkeypatch.setattr(app.time, "time", lambda: 1300.0)
         assert await app.deployment_error(LORA_DEFINITION) is None
         assert await registry.get(key) is None
+
+    asyncio.run(check())
+
+
+@pytest.fixture
+def per_run(monkeypatch):
+    app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    definitions = []
+    for definition in app.DEFINITIONS:
+        definition = definition.model_copy(deep=True)
+        definition.recipe.per_run_apps = definition.parameterization == "lora"
+        definitions.append(definition)
+    monkeypatch.setattr(app, "DEFINITIONS", tuple(definitions))
+    monkeypatch.setattr(app, "shared_kv", lambda: registry)
+    monkeypatch.setattr(app, "_run_trainer_deploys", {})
+    return app, registry
+
+
+def test_runs_get_their_own_tagged_definitions(per_run):
+    app, _ = per_run
+
+    async def check():
+        run_a = await app._run_definition(
+            LORA_DEFINITION, "session-1", {"run_id": "run-a", "team": "ranking"}
+        )
+        resumed = await app._run_definition(
+            LORA_DEFINITION, "session-2", {"run_id": "run-a", "team": "ranking"}
+        )
+        unnamed = await app._run_definition(LORA_DEFINITION, "session-3", {})
+        assert resumed == run_a
+        assert len({LORA_DEFINITION, run_a, unnamed}) == 3
+        config = await app._run_config(run_a)
+        assert config.app_tags == {"run_id": "run-a", "team": "ranking"}
+        assert (await app._run_config(unnamed)).app_tags == {"run_id": "session-3"}
+        assert app._weights_id(run_a) == app._weights_id(LORA_DEFINITION)
+        assert app.parameterization_for(run_a) == "lora"
+        assert await app._run_definition(FULL_DEFINITION, "s", {}) == FULL_DEFINITION
+        with pytest.raises(ValueError, match="invalid app tag"):
+            await app._run_definition(LORA_DEFINITION, "s", {"run_id": "a/b"})
+
+    asyncio.run(check())
+
+
+def test_first_trainer_spawn_deploys_the_run_trainer_app(per_run, monkeypatch):
+    app, _ = per_run
+    deployed, spawned = [], []
+
+    class Trainer:
+        async def hydrate_aio(self):
+            if not deployed:
+                raise modal.exception.NotFoundError("missing")
+
+        async def spawn_aio(self, *args):
+            spawned.append(args)
+            return SimpleNamespace(object_id="fc-1")
+
+    trainer = Trainer()
+    trainer.hydrate = SimpleNamespace(aio=trainer.hydrate_aio)
+    trainer.spawn = SimpleNamespace(aio=trainer.spawn_aio)
+    provision = SimpleNamespace(
+        remote=SimpleNamespace(aio=AsyncMock(side_effect=deployed.append))
+    )
+
+    def from_name(app_name, name, environment_name=None):
+        if name == "provision_trainer":
+            return provision
+        return trainer
+
+    monkeypatch.setattr(app.modal.Function, "from_name", from_name)
+    monkeypatch.setattr(app, "current_app_id", lambda: "ap-frontend")
+
+    async def check():
+        run = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "run-a"})
+        await app._spawn_engine(run, "engine-1")
+        await app._spawn_engine(run, "engine-2")
+        assert len(deployed) == 1
+        saved = DeploymentConfig.model_validate_json(deployed[0])
+        assert saved.definition_id == run
+        assert saved.run_tags == {"run_id": "run-a"}
+        assert [args[0] for args in spawned] == ["engine-1", "engine-2"]
+
+    asyncio.run(check())
+
+
+def test_cleanup_stops_trainer_apps_of_finished_runs_only(per_run, monkeypatch):
+    app, registry = per_run
+    stopped = []
+    monkeypatch.setattr(app, "stop_app", stopped.append)
+
+    async def no_instances():
+        return ()
+
+    monkeypatch.setattr(
+        app,
+        "ModalEnginePlatform",
+        lambda *args: SimpleNamespace(list_instances=no_instances),
+    )
+
+    async def check():
+        idle = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "idle"})
+        busy = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "busy"})
+        fresh = await app._run_definition(LORA_DEFINITION, "s", {"run_id": "fresh"})
+        for key in (idle, busy):
+            record = await registry.get(f"run_apps:{key}")
+            await registry.put(f"run_apps:{key}", {**record, "touched_at": 0.0})
+        await registry.put(
+            model_key("m"),
+            ModelRecord(
+                model_id="m",
+                session_id="s",
+                model_seq_id=0,
+                engine_definition_id=busy,
+                spec={},
+                created_at=0.0,
+            ).model_dump(mode="json"),
+        )
+        assert await app._cleanup_run_apps() == (app.module_for(idle).trainer_app_name,)
+        assert stopped == [app.module_for(idle).trainer_app_name]
+        assert await registry.get(f"run_apps:{idle}") is None
+        assert await registry.get(f"run_apps:{busy}") is not None
+        assert await registry.get(f"run_apps:{fresh}") is not None
 
     asyncio.run(check())

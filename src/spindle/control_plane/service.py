@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 
+from spindle.deployments import split_run_definition
 from spindle.encoding import fingerprint
 from spindle.engine.api import EngineApi, FutureStatus
 from spindle.errors import (
@@ -185,6 +186,8 @@ class ControlPlane:
         checkpoint_root: str = "/checkpoints",
         creation_error: Callable[[str], Awaitable[str | None]] | None = None,
         trainer_gpu_wait: Callable[[str], Awaitable[str | None]] | None = None,
+        run_definition: Callable[[str, str, Mapping[str, object]], Awaitable[str]]
+        | None = None,
     ) -> None:
         self.kv = kv
         self.engines = engines
@@ -204,6 +207,7 @@ class ControlPlane:
         self.checkpoint_root = checkpoint_root
         self.creation_error = creation_error
         self.trainer_gpu_wait = trainer_gpu_wait
+        self.run_definition = run_definition
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
         self._sampler_warm_at: dict[str, float] = {}
@@ -268,6 +272,15 @@ class ControlPlane:
         model_id: str | None = None,
     ) -> ModelCreation:
         await self._touch_session(session_id)
+        if self.run_definition is not None:
+            session = await self._open_session(session_id)
+            metadata = {
+                **(session.user_metadata or {}),
+                **(spec.get("user_metadata") or {}),
+            }
+            definition_id = await self.run_definition(
+                definition_id, session_id, metadata
+            )
         mark = fingerprint(
             "create_model",
             {
@@ -458,7 +471,7 @@ class ControlPlane:
         metadata = await self.checkpoint_metadata(path)
         path = self.resolve_checkpoint_path(path)
         saved_base_model = metadata["base_model"]
-        definition_id = metadata["engine_definition_id"]
+        definition_id = split_run_definition(metadata["engine_definition_id"])[0]
         parameterization = metadata["parameterization"]
         lora_config = metadata["lora_config"]
         if base_model is not None and base_model != saved_base_model:
@@ -619,7 +632,8 @@ class ControlPlane:
             if (
                 engine_definition_id is not None
                 and artifact.engine_definition_id is not None
-                and engine_definition_id != artifact.engine_definition_id
+                and split_run_definition(engine_definition_id)[0]
+                != split_run_definition(artifact.engine_definition_id)[0]
             ):
                 raise ValueError("engine_definition_id does not match model_path")
             base_model = artifact.base_model

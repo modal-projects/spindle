@@ -44,6 +44,7 @@ KEY_STORES = {
     "model_assets_ready": "engines",
     "model_assets_call": "engines",
     "lora_pool": "engines",
+    "run_apps": "engines",
     "deployment_failure": "engines",
     "engine_call": "engines",
     "engine_current": "engines",

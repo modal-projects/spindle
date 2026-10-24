@@ -13,7 +13,12 @@ from stitch.pools.modal_flash import ModalFlashPool
 from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
-from spindle.deployments import validate_frontend
+from spindle.deployments import (
+    modal_app_name,
+    run_key,
+    split_run_definition,
+    validate_frontend,
+)
 from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
@@ -23,7 +28,7 @@ from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
 from spindle.version import COMMIT_ENV, source_commit
 
-from .app_tags import app_tags
+from .app_tags import app_tags, validate_user_tags
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -67,6 +72,9 @@ from .lora_pool import (
     pool_gateway as lora_pool_gateway,
 )
 from .lora_pool import (
+    stop_app,
+)
+from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
@@ -97,6 +105,7 @@ _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
 _weights_ready: set[str] = set()
 _weights_starts: dict[str, asyncio.Lock] = {}
+_run_trainer_deploys: dict[str, asyncio.Lock] = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
@@ -247,7 +256,8 @@ async def ensure_fft_pool(spec: dict) -> str:
 @app.function(image=image, max_containers=1, timeout=20 * 60, retries=2)
 async def ensure_lora_pool(spec: dict) -> str:
     pool = LoraPoolSpec.from_dict(spec)
-    gateway = await asyncio.to_thread(deploy_lora_pool, pool)
+    saved = await _run_config(pool.definition_id)
+    gateway = await asyncio.to_thread(deploy_lora_pool, pool, saved=saved)
     await shared_kv().put(
         f"lora_pool:{pool.app_name}",
         {**pool.as_dict(), "touched_at": time.time()},
@@ -263,7 +273,7 @@ def _weights_id(definition_id: str) -> str:
     # A changed weights repo or revision is a new download.
     definition = module_for(definition_id)
     revision = definition.recipe.weights_revision
-    return f"{definition_id}:{definition.weights_repo}@{revision}"
+    return f"{definition.name}:{definition.weights_repo}@{revision}"
 
 
 def _weights_ready_key(definition_id: str) -> str:
@@ -493,10 +503,62 @@ async def _model_record(kv, model_id: str):
 
 
 def module_for(definition_id: str):
+    name, run = split_run_definition(definition_id)
     for definition in DEFINITIONS:
-        if definition.definition_id == definition_id:
+        if definition.definition_id != name:
+            continue
+        if run is None:
             return definition
+        if definition.recipe.per_run_apps:
+            return definition.for_run(run)
     raise KeyError(definition_id)
+
+
+def _run_apps_key(definition_id: str) -> str:
+    return f"run_apps:{definition_id}"
+
+
+async def _run_definition(
+    definition_id: str, session_id: str, metadata: dict[str, object]
+) -> str:
+    """Route a training run to its own apps when its recipe has per_run_apps."""
+    definition = module_for(definition_id)
+    if not definition.recipe.per_run_apps:
+        return definition_id
+    tags = {"run_id": session_id, **metadata}
+    validate_user_tags(tags)
+    run = definition.for_run(run_key(tags["run_id"]), tags)
+    await shared_kv().put(
+        _run_apps_key(run.definition_id), {"tags": tags, "touched_at": time.time()}
+    )
+    return run.definition_id
+
+
+async def _run_config(definition_id: str):
+    definition = module_for(definition_id)
+    if definition.run is None:
+        return definition
+    record = await shared_kv().get(_run_apps_key(definition_id))
+    if record is None:
+        raise ValueError(f"no run is registered for {definition_id}")
+    return definition.for_run(definition.run, record["tags"])
+
+
+async def _ensure_run_trainer(definition_id: str) -> None:
+    lock = _run_trainer_deploys.setdefault(definition_id, asyncio.Lock())
+    async with lock:
+        try:
+            await _trainer_function(definition_id).hydrate.aio()
+            return
+        except modal.exception.NotFoundError:
+            pass
+        config = await _run_config(definition_id)
+        provision = modal.Function.from_name(
+            config.inference_app_name,
+            "provision_trainer",
+            environment_name=PLATFORM["modal"]["environment"],
+        )
+        await provision.remote.aio(config.model_dump_json())
 
 
 def parameterization_for(definition_id: str) -> Parameterization | None:
@@ -576,6 +638,8 @@ async def kick_trainer_reconciler(definition_id: str) -> None:
 async def _spawn_engine(definition_id: str, instance_id: str) -> str:
     if error := await deployment_error(definition_id):
         raise ValueError(error)
+    if module_for(definition_id).run is not None:
+        await _ensure_run_trainer(definition_id)
     call = await _trainer_function(definition_id).spawn.aio(
         instance_id, module_for(definition_id).model_dump_json(), current_app_id()
     )
@@ -704,6 +768,7 @@ def _plane():
         reconcile_trainers=kick_trainers,
         trainer_autoscaling=trainer_autoscaling,
         trainer_gpu_wait=gpu_wait(_trainer_function, _trainer_gpus),
+        run_definition=_run_definition,
     )
 
 
@@ -814,6 +879,43 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
     return tuple(stopped)
 
 
+async def _cleanup_run_apps() -> tuple[str, ...]:
+    """Stop a run's trainer app once it has no models or trainers left."""
+    registry = shared_kv()
+    runs = await registry.list_items("run_apps:")
+    if not runs:
+        return ()
+    active = {
+        ModelRecord.model_validate(value).engine_definition_id
+        for _, value in await registry.list_items("model:")
+    } | {
+        instance.definition_id
+        for instance in await ModalEnginePlatform(
+            registry, _spawn_engine
+        ).list_instances()
+        if not instance.terminal
+    }
+    stopped = []
+    for key, value in runs:
+        definition_id = key.removeprefix("run_apps:")
+        if definition_id in active or float(value["touched_at"]) > (
+            time.time() - SESSION_IDLE_TIMEOUT
+        ):
+            continue
+        try:
+            # A run that restarted since the scan keeps its record and app.
+            if await registry.get(key) != value:
+                continue
+            app_name = modal_app_name("spindle-trainer-", definition_id)
+            await asyncio.to_thread(stop_app, app_name)
+            if await registry.get(key) == value:
+                await registry.delete(key)
+            stopped.append(app_name)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to clean run %s", key)
+    return tuple(stopped)
+
+
 @app.function(image=image, schedule=SWEEP_PERIOD)
 def cleaner():
     async def run() -> None:
@@ -824,5 +926,6 @@ def cleaner():
         await _lose_undefined_models()
         await _cleanup_fft_pools()
         await _cleanup_lora_pools()
+        await _cleanup_run_apps()
 
     asyncio.run(run())

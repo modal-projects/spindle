@@ -163,27 +163,51 @@ Model-specific apps set `_modal_model_name` to the lowercased model basename
 multiple models, so it omits that tag. `training_spindle` avoids matching the
 Dojo report's source-independent `training` filter.
 
-Add your own tags, such as a team or job ID for cost attribution, with the recipe's
-`tags` field. They are applied to the recipe's trainer, inference provisioner, and
-rollout pool apps:
+Add your own tags, such as a team name, with the recipe's `tags` field. Spindle
+applies them to the recipe's trainer, inference provisioner, and sampler apps.
+Changing `tags` redeploys those apps on the next `spindle deploy`. For scoped
+runs, pass `spindle.run(..., tags={...})`.
+
+#### Per-run apps
+
+By default, all runs on a recipe share its trainer and sampler apps, so Modal
+reports their cost together. To see the cost of each run, set
+`per_run_apps = True` on a LoRA recipe:
 
 ```python
 from spindle.configs.qwen36_35b_a3b_lora_32k import Config as Base
 
 
 class Config(Base):
-    name = "sft-job-123"
-    tags = {"team": "ranking", "job_id": "job-123"}
-    overrides = {"platform.frontend": "spindle-job-123"}
+    per_run_apps = True
+    tags = {"team": "ranking"}
 ```
 
-To attribute each job separately, give each job its own recipe `name`, `tags`,
-and frontend, as above, so it gets its own trainer and inference apps.
-`spindle deploy` publishes a frontend with exactly the recipes passed to it.
-The frontend can serve several recipes, so it does not carry recipe tags.
-Keys starting with `_modal_` or `spindle_` are reserved. Changing `tags`
-redeploys the recipe's apps on the next `spindle deploy`. For scoped runs, pass
-`spindle.run(..., tags={...})`.
+Each training run then gets its own trainer app and its own sampler app. Both
+are tagged with the recipe's `tags` and the run's `user_metadata`. Name the run
+with stock Tinker, either on the service client or on the training client:
+
+```python
+service = tinker.ServiceClient(base_url=url, user_metadata={"run_id": "sft-123"})
+training = service.create_lora_training_client(
+    base_model, rank=32, user_metadata={"run_id": "sft-123", "owner": "ana"}
+)
+```
+
+Training clients with the same `run_id` share one set of apps, so a resumed run
+keeps its tags and its warm trainer. A client without a `run_id` gets its own
+apps, tagged with its session ID. Tag keys and values may use only letters,
+digits, `.`, `_`, and `-`, up to 63 characters. Spindle rejects a training client
+whose metadata breaks these rules. Keys starting with `_modal_` or `spindle_`
+are reserved.
+
+The trade-off is sharing. A per-run trainer serves only that run's adapters, and
+each new run pays a trainer and sampler cold start. Sampling the base model,
+without trained weights, still uses the recipe's shared sampler. When a run has
+no models left, its sampler stops after `pool_idle_timeout_s` and the cleaner
+stops its trainer app after `session_idle_timeout_s`. Each run can use up to
+`trainer_max_instances` trainers. Runs in progress during a `spindle deploy`
+keep their current apps until they finish.
 
 Read the tags of a deployed app with the Modal SDK:
 

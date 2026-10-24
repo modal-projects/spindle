@@ -667,6 +667,37 @@ def test_recipe_tags_reach_every_recipe_app(builders):
     assert trainer.tags["spindle_role"] == "trainer"
 
 
+def test_run_apps_carry_run_tags_and_only_run_their_own_definition(
+    builders, monkeypatch
+):
+    base = deployment()
+    base.recipe.per_run_apps = True
+    run = base.for_run("0123456789ab", {"run_id": "run-1", "team": "a"})
+    trainer_app, trainer = deployment_apps.build_trainer_app(run, image="test")
+    pool_app, _ = deployment_apps.build_rollout_app(
+        run, LoraPoolSpec(run.definition_id), image="test"
+    )
+    for app in (trainer_app, pool_app):
+        assert app.tags["run_id"] == "run-1"
+        assert app.tags["team"] == "a"
+    assert trainer_app.name == run.trainer_app_name
+    with pytest.raises(ValueError, match="do not match"):
+        trainer("engine-1", base.model_dump_json(), "ap-frontend")
+
+    provisioner_app, _ = deployment_apps.build_inference_app(base, image="test")
+    _, provision_trainer = provisioner_app.functions["provision_trainer"]
+    deployed = []
+    monkeypatch.setattr(
+        deployment_apps,
+        "deploy_run_trainer",
+        lambda config, platform: deployed.append(config.definition_id),
+    )
+    provision_trainer(run.model_dump_json())
+    assert deployed == [run.definition_id]
+    with pytest.raises(ValueError, match="per-run trainer"):
+        provision_trainer(base.model_dump_json())
+
+
 @pytest.mark.parametrize("key", ["spindle_role", "_modal_source"])
 def test_recipe_tags_cannot_override_spindle_tags(builders, key):
     row = deployment()

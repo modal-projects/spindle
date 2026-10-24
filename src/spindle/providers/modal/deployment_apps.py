@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,7 @@ from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timelin
 
 from .app_tags import app_tags
 from .deployment import trainer_deployment_env
+from .deployment_configs import PLATFORM_ENV, TRAINER_CONFIG_ENV
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
 from .image_dependencies import (
@@ -141,11 +143,14 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     if platform is None:
         platform = deployment.recipe.platform
     recipe = deployment.recipe
-    trainer_name = recipe.name
+    trainer_definition = deployment.definition_id
     app = modal.App(
         deployment.trainer_app_name,
         tags=app_tags(
-            "trainer", model=recipe.model, framework=recipe.backend, extra=recipe.tags
+            "trainer",
+            model=recipe.model,
+            framework=recipe.backend,
+            extra=deployment.app_tags,
         ),
     )
 
@@ -160,7 +165,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
             "trainer_function_entered"
         )
         saved = DeploymentConfig.model_validate_json(config_json)
-        if saved.name != trainer_name:
+        if saved.definition_id != trainer_definition:
             raise ValueError("trainer settings do not match the deployed app")
         os.environ["SPINDLE_FRONTEND_APP_ID"] = frontend_app_id
         log_scheduled_gpus("trainer")
@@ -279,7 +284,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     app = modal.App(
         pool.app_name,
         tags=app_tags(
-            "inference", model=recipe.model, framework="sglang", extra=recipe.tags
+            "inference",
+            model=recipe.model,
+            framework="sglang",
+            extra=deployment.app_tags,
         ),
     )
     options = deployment.inference_settings
@@ -411,4 +419,35 @@ def build_inference_app(deployment, platform=None, *, image=None):
             FFTPoolSpec.from_dict(pool_data), config=saved, platform=platform
         )
 
+    @app.function(name="provision_trainer", image=image, serialized=True, timeout=1800)
+    def provision_trainer(config_json: str):
+        saved = DeploymentConfig.model_validate_json(config_json)
+        if saved.name != inference_name or saved.run is None:
+            raise ValueError("per-run trainer does not match the deployed app")
+        deploy_run_trainer(saved, platform)
+
     return app, provision
+
+
+def deploy_run_trainer(deployment, platform):
+    """Deploy a per-run trainer app from the provisioner, like a sampler pool."""
+    modal_cli = shutil.which("modal")
+    if modal_cli is None:
+        raise RuntimeError("modal CLI is unavailable")
+    command = [
+        modal_cli,
+        "deploy",
+        "-m",
+        "spindle.providers.modal.deployment_trainer_app",
+        "--name",
+        deployment.trainer_app_name,
+    ]
+    environment = platform["modal"]["environment"]
+    if environment:
+        command.extend(["--env", environment])
+    env = {
+        **os.environ,
+        TRAINER_CONFIG_ENV: deployment.model_dump_json(),
+        PLATFORM_ENV: json.dumps(platform),
+    }
+    subprocess.run(command, env=env, check=True)

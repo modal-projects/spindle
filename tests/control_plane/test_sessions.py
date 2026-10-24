@@ -83,3 +83,27 @@ def test_unknown_session_is_rejected() -> None:
             await plane.close_session("missing", "reason")
 
     asyncio.run(run())
+
+
+def test_run_definition_sees_session_and_model_metadata() -> None:
+    calls = []
+
+    async def run_definition(definition_id, session_id, metadata):
+        calls.append((definition_id, session_id, metadata))
+        return f"{definition_id}.run-abc"
+
+    async def run() -> None:
+        plane = control_plane(
+            session_id_factory=lambda: "session-1", run_definition=run_definition
+        )
+        await plane.create_session(user_metadata={"team": "a", "run_id": "s"})
+        creation = await plane.create_model(
+            session_id="session-1",
+            model_seq_id=1,
+            definition_id=DEFINITION,
+            spec={"user_metadata": {"run_id": "run-1"}},
+        )
+        assert creation.model.engine_definition_id == f"{DEFINITION}.run-abc"
+        assert calls == [(DEFINITION, "session-1", {"team": "a", "run_id": "run-1"})]
+
+    asyncio.run(run())

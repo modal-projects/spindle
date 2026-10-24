@@ -31,6 +31,9 @@ class BaseConfig:
     name = ""
     # Extra Modal app tags for this recipe's trainer and inference apps.
     tags = {}
+    # Give each training run its own trainer and sampler apps, tagged with the
+    # run's user_metadata. LoRA only.
+    per_run_apps = False
     model = ""
     # Hugging Face repo for base weights; defaults to ``model``.
     model_weights = ""
