@@ -13,6 +13,7 @@ JOB_TYPES = {
 }
 
 
+MODAL_MAX_APP_TAGS = 8
 RESERVED_PREFIXES = ("_modal_", "spindle_")
 # Modal's tag rule, checked up front so a bad tag fails before any app deploys.
 TAG_PATTERN = re.compile(r"[a-zA-Z0-9._-]{1,63}")
@@ -54,7 +55,6 @@ def app_tags(
     extra = extra or {}
     validate_user_tags(extra)
     tags = {
-        **extra,
         "_modal_source": "spindle",
         "spindle_role": role,
         # Dojo's report also matches job_type=training without checking source.
@@ -65,4 +65,7 @@ def app_tags(
         tags["_modal_framework"] = framework
     if model:
         tags["_modal_model_name"] = model.rsplit("/", 1)[-1].lower()
+    # Modal rejects apps with more tags; user tags fill what Spindle leaves, in order.
+    for key, value in list(extra.items())[: MODAL_MAX_APP_TAGS - len(tags)]:
+        tags[key] = value
     return tags

@@ -663,7 +663,8 @@ def test_recipe_tags_reach_every_recipe_app(builders):
     )
     for app in (trainer, provisioner, pool):
         assert app.tags["team"] == "ranking"
-        assert app.tags["job"] == "sft-123"
+        assert len(app.tags) <= 8
+    assert provisioner.tags["job"] == "sft-123"
     assert trainer.tags["spindle_role"] == "trainer"
 
 
@@ -672,14 +673,16 @@ def test_run_apps_carry_run_tags_and_only_run_their_own_definition(
 ):
     base = deployment()
     base.recipe.per_run_apps = True
-    run = base.for_run("0123456789ab", {"run_id": "run-1", "team": "a"})
+    base.recipe.tags = {"team": "a"}
+    run = base.for_run("0123456789ab", {"owner": "ana", "run_id": "run-1"})
     trainer_app, trainer = deployment_apps.build_trainer_app(run, image="test")
     pool_app, _ = deployment_apps.build_rollout_app(
         run, LoraPoolSpec(run.definition_id), image="test"
     )
     for app in (trainer_app, pool_app):
         assert app.tags["run_id"] == "run-1"
-        assert app.tags["team"] == "a"
+        assert len(app.tags) <= 8
+    assert list(run.app_tags) == ["run_id", "team", "owner"]
     assert trainer_app.name == run.trainer_app_name
     with pytest.raises(ValueError, match="do not match"):
         trainer("engine-1", base.model_dump_json(), "ap-frontend")

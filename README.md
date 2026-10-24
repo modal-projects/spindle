@@ -165,6 +165,8 @@ Dojo report's source-independent `training` filter.
 
 Add your own tags, such as a team name, with the recipe's `tags` field. Spindle
 applies them to the recipe's trainer, inference provisioner, and sampler apps.
+Modal allows 8 tags per app and Spindle's own tags use up to 7, so an app keeps
+only the first of your tags that fit.
 Changing `tags` redeploys those apps on the next `spindle deploy`. For scoped
 runs, pass `spindle.run(..., tags={...})`.
 
@@ -183,9 +185,10 @@ class Config(Base):
     tags = {"team": "ranking"}
 ```
 
-Each training run then gets its own trainer app and its own sampler app. Both
-are tagged with the recipe's `tags` and the run's `user_metadata`. Name the run
-with stock Tinker, either on the service client or on the training client:
+Each training run then gets its own trainer app and its own sampler app, tagged
+with the run's `run_id`. Spindle adds the recipe's `tags` and then the rest of
+the run's `user_metadata` while Modal's tag limit allows. Name the run with
+stock Tinker, either on the service client or on the training client:
 
 ```python
 service = tinker.ServiceClient(base_url=url, user_metadata={"run_id": "sft-123"})

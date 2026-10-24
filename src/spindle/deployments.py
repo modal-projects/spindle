@@ -114,7 +114,11 @@ class DeploymentConfig(BaseModel):
 
     @property
     def app_tags(self) -> dict[str, str]:
-        return {**self.recipe.tags, **self.run_tags}
+        """User tags in priority order: run_id, recipe tags, other run metadata."""
+        run_id = (
+            {"run_id": self.run_tags["run_id"]} if "run_id" in self.run_tags else {}
+        )
+        return {**run_id, **self.recipe.tags, **self.run_tags, **run_id}
 
     @property
     def trainer_app_name(self) -> str:
