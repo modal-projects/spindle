@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 import tinker
+from spindle.client import proxy_client_kwargs
 from tinker import types
 
 from spindle.client import create_full_training_client
@@ -13,6 +14,7 @@ TIMEOUT = 60 * 60
 
 def main() -> None:
     service = tinker.ServiceClient(
+        **proxy_client_kwargs(),
         base_url=os.environ["TINKER_BASE_URL"],
         api_key=os.environ["TINKER_API_KEY"],
     )

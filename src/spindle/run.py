@@ -123,7 +123,7 @@ def run(
                     prepare_assets.remote()
                     if warm:
                         manage.remote("warm")
-                    url = api.get_web_url()
+                    url = api.get_url()
                     if not url:
                         raise RuntimeError("Modal did not return the API URL")
                     yield url, api_key

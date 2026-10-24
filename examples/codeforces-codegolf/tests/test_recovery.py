@@ -138,6 +138,8 @@ def test_checkpoint_recovery(tmp_path, monkeypatch, failure, async_mode, estimat
     monkeypatch.setattr(module, "judge", judge)
     monkeypatch.setattr(module.tinker, "ServiceClient", lambda **kwargs: object())
     monkeypatch.setattr(module.asyncio, "sleep", sleep)
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")
     monkeypatch.setenv("TINKER_BASE_URL", "https://unused.invalid")
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")
     data = tmp_path / "data.json"
@@ -302,6 +304,8 @@ def test_training_batches_commits_and_preserves_checkpoint_receipt(
     monkeypatch.setattr(module, "release", release)
     monkeypatch.setattr(module, "judge", judge)
     monkeypatch.setattr(module.tinker, "ServiceClient", lambda **kwargs: object())
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")
     monkeypatch.setenv("TINKER_BASE_URL", "https://unused.invalid")
     monkeypatch.setenv("TINKER_API_KEY", "test")
     data = tmp_path / "data.json"

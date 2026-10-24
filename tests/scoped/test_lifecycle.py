@@ -77,7 +77,7 @@ def test_owned_children_stop_before_parent(
         "build_app",
         lambda *a, **kw: (
             SimpleNamespace(run=parent),
-            SimpleNamespace(get_web_url=lambda: "https://example.invalid"),
+            SimpleNamespace(get_url=lambda: "https://example.invalid"),
             SimpleNamespace(remote=manage),
             [],
             SimpleNamespace(remote=lambda: events.append("assets")),
