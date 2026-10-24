@@ -24,6 +24,7 @@ from spindle.deployments import (
     load,
     validate_frontend,
 )
+from spindle.providers.modal.app_tags import validate_user_tags
 from spindle.providers.modal.deployment_apps import (
     build_inference_app,
     build_rollout_app,
@@ -110,6 +111,8 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
     if unknown:
         raise ValueError(f"unknown configs to refresh: {sorted(unknown)}")
     validate_frontend([deployment.recipe for deployment in configs])
+    for deployment in configs:
+        validate_user_tags(deployment.recipe.tags)
     platform = configs[0].recipe.platform
     environment = platform["modal"]["environment"]
     current_configs = [

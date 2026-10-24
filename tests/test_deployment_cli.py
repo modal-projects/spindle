@@ -161,6 +161,18 @@ def test_deploy_rejects_unknown_config_names(deployed, capsys):
     assert deployed.calls == []
 
 
+@pytest.mark.parametrize(
+    "tags", [{"team": "ml infra"}, {"job_id": 123}, {"spindle_role": "x"}]
+)
+def test_invalid_tags_on_any_recipe_deploy_nothing(deployed, tags):
+    valid = deployment()
+    invalid = DeploymentConfig.create(load(config_path("qwen3-8b-lora-32k")))
+    invalid.recipe.tags = tags
+    with pytest.raises(ValueError, match="app tag"):
+        cli.deploy([valid, invalid])
+    assert deployed.calls == []
+
+
 def test_bare_deploy_without_a_terminal_deploys_nothing(monkeypatch, deployed, capsys):
     monkeypatch.setattr(cli, "interactive", lambda: False)
     with pytest.raises(SystemExit):

@@ -1,5 +1,7 @@
 """Attribution for every Modal app created by Spindle."""
 
+import re
+
 from spindle.version import version_tags
 
 JOB_TYPES = {
@@ -12,6 +14,20 @@ JOB_TYPES = {
 
 
 RESERVED_PREFIXES = ("_modal_", "spindle_")
+# Modal's tag rule, checked up front so a bad tag fails before any app deploys.
+TAG_PATTERN = re.compile(r"[a-zA-Z0-9._-]{1,63}")
+
+
+def validate_user_tags(tags: dict[str, str]) -> None:
+    for key, value in tags.items():
+        for text in (key, value):
+            if not isinstance(text, str) or not TAG_PATTERN.fullmatch(text):
+                raise ValueError(
+                    f"invalid app tag {key!r}: {value!r}; keys and values must be "
+                    "1-63 letters, digits, '.', '_' or '-'"
+                )
+        if key.startswith(RESERVED_PREFIXES):
+            raise ValueError(f"app tag key {key!r} is reserved for Spindle")
 
 
 def app_tags(
@@ -22,9 +38,7 @@ def app_tags(
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
     extra = extra or {}
-    reserved = sorted(key for key in extra if key.startswith(RESERVED_PREFIXES))
-    if reserved:
-        raise ValueError(f"app tag keys {reserved} are reserved for Spindle")
+    validate_user_tags(extra)
     tags = {
         **extra,
         "_modal_source": "spindle",

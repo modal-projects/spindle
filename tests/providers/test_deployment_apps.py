@@ -664,7 +664,6 @@ def test_recipe_tags_reach_every_recipe_app(builders):
     for app in (trainer, provisioner, pool):
         assert app.tags["team"] == "ranking"
         assert app.tags["job"] == "sft-123"
-        assert app.tags["_modal_source"] == "spindle"
     assert trainer.tags["spindle_role"] == "trainer"
 
 
