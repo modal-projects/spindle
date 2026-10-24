@@ -60,6 +60,9 @@ class Config(BaseConfig):
     trainer_env = {
         # Lazily loaded kernels can deadlock against in-flight cross-node expert all-to-alls.
         "CUDA_MODULE_LOADING": "EAGER",
+        # cuBLASLt still loads kernels while an expert all-to-all is in flight, which
+        # hangs B200 trainers; blocking collectives keep the two apart.
+        "TORCH_NCCL_BLOCKING_WAIT": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
