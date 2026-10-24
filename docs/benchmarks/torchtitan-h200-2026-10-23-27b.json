@@ -1,0 +1,341 @@
+{
+  "benchmark_kind": "synchronized packed backend",
+  "model": "Qwen/Qwen3.8-27B",
+  "torch": "2.16.0.dev20261023+cu130",
+  "torchtitan_commit": "58350410517dd62a15026e6816be874d0d5cb548",
+  "gpu": "NVIDIA H200",
+  "config": {
+    "hf_checkpoint": "/root/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "model_family": "qwen3_8",
+    "model_flavor": "27B",
+    "max_context_length": 1024,
+    "max_lora_slots": 8,
+    "max_lora_rank": 32,
+    "lora_alpha": 32.0,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "max_batch_tokens": 8192,
+    "max_batch_rows": 4,
+    "loss_chunk_size": 128,
+    "activation_checkpointing": true,
+    "compile_layers": false
+  },
+  "results": [
+    {
+      "adapters": 1,
+      "steps": 3,
+      "tokens_per_step": 1024,
+      "elapsed_s": 3.2948825309999847,
+      "step_s": 1.098294176999995,
+      "tokens_per_s": 932.3549386349927,
+      "serial_step_s": 1.0117525476666742,
+      "serial_tokens_per_s": 1012.1051855629829,
+      "speedup_over_serial": 0.9212035981382417,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004564326308415647
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "logprob_checks": {
+        "adapter-0": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        }
+      },
+      "peak_allocated_bytes": 56948525056,
+      "peak_reserved_bytes": 68606230528,
+      "packed_serial_logprobs_within_native_bf16_baseline": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 2,
+      "steps": 3,
+      "tokens_per_step": 2048,
+      "elapsed_s": 3.750285324999993,
+      "step_s": 1.250095108333331,
+      "tokens_per_s": 1638.2753490896087,
+      "serial_step_s": 2.10154528999999,
+      "serial_tokens_per_s": 974.520991646109,
+      "speedup_over_serial": 1.681108322071463,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.013865863722330894,
+        "adapter-1": 0.012139594359266322
+      },
+      "packed_serial_max_logprob_error": 0.1525440216064453,
+      "logprob_checks": {
+        "adapter-0": {
+          "adapter_error": {
+            "max_absolute": 0.12335872650146484,
+            "mean_absolute": 0.013423907570540905,
+            "relative_l2": 0.0018463077722117305
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.11788749694824219,
+            "mean_absolute": 0.014245576225221157,
+            "relative_l2": 0.001890356419607997
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-1": {
+          "adapter_error": {
+            "max_absolute": 0.1525440216064453,
+            "mean_absolute": 0.013792094774544239,
+            "relative_l2": 0.0019294873345643282
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.3479127883911133,
+            "mean_absolute": 0.01520686224102974,
+            "relative_l2": 0.002249639481306076
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        }
+      },
+      "peak_allocated_bytes": 60099685888,
+      "peak_reserved_bytes": 69006786560,
+      "packed_serial_logprobs_within_native_bf16_baseline": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 4,
+      "steps": 3,
+      "tokens_per_step": 4096,
+      "elapsed_s": 5.297207515000025,
+      "step_s": 1.7657358383333417,
+      "tokens_per_s": 2319.7127855014646,
+      "serial_step_s": 4.2573031036666675,
+      "serial_tokens_per_s": 962.1114353996213,
+      "speedup_over_serial": 2.411064560871737,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004621155416835924,
+        "adapter-1": 0.004272356219191333,
+        "adapter-2": 0.004331516125359309,
+        "adapter-3": 0.0037284829602053757
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "logprob_checks": {
+        "adapter-0": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-1": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-2": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-3": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        }
+      },
+      "peak_allocated_bytes": 66379092480,
+      "peak_reserved_bytes": 69835161600,
+      "packed_serial_logprobs_within_native_bf16_baseline": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 8,
+      "steps": 3,
+      "tokens_per_step": 8192,
+      "elapsed_s": 10.755052422999995,
+      "step_s": 3.585017474333332,
+      "tokens_per_s": 2285.0655704330647,
+      "serial_step_s": 8.499068237999987,
+      "serial_tokens_per_s": 963.8703644445326,
+      "speedup_over_serial": 2.3707187758074935,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004509789120554913,
+        "adapter-1": 0.004258891723960994,
+        "adapter-2": 0.004394872876208897,
+        "adapter-3": 0.003768890326843523,
+        "adapter-4": 0.004031399009614656,
+        "adapter-5": 0.004372888175519146,
+        "adapter-6": 0.00419931136505858,
+        "adapter-7": 0.004507490092986364
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "logprob_checks": {
+        "adapter-0": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-1": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-2": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-3": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-4": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-5": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-6": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-7": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        }
+      },
+      "peak_allocated_bytes": 76816486912,
+      "peak_reserved_bytes": 77932265472,
+      "packed_serial_logprobs_within_native_bf16_baseline": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    }
+  ]
+}

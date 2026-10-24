@@ -6,6 +6,8 @@ import contextlib
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+import shutil
+import tempfile
 
 import httpx
 import modal
@@ -25,6 +27,8 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        cache_directory = tempfile.TemporaryDirectory(prefix="spindle-lora-")
+        app.state.adapter_cache = SnapshotBulletin(cache_directory.name)
         app.state.client = httpx.AsyncClient(
             base_url=upstream_url.rstrip("/"),
             timeout=3000,
@@ -42,6 +46,7 @@ def create_app(
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
             await app.state.client.aclose()
+            cache_directory.cleanup()
 
     app = FastAPI(lifespan=lifespan)
 
@@ -119,7 +124,8 @@ async def _prepare_adapter(
     if task is None:
 
         async def prepare():
-            # Reload must not hide paths while SGLang reads a new adapter.
+            # Serialize Volume refresh and staging; SGLang may retain mmaps
+            # after /load_lora_adapter returns, so it must read local copies.
             async with app.state.adapter_lock:
                 if ref is not None and ref.identity in app.state.registered_adapters:
                     return ref, None
@@ -148,6 +154,9 @@ async def _prepare_adapter(
                     if resolved.identity in app.state.registered_adapters:
                         return resolved, None
                     path = await asyncio.to_thread(bulletin.resolve, resolved)
+                path = await asyncio.to_thread(
+                    _stage_adapter, app.state.adapter_cache, resolved, path
+                )
                 response = await app.state.client.post(
                     "/load_lora_adapter",
                     json={
@@ -175,6 +184,20 @@ async def _prepare_adapter(
     # Share only in-flight work. Later requests still resolve the latest version.
     # One disconnected request must not cancel registration for other callers.
     return await asyncio.shield(task)
+
+
+def _stage_adapter(cache: SnapshotBulletin, ref: VersionRef, source: Path) -> Path:
+    target = cache.snapshot_dir(ref)
+    if target.exists():
+        return cache.resolve(ref)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copytree(source, temporary)
+        temporary.rename(target)
+        return cache.resolve(ref)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
 
 
 async def _post_generate(

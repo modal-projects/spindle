@@ -1,5 +1,8 @@
 import asyncio
+from contextlib import ExitStack
 import json
+import mmap
+from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
@@ -29,11 +32,11 @@ def test_sidecar_resolves_exact_adapter_and_stamps_response(tmp_path) -> None:
     def upstream(request):
         payload = json.loads(request.content)
         if request.url.path == "/load_lora_adapter":
-            assert payload == {
-                "lora_name": adapter.identity,
-                "lora_path": str(bulletin.resolve(adapter)),
-                "pinned": False,
-            }
+            assert payload["lora_name"] == adapter.identity
+            assert payload["pinned"] is False
+            path = Path(payload["lora_path"])
+            assert not path.is_relative_to(bulletin.root)
+            assert (path / "adapter_model.safetensors").read_bytes() == b"v3"
             return httpx.Response(200, json={"success": True})
         assert request.url.path == "/generate"
         assert payload["lora_path"] == adapter.identity
@@ -72,7 +75,9 @@ def test_sidecar_uses_latest_adapter_satisfying_minimum(tmp_path) -> None:
         payload = json.loads(request.content)
         if request.url.path == "/load_lora_adapter":
             assert payload["lora_name"] == adapter.identity
-            assert payload["lora_path"] == str(bulletin.resolve(adapter))
+            path = Path(payload["lora_path"])
+            assert not path.is_relative_to(bulletin.root)
+            assert (path / "adapter_model.safetensors").read_bytes() == b"v4"
             return httpx.Response(200, json={"success": True})
         assert payload["lora_path"] == adapter.identity
         return httpx.Response(200, json={"meta_info": {}})
@@ -249,6 +254,56 @@ def test_volume_refresh_cannot_overlap_adapter_loading(tmp_path) -> None:
             assert len(refreshes) == 1
 
     asyncio.run(scenario())
+
+
+def test_retained_adapter_mmaps_do_not_block_volume_refresh(tmp_path):
+    bulletin = _publish(tmp_path, 1)
+    paths = []
+    mappings = []
+    refreshes = []
+
+    def refresh():
+        # Modal refuses reloads while any process retains a mapped Volume file.
+        assert not any(path.is_relative_to(bulletin.root) for path in paths)
+        refreshes.append(True)
+
+    bulletin._refresh = refresh
+    with ExitStack() as stack:
+
+        def upstream(request):
+            if request.url.path == "/load_lora_adapter":
+                payload = json.loads(request.content)
+                path = Path(payload["lora_path"]) / "adapter_model.safetensors"
+                paths.append(path)
+                stream = stack.enter_context(path.open("rb"))
+                mappings.append(
+                    stack.enter_context(
+                        mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+                    )
+                )
+            return httpx.Response(200, json={"meta_info": {}})
+
+        app = create_app(
+            bulletin, "http://sglang", transport=httpx.MockTransport(upstream)
+        )
+        with TestClient(app) as client:
+            request = {
+                "input_ids": [1],
+                "weight_run_id": "model-a",
+                "weight_version": {"exact_version": 1},
+            }
+            assert client.post("/generate", json=request).status_code == 200
+            _publish(tmp_path, 2)
+            request["weight_version"] = {"min_version": 2}
+            response = client.post("/generate", json=request)
+            assert response.status_code == 200
+            assert response.json()["meta_info"]["weight_version_start"] == 2
+            assert len(refreshes) == 1
+            assert [mapping[:] for mapping in mappings] == [b"v1", b"v2"]
+            request["weight_version"] = {"exact_version": 1}
+            assert client.post("/generate", json=request).status_code == 200
+            assert len(paths) == 2
+        assert all(not path.exists() for path in paths)
 
 
 def test_loaded_exact_version_bypasses_refresh_and_registration_lock(tmp_path) -> None:

@@ -1,0 +1,123 @@
+{
+  "benchmark_kind": "synchronized packed backend",
+  "model": "Qwen/Qwen3.5-4B",
+  "torch": "2.16.0.dev20261023+cu130",
+  "torchtitan_commit": "58350410517dd62a15026e6816be874d0d5cb548",
+  "gpu": "NVIDIA H200",
+  "config": {
+    "hf_checkpoint": "/root/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "model_family": "qwen3_5",
+    "model_flavor": "4B",
+    "max_context_length": 1024,
+    "max_lora_slots": 8,
+    "max_lora_rank": 32,
+    "lora_alpha": 32.0,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "max_batch_tokens": 8192,
+    "max_batch_rows": 8,
+    "loss_chunk_size": 128,
+    "activation_checkpointing": true,
+    "compile_layers": false
+  },
+  "results": [
+    {
+      "adapters": 1,
+      "steps": 3,
+      "tokens_per_step": 1024,
+      "elapsed_s": 1.1379605380000015,
+      "step_s": 0.37932017933333384,
+      "tokens_per_s": 2699.5663710792014,
+      "serial_step_s": 0.3826926000000033,
+      "serial_tokens_per_s": 2675.7768506628845,
+      "speedup_over_serial": 1.0088906967000717,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004342254573195781
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "peak_allocated_bytes": 9667222528,
+      "peak_reserved_bytes": 15070134272,
+      "packed_serial_logprobs_match": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 2,
+      "steps": 3,
+      "tokens_per_step": 2048,
+      "elapsed_s": 1.1775801510000008,
+      "step_s": 0.39252671700000025,
+      "tokens_per_s": 5217.479247406231,
+      "serial_step_s": 0.7505222053333304,
+      "serial_tokens_per_s": 2728.7666979692085,
+      "speedup_over_serial": 1.9120283354708052,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004411551980310515,
+        "adapter-1": 0.01085144972182838
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "peak_allocated_bytes": 10489977344,
+      "peak_reserved_bytes": 15254683648,
+      "packed_serial_logprobs_match": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 4,
+      "steps": 3,
+      "tokens_per_step": 4096,
+      "elapsed_s": 1.6560604679999926,
+      "step_s": 0.5520201559999975,
+      "tokens_per_s": 7420.018916845526,
+      "serial_step_s": 1.5231198213333244,
+      "serial_tokens_per_s": 2689.2171860874355,
+      "speedup_over_serial": 2.7591742887977646,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004386820325879984,
+        "adapter-1": 0.01234114956029409,
+        "adapter-2": 0.0047915239252044346,
+        "adapter-3": 0.005877213099670522
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "peak_allocated_bytes": 12474547712,
+      "peak_reserved_bytes": 15680405504,
+      "packed_serial_logprobs_match": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    },
+    {
+      "adapters": 8,
+      "steps": 3,
+      "tokens_per_step": 8192,
+      "elapsed_s": 2.506317158999991,
+      "step_s": 0.835439052999997,
+      "tokens_per_s": 9805.622529355267,
+      "serial_step_s": 3.0691864076666584,
+      "serial_tokens_per_s": 2669.111260084052,
+      "speedup_over_serial": 3.6737406476815364,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.004605074765109154,
+        "adapter-1": 0.005150591559978113,
+        "adapter-2": 0.004725623224071232,
+        "adapter-3": 0.011919146821632169,
+        "adapter-4": 0.004503139854926975,
+        "adapter-5": 0.005750375781603615,
+        "adapter-6": 0.004596652337878984,
+        "adapter-7": 0.0045941735997488764
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "peak_allocated_bytes": 16449586688,
+      "peak_reserved_bytes": 17725128704,
+      "packed_serial_logprobs_match": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    }
+  ]
+}
