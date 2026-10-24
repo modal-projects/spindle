@@ -12,7 +12,9 @@ For creating multi-lora clients, use the base Tinker `create_lora_training_clien
 ```python
 import tinker
 
-service = tinker.ServiceClient()  # TINKER_BASE_URL and TINKER_API_KEY
+from spindle import proxy_client_kwargs
+
+service = tinker.ServiceClient(**proxy_client_kwargs())  # URL and API key from env
 clients = [
     service.create_lora_training_client(
         base_model="Qwen/Qwen3.5-9B-Base", rank=16,

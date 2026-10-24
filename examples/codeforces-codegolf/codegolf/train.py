@@ -15,7 +15,11 @@ from pathlib import Path
 import httpx
 import modal
 import tinker
-from spindle.client import create_full_training_client_async
+from spindle.client import (
+    create_full_training_client_async,
+    proxy_auth_headers,
+    proxy_client_kwargs,
+)
 from tinker import types
 
 from codegolf.config import Config
@@ -57,7 +61,10 @@ async def release(training):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 os.environ["TINKER_BASE_URL"] + "/api/v1/unload_model",
-                headers={"X-API-Key": os.environ["TINKER_API_KEY"]},
+                headers={
+                    **proxy_auth_headers(),
+                    "X-API-Key": os.environ["TINKER_API_KEY"],
+                },
                 json={"model_id": training.model_id},
             )
             response.raise_for_status()
@@ -121,7 +128,9 @@ async def _train(root, data, app, cfg, commit, telemetry):
         if completed is not None and completed["step"] >= cfg.steps:
             return state
         service = tinker.ServiceClient(
-            base_url=os.environ["TINKER_BASE_URL"], api_key=os.environ["TINKER_API_KEY"]
+            **proxy_client_kwargs(),
+            base_url=os.environ["TINKER_BASE_URL"],
+            api_key=os.environ["TINKER_API_KEY"],
         )
         try:
             await store.event("trainer_create", recovery=recovery, checkpoint=state)

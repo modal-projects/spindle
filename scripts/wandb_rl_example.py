@@ -10,6 +10,8 @@ logs reward, response length, the loss metrics Spindle returns, and step timing.
 
     export TINKER_BASE_URL=https://your-modal-server-url
     export TINKER_API_KEY=...
+    export MODAL_PROXY_TOKEN_ID=...
+    export MODAL_PROXY_TOKEN_SECRET=...
     export WANDB_API_KEY=...   # or `wandb login`
     uv run scripts/wandb_rl_example.py --steps 5
 """
@@ -17,6 +19,7 @@ logs reward, response length, the loss metrics Spindle returns, and step timing.
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import time
 
@@ -45,7 +48,19 @@ def main() -> None:
     parser.add_argument("--wandb-name", default=None)
     args = parser.parse_args()
 
+    header_option = (
+        "default_headers_overrides"
+        if "default_headers_overrides"
+        in inspect.signature(tinker.ServiceClient).parameters
+        else "default_headers"
+    )
     service = tinker.ServiceClient(
+        **{
+            header_option: {
+                "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
+                "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
+            }
+        },
         base_url=os.environ["TINKER_BASE_URL"],
         api_key=os.environ["TINKER_API_KEY"],
     )

@@ -30,6 +30,7 @@ from spindle.providers.modal.scoped_pool import set_minimum
 from spindle.telemetry.otlp import sample_trace
 
 from .app_tags import app_tags
+from .asgi import ASGIServer
 from .checkpoint_storage import ModalCheckpointStorage
 from .engines import ModalEnginePlatform
 from .fft_pool import proxy_auth_headers
@@ -81,6 +82,7 @@ def register_sampler(
     # Latest min is activated only after its model has been assigned.
     @app.server(
         name=name,
+        unauthenticated=False,
         serialized=True,
         image=image,
         gpu=engine.sampler_gpu,
@@ -409,17 +411,29 @@ def build_app(
                         "pinned lease release failed; lease will expire"
                     )
 
-    @app.function(
+    @app.server(
         name="api",
+        unauthenticated=False,
         image=image,
         serialized=True,
-        timeout=1200,
+        port=8000,
+        target_concurrency=128,
+        startup_timeout=60,
+        exit_grace_period=1200,
         secrets=[*telemetry_secrets, api_secret],
         volumes={"/checkpoints": checkpoints},
     )
-    @modal.concurrent(max_inputs=128)
-    @modal.asgi_app(requires_proxy_auth=False)
-    def api():
+    class api:
+        @modal.enter()
+        def start(self):
+            self.http = ASGIServer(create_api())
+            self.http.start()
+
+        @modal.exit()
+        def stop(self):
+            self.http.stop()
+
+    def create_api():
         async def prepare_model(model):
             if model.spec.get("rollout"):
                 raise ValueError(
