@@ -1,11 +1,15 @@
 import asyncio
 import inspect
+import json
+import threading
 from contextlib import asynccontextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
 from fastapi import FastAPI, Header, HTTPException
-from tinker import ServiceClient
+from tinker import ServiceClient, TinkerError
+from tinker.lib._auth_token_provider import ApiKeyAuthProvider
 
 from scripts.check_modal_http import violations
 from spindle.client import proxy_auth_headers, proxy_client_kwargs
@@ -57,6 +61,61 @@ def test_proxy_credentials_fail_closed_when_missing(monkeypatch):
     monkeypatch.delenv("MODAL_PROXY_TOKEN_ID", raising=False)
     with pytest.raises(KeyError):
         proxy_client_kwargs()
+
+
+def test_sdk_rejects_proxy_token_as_tinker_api_key():
+    with pytest.raises(TinkerError, match="api_key must start with the 'tml-' prefix"):
+        ApiKeyAuthProvider("wk-test.ws-test")
+
+
+@pytest.mark.usefixtures("sdk_garbage_collected_off_loop")
+def test_sdk_sends_tinker_key_and_proxy_headers_together(monkeypatch):
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_ID", "wk-test")
+    monkeypatch.setenv("MODAL_PROXY_TOKEN_SECRET", "ws-test")
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            requests.append(dict(self.headers))
+            body = json.dumps({"supported_models": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    service = ServiceClient(
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        api_key="tml-test",
+        **proxy_client_kwargs(),
+    )
+    try:
+        assert service.get_server_capabilities().supported_models == []
+        assert requests
+        for headers in requests:
+            headers = httpx.Headers(headers)
+            assert headers["X-API-Key"] == "tml-test"
+            assert headers["Modal-Key"] == "wk-test"
+            assert headers["Modal-Secret"] == "ws-test"
+    finally:
+        if service._rest_holder:
+            service._rest_holder.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_asgi_server_serves_requests_and_runs_lifespan():
