@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,8 +11,9 @@ pytest.importorskip("torchtitan")
 
 import torch
 from torch import nn
-from tinker import AdamParams, Datum, LoraConfig, ModelInput, TensorData
-from safetensors.torch import save_file
+from tinker import AdamParams, Datum, LoraConfig, ModelInput, TensorData, ServiceClient
+from tinker.types import SamplingParams
+from safetensors.torch import load_file, save_file
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_8 import build_model_config
 from torchtitan.models.common.linear import Linear
@@ -35,6 +37,16 @@ from spindle.deployments import DeploymentConfig
 from spindle.engine import Engine, FutureStatus
 from spindle.engine.backend_http import HttpBackendClient, create_backend_app
 from spindle.engine.spmd import DistributedExecutor
+from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.inference.bulletin import SnapshotBulletin
+from spindle.providers.local import (
+    InMemoryKeyValueStore,
+    InMemorySessionKeyValueStores,
+    LocalEnginePlatform,
+    LocalSamplingTaskPlatform,
+)
+from scripts.torchtitan_rl_trainer import rl_datum
+from tests.support import serve
 
 
 def test_gdn_preserves_varlen_kernels_for_single_sequence(monkeypatch):
@@ -123,6 +135,85 @@ def spec(seed=1, rank=2):
             rank=rank, seed=seed, train_attn=False, train_mlp=True, train_unembed=False
         ),
     )
+
+
+def test_sdk_rl_updates_and_publishes_command_versions(tmp_path, monkeypatch):
+    """CPU preflight for the GPU experiment; inference is explicitly a stub."""
+    monkeypatch.setenv("SPINDLE_BULLETIN_ROOT", str(tmp_path))
+    monkeypatch.delenv("SPINDLE_BULLETIN_VOLUME", raising=False)
+    backend = make_backend(tmp_path)
+
+    async def sample(task):
+        return {
+            "type": "sample",
+            "sequences": [
+                {"tokens": [4, 5], "logprobs": [-0.5, -0.5], "stop_reason": "length"}
+            ],
+        }
+
+    async def run(base_url):
+        service = ServiceClient(base_url=base_url, api_key="tml-local-validation")
+        training = await service.create_lora_training_client_async(
+            base_model="test", rank=2, seed=100, train_attn=False, train_unembed=False
+        )
+        model_id = (await training.get_info_async()).model_id
+        sampler = await training.save_weights_and_get_sampling_client_async()
+        bulletin = SnapshotBulletin(tmp_path)
+        initial = bulletin.read_latest(model_id)
+        initial_weights = load_file(
+            bulletin.resolve(initial) / "adapter_model.safetensors"
+        )
+        rollout = await sampler.sample_async(
+            ModelInput.from_ints([1, 2, 3]),
+            1,
+            SamplingParams(max_tokens=2, temperature=1, seed=1000),
+        )
+        datum = rl_datum([1, 2, 3], rollout.sequences[0], 1.0)
+        assert datum.loss_fn_inputs["target_tokens"].data == [2, 3, 4, 5]
+        assert datum.loss_fn_inputs["advantages"].data == [0, 0, 0.5, 0.5]
+        forward = await training.forward_async([datum], "importance_sampling")
+        assert (
+            len((await forward.result_async()).loss_fn_outputs[0]["logprobs"].data) == 4
+        )
+        backward = await training.forward_backward_async([datum], "importance_sampling")
+        optimizer = await training.optim_step_async(
+            AdamParams(learning_rate=1e-4, grad_clip_norm=1)
+        )
+        await backward.result_async()
+        metrics = (await optimizer.result_async()).metrics
+        assert metrics["update_successful:mean"] == 1
+        assert metrics["grad_norm:mean"] > 0
+        await training.save_weights_and_get_sampling_client_async()
+        latest = bulletin.read_latest(model_id)
+        # Versions follow the command sequence, including forward and optimizer.
+        assert (initial.version, latest.version) == (1, 5)
+        old = load_file(bulletin.resolve(initial) / "adapter_model.safetensors")
+        new = load_file(bulletin.resolve(latest) / "adapter_model.safetensors")
+        assert all(torch.equal(old[key], initial_weights[key]) for key in old)
+        assert any(not torch.equal(old[key], new[key]) for key in old)
+
+    with serve(create_backend_app(DistributedExecutor(backend))) as backend_url:
+        platform = LocalEnginePlatform(
+            "titan_rl", lambda: HttpBackendClient(backend_url)
+        )
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            platform,
+            sampling_tasks=LocalSamplingTaskPlatform(sample),
+            sampling_task_stores=InMemorySessionKeyValueStores(),
+        )
+        definition = SimpleNamespace(
+            definition_id="titan_rl",
+            name="titan_rl",
+            model="test",
+            parameterization="lora",
+            max_context_length=16,
+        )
+        app = create_control_plane_app(
+            plane, [definition], api_key="tml-local-validation", retrieve_window=5
+        )
+        with serve(app) as base_url:
+            asyncio.run(run(base_url))
 
 
 def test_engine_http_runs_independent_adapter_updates(tmp_path):

@@ -72,6 +72,54 @@ can resume correctly. Sampler captures contain detached PEFT weights and publish
 through the existing snapshot bulletin. Checkpoint formats are specific to this
 backend and cannot be loaded as Miles optimizer checkpoints.
 
+## RL weight synchronization check
+
+`scripts/modal_torchtitan_rl.py` exercises the real SDK rollout → importance-sampling
+loss → Adam update → sampler publication path with two independent rank-16 clients
+on Qwen3.8-27B. One H200 runs TorchTitan and the ordinary Spindle engine and HTTP
+API; another runs the pinned SGLang image and production LoRA sidecar. The validation
+uses in-memory control-plane stores and an isolated Modal Volume for snapshots.
+It does not modify an existing deployment.
+
+```bash
+PYTHONPATH=src python3.12 scripts/modal_torchtitan_rl.py --output torchtitan-rl.json
+```
+
+Use Python 3.12 to match the serialized Modal Functions' images. A CPU-only
+preflight verifies Volume commit/reload from the worker's subprocess before GPU
+allocation. Workers use Modal's built-in Function credentials.
+
+The default is five updates per client, with a five-second start stagger. Each
+rollout samples four short answers and receives a positive or negative reward
+for choosing the client's preferred letter. This is an integration check, not
+an evaluation of task quality or realistic RL throughput. Each client independently
+publishes and starts its next rollout; the runner records rollout, training,
+publication, and sampling-readiness timestamps. A deliberate pause in the second
+client's first step makes independent progress observable.
+
+The frozen base stays resident in both workers. TorchTitan exports the adapter
+as ordinary PEFT tensors, including separate gate/up matrices for its fused MLP.
+The existing snapshot bulletin commits immutable, hashed files to the shared
+Volume. The SGLang sidecar refreshes the Volume, resolves the requested version,
+and stages a verified copy on local disk before calling `/load_lora_adapter` with
+a version-specific name. SGLang can retain memory-mapped adapter tensors after
+loading; using the Volume path directly prevented later Volume reloads in the
+27B integration test. Local staging keeps those mappings off the shared Volume.
+Subsequent generation requests select that name and return the served version.
+Staged snapshots remain available for the sidecar's lifetime and are removed at
+shutdown; local storage needs to accommodate the registered adapter versions.
+
+The runner checks fixed-answer log probabilities in both engines before training
+and after every publication. Its acceptance limits are a maximum absolute error
+below 0.25 and a mean below 0.05. It also checks that the updated policy changes,
+that explicitly requesting the initial version still returns its original scores,
+and that the SDK receives the requested policy version. Raw results include
+behavior and training log probabilities, optimizer metrics, publication manifests,
+and per-client timings. Both GPU workers have hard timeouts of at most 30 minutes;
+the launcher also enforces a shared deadline, terminates the workers, and deletes
+its temporary Volume on exit. Retries
+need to fit the overall experiment budget; they are not automatic.
+
 ## Validation
 
 Local validation on 2026-10-23: **155 tests passed**, covering the new backend,
