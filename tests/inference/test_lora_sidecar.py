@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from stitch.types import VersionRef
 
@@ -9,7 +10,7 @@ from spindle.inference.bulletin import SnapshotBulletin
 from spindle.inference.lora_sidecar import create_app
 
 
-def test_generation_concurrency_does_not_block_health_requests(tmp_path):
+def test_generation_concurrency_does_not_block_health_or_metrics(tmp_path):
     async def scenario():
         arrived = 0
         all_arrived = asyncio.Event()
@@ -54,12 +55,52 @@ def test_generation_concurrency_does_not_block_health_requests(tmp_path):
                 await asyncio.wait_for(all_arrived.wait(), 5)
                 health = await asyncio.wait_for(client.get("/health"), 2)
                 assert health.status_code == 200
+                metrics = await asyncio.wait_for(client.get("/metrics"), 2)
+                assert metrics.status_code == 200
             finally:
                 release.set()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 5)
                 assert all(response.status_code == 200 for response in responses)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_metrics_preserves_prometheus_response_without_an_adapter(tmp_path, status):
+    body = b"# TYPE sglang:num_running_reqs gauge\nsglang:num_running_reqs 3\n"
+    content_type = "text/plain; version=0.0.4; charset=utf-8"
+
+    def upstream(request):
+        assert request.method == "GET"
+        assert request.url.path == "/metrics"
+        return httpx.Response(
+            status, content=body, headers={"content-type": content_type}
+        )
+
+    app = create_app(
+        SnapshotBulletin(tmp_path / "bulletin"),
+        "http://sglang",
+        transport=httpx.MockTransport(upstream),
+    )
+    with TestClient(app) as client:
+        response = client.get("/metrics")
+
+    assert response.status_code == status
+    assert response.content == body
+    assert response.headers["content-type"] == content_type
+
+
+def test_metrics_returns_service_unavailable_when_engine_times_out(tmp_path):
+    def upstream(request):
+        raise httpx.ReadTimeout("engine unavailable", request=request)
+
+    app = create_app(
+        SnapshotBulletin(tmp_path / "bulletin"),
+        "http://sglang",
+        transport=httpx.MockTransport(upstream),
+    )
+    with TestClient(app) as client:
+        assert client.get("/metrics").status_code == 503
 
 
 def _publish(tmp_path, version):

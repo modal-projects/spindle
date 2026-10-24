@@ -46,6 +46,13 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
+@pytest.mark.parametrize("preset", ["qwen35-9b-lora-16k", "qwen35-4b-fft-64k"])
+def test_sampler_metrics_are_enabled_by_default_and_can_be_disabled(preset):
+    assert resolved(recipe(preset)).inference_settings["enable_metrics"] is True
+    disabled = resolved(recipe(preset, sglang_cfg__enable_metrics=False))
+    assert disabled.inference_settings["enable_metrics"] is False
+
+
 def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
     assert "capture_dir" not in backend_config(recipe())
     multi_node = backend_config(recipe("qwen38-27b-lora-256k"))
