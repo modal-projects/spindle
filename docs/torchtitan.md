@@ -77,6 +77,10 @@ backend and cannot be loaded as Miles optimizer checkpoints.
 Local validation on 2026-10-23: **155 tests passed**, covering the new backend,
 deployment configuration and CLI, Modal deployment setup, and engine regression
 tests. Ruff and `git diff --check` also passed.
+The full GitHub CPU suite subsequently passed **695 tests, with 2 skipped**;
+the codegolf example and all package build/install checks also passed. CI does
+not install TorchTitan; native-runtime coverage comes from the dedicated pinned
+environment and the H200 runs.
 
 Local tests cover batched/serial output and gradient parity, repeated adapter IDs,
 optimizer isolation, accumulation, forward-only behavior, nonfinite gradients,
@@ -217,3 +221,29 @@ This runs 100 packed steps and 100 serial steps from matching checkpoints. Each
 adapter repeatedly sees its own fixed synthetic token sequence; loss reduction
 measures fitting that sequence, not downstream task quality. The run retains the
 synchronized packed-backend scheduling described above.
+
+The run completed on **2026-10-23**, using benchmark code from commit
+`86b0f6188aa0a01573d27a33809e7fb7e758ee45`. Both phases completed all 100 measured
+steps: **819,200 tokens and 800 successful adapter updates per phase**. The GPU
+container was released after the run, within its 45-minute limit.
+
+| Schedule | Mean step (s) | Median step (s) | P95 step (s) | Training tokens/s |
+| --- | ---: | ---: | ---: | ---: |
+| Packed, two four-row microbatches | 3.624 | 3.586 | 3.805 | 2,260 |
+| Serial, eight individual adapters | 8.500 | 8.535 | 8.626 | 964 |
+
+The sustained speedup was **2.35×**. Peak allocated memory in the timed packed
+phase was **71.54 GiB** (72.58 GiB reserved). Allocated memory sampled after each
+step stayed constant throughout each phase: 64.61 GiB packed and 64.65 GiB serial.
+There were no skipped updates or nonfinite losses. Mean training loss went from
+9.762 to 0.00007960 packed and 0.00007969 serial on the repeated synthetic data.
+
+After 100 packed updates, packed-versus-serial forward outputs and both companion
+isolation checks remained exactly equal. Maximum gradient relative L2 error was
+**1.91%**, below the unchanged 2.5% threshold. The detached sampler capture also
+remained unchanged across both phases and checkpoint restoration.
+
+![Loss, step time, and post-step GPU allocation over 100 steps per schedule](benchmarks/torchtitan-h200-2026-10-23-27b-100-steps.png)
+
+Raw result with every step and adapter:
+[27B, 100 steps per schedule](benchmarks/torchtitan-h200-2026-10-23-27b-100-steps.json).
