@@ -18,9 +18,12 @@ def test_all_packaged_recipes_validate_offline(path):
     if spec.parameterization == "lora":
         resolved = DeploymentConfig.create(spec)
         # Legacy Megatron selectors also match vision layers in current Bridge.
-        assert set(spec.miles_cfg["target_modules"]) == set(
-            resolved.inference_settings["lora_target_modules"]
+        targets = (
+            config["torchtitan"]["target_modules"]
+            if spec.backend == "torchtitan"
+            else spec.miles_cfg["target_modules"]
         )
+        assert set(targets) == set(resolved.inference_settings["lora_target_modules"])
 
 
 @pytest.mark.parametrize("preset", ["qwen35-35b-a3b-fft-64k", "qwen36-35b-a3b-fft-64k"])

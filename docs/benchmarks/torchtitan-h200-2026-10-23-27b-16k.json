@@ -1,0 +1,83 @@
+{
+  "benchmark_kind": "synchronized packed backend",
+  "model": "Qwen/Qwen3.8-27B",
+  "torch": "2.16.0.dev20261023+cu130",
+  "torchtitan_commit": "58350410517dd62a15026e6816be874d0d5cb548",
+  "gpu": "NVIDIA H200",
+  "config": {
+    "hf_checkpoint": "/root/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "model_family": "qwen3_8",
+    "model_flavor": "27B",
+    "max_context_length": 16384,
+    "max_lora_slots": 2,
+    "max_lora_rank": 32,
+    "lora_alpha": 32.0,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "max_batch_tokens": 16384,
+    "max_batch_rows": 4,
+    "loss_chunk_size": 128,
+    "activation_checkpointing": true,
+    "compile_layers": false
+  },
+  "results": [
+    {
+      "adapters": 2,
+      "steps": 3,
+      "tokens_per_step": 32768,
+      "elapsed_s": 42.94866307199999,
+      "step_s": 14.316221023999995,
+      "tokens_per_s": 2288.872178284135,
+      "serial_step_s": 14.316494371000013,
+      "serial_tokens_per_s": 2288.8284765002245,
+      "speedup_over_serial": 1.0000190935163378,
+      "packed_gradient_relative_errors": {
+        "adapter-0": 0.0021344628181653876,
+        "adapter-1": 0.0022363252684600016
+      },
+      "packed_serial_max_logprob_error": 0.0,
+      "logprob_checks": {
+        "adapter-0": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        },
+        "adapter-1": {
+          "adapter_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "frozen_base_error": {
+            "max_absolute": 0.0,
+            "mean_absolute": 0.0,
+            "relative_l2": 0.0
+          },
+          "companion_tokens_max_error": 0.0,
+          "companion_adapters_max_error": 0.0
+        }
+      },
+      "peak_allocated_bytes": 77493847040,
+      "peak_reserved_bytes": 80012640256,
+      "packed_serial_logprobs_within_native_bf16_baseline": true,
+      "detached_export_matches": true,
+      "publication_optimizer_step": 2
+    }
+  ]
+}

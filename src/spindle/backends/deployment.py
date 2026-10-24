@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 from spindle.backends.megatron_config import parse_backend_config
 from spindle.backends.miles_config import MilesBackendConfig
+from spindle.backends.torchtitan_config import TorchTitanConfig
 from spindle.config_validation import reject_managed_options
 
 MILES_MANAGED = {
@@ -74,6 +75,24 @@ SGLANG_MANAGED = {
 
 
 def backend_config(spec, asset_path="/assets/pending"):
+    if spec.backend == "torchtitan":
+        if spec.parameterization != "lora":
+            raise ValueError("TorchTitan requires lora parameterization")
+        if spec.trainer_nodes != 1 or spec.trainer_gpus_per_node != 1:
+            raise ValueError(
+                "TorchTitan currently supports one GPU per trainer instance"
+            )
+        reject_managed_options(
+            spec.torchtitan_cfg, {"hf_checkpoint", "max_context_length"}
+        )
+        config = TorchTitanConfig(
+            hf_checkpoint=asset_path,
+            max_context_length=spec.max_context_length,
+            **spec.torchtitan_cfg,
+        )
+        if spec.trainer_max_clients_per_instance > config.max_lora_slots:
+            raise ValueError("max_clients_per_instance exceeds max_lora_slots")
+        return {"torchtitan": asdict(config), "checkpoint_dir": "/checkpoints"}
     if spec.backend == "megatron":
         if spec.trainer_nodes != 1:
             raise ValueError("multi-node training currently requires Miles")
@@ -145,11 +164,16 @@ def resolve_backend_settings(spec, asset_path):
         **serving_options(spec),
     }
     if spec.parameterization == "lora":
-        miles = MilesBackendConfig(**trainer["miles"])
+        if spec.backend == "torchtitan":
+            lora = TorchTitanConfig(**trainer["torchtitan"])
+            targets = lora.target_modules
+        else:
+            lora = MilesBackendConfig(**trainer["miles"])
+            targets = lora.peft_target_modules
         inference.update(
             enable_lora=True,
-            max_lora_rank=miles.max_lora_rank,
-            lora_target_modules=list(miles.peft_target_modules),
+            max_lora_rank=lora.max_lora_rank,
+            lora_target_modules=list(targets),
         )
         inference.setdefault("max_loaded_loras", 64)
         inference.setdefault("max_loras_per_batch", 8)
