@@ -7,9 +7,7 @@ class Config(Parent):
 
     name = "deepseek-v41-flash-1017-lora-32k"
     model = Weights.model
-    model_weights = Weights.model_weights
     weights_revision = Weights.weights_revision
-    overrides = Weights.overrides
 
 
 config = Config()
