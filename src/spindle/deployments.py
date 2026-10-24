@@ -17,26 +17,6 @@ from spindle.configuration import BaseConfig
 
 # Modal's smallest ephemeral disk request.
 MIN_EPHEMERAL_DISK_MIB = 524_288
-INFERENCE_GPU_OVERRIDABLE = {
-    "model_weights",
-    "weights_revision",
-    "sglang_cfg",
-    "inference_env",
-}
-# Written into each downloaded weights directory once it is complete.
-WEIGHTS_MARKER = ".spindle-weights-revision"
-# The frontend routes every sampler request with the base deployment's values.
-SHARED_SERVING_SETTINGS = (
-    "tp_size",
-    "dp_size",
-    "enable_dp_attention",
-    "skip_tokenizer_init",
-)
-
-
-def gpu_family(gpu: str) -> str:
-    """The GPU a Modal type names: A100 for "A100-80GB", H100 for "H100!"."""
-    return gpu.rstrip("!+").split("-")[0].upper()
 
 
 def _jsonable(value):
@@ -76,69 +56,12 @@ class DeploymentConfig(BaseModel):
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
-        deployment = cls(
+        return cls(
             recipe=pinned,
             trainer_settings=_jsonable(trainer_settings),
             inference_settings=_jsonable(inference_settings),
             spindle_version=__version__,
         )
-        deployment._check_inference_gpu_overrides()
-        return deployment
-
-    def _check_inference_gpu_overrides(self) -> None:
-        gpus = self.recipe.inference_gpu
-        gpus = [gpus] if isinstance(gpus, str) else gpus
-        for gpu, overrides in self.recipe.inference_gpu_overrides.items():
-            fields = {path.split(".")[0] for path in overrides}
-            if gpu not in gpus:
-                raise ValueError(
-                    f"inference_gpu_overrides: {gpu} is not in inference_gpu"
-                )
-            if not fields <= INFERENCE_GPU_OVERRIDABLE:
-                raise ValueError(
-                    f"inference_gpu_overrides can only set {sorted(INFERENCE_GPU_OVERRIDABLE)}"
-                )
-            if (
-                fields & {"model_weights", "weights_revision"}
-                and self.parameterization != "lora"
-            ):
-                raise ValueError("only LoRA samplers can serve other weights")
-            serving = self._with_overrides(overrides).inference_settings
-            changed = [
-                key
-                for key in SHARED_SERVING_SETTINGS
-                if serving.get(key) != self.inference_settings.get(key)
-            ]
-            if changed:
-                raise ValueError(f"inference_gpu_overrides cannot change {changed}")
-        # Two revisions of one repo would share a download directory.
-        self.weight_sets()
-
-    def _with_overrides(self, overrides: dict) -> DeploymentConfig:
-        values = {**vars(self.recipe), "inference_gpu_overrides": {}}
-        if "model_weights" in overrides and "weights_revision" not in overrides:
-            values["weights_revision"] = ""
-        return DeploymentConfig.create(BaseConfig(**values, overrides=overrides))
-
-    def for_inference_gpu(self, gpu_name: str) -> DeploymentConfig:
-        """The deployment a sampler on the GPU named `gpu_name` serves."""
-        words = re.split(r"[\s-]+", gpu_name.upper())
-        for gpu, overrides in self.recipe.inference_gpu_overrides.items():
-            if gpu_family(gpu) in words:
-                return self._with_overrides(overrides)
-        return self
-
-    def weight_sets(self) -> list[tuple[str, str]]:
-        """(repo, revision) of the base weights, then of any sampler-only weights."""
-        sets = [(self.weights_repo, self.recipe.weights_revision)]
-        for overrides in self.recipe.inference_gpu_overrides.values():
-            serving = self._with_overrides(overrides)
-            weights = (serving.weights_repo, serving.recipe.weights_revision)
-            if weights not in sets:
-                sets.append(weights)
-        if len({repo for repo, _ in sets}) != len(sets):
-            raise ValueError("weights for another GPU must come from a different repo")
-        return sets
 
     @property
     def name(self) -> str:
@@ -233,7 +156,6 @@ class DeploymentConfig(BaseModel):
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
-            recipe.inference_gpu_overrides,
             self.inference_settings,
             self.spindle_version,
         )

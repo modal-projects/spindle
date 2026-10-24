@@ -46,6 +46,13 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
+@pytest.mark.parametrize("preset", ["qwen35-9b-lora-16k", "qwen35-4b-fft-64k"])
+def test_sampler_metrics_are_enabled_by_default_and_can_be_disabled(preset):
+    assert resolved(recipe(preset)).inference_settings["enable_metrics"] is True
+    disabled = resolved(recipe(preset, sglang_cfg__enable_metrics=False))
+    assert disabled.inference_settings["enable_metrics"] is False
+
+
 def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
     assert "capture_dir" not in backend_config(recipe())
     multi_node = backend_config(recipe("qwen38-27b-lora-256k"))
@@ -138,17 +145,12 @@ def test_deepseek_v41_lora_recipe():
         "ffn.shared_experts.w3",
     ]
     assert serving["disable_shared_experts_fusion"] is True
-    assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert row.recipe.inference_env["SGLANG_DSV4_FP4_DEQUANT"] == "1"
     assert serving["weight_loader_disable_mmap"] is False
     assert row.recipe.trainer_image == "miles-v0.1.2"
     assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash"
-    assert row.asset_path == "/assets/PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
+    assert row.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash"
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
-
-    h200 = row.for_inference_gpu("NVIDIA H200")
-    assert h200.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash"
-    assert h200.recipe.inference_env["SGLANG_DSV4_FP4_DEQUANT"] == "1"
-    assert row.for_inference_gpu("NVIDIA B200").asset_path == row.asset_path
 
 
 def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
@@ -202,60 +204,6 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.trainer_settings["miles"]["hf_checkpoint"] == row.asset_path
     assert row.trainer_identity() != resolved().trainer_identity()
     assert row.inference_identity() != resolved().inference_identity()
-
-
-H200_WEIGHTS = {
-    "model_weights": "org/model-fp8",
-    "sglang_cfg.mem_fraction_static": 0.9,
-    "inference_env.FP8": "1",
-}
-
-
-def test_inference_gpu_overrides_apply_only_to_samplers_on_that_gpu():
-    gpus = ["B300", "H200", "L4"]
-    base = resolved(inference_gpu=gpus, weights_revision="abc123")
-    row = resolved(
-        inference_gpu=gpus,
-        weights_revision="abc123",
-        inference_gpu_overrides={"H200": H200_WEIGHTS, "L4": {"inference_env.L4": "1"}},
-    )
-    assert row.for_inference_gpu("NVIDIA B300 SXM6 AC") is row
-    assert row.for_inference_gpu("NVIDIA L40S") is row
-    h200 = row.for_inference_gpu("NVIDIA H200")
-    assert h200.asset_path == "/assets/org/model-fp8"
-    # Other weights do not inherit the base weights' revision.
-    assert h200.recipe.weights_revision == ""
-    assert h200.inference_settings["mem_fraction_static"] == 0.9
-    assert h200.recipe.inference_env["FP8"] == "1"
-    assert row.asset_path == base.asset_path
-    assert row.trainer_settings == base.trainer_settings
-    assert row.weight_sets() == [(row.weights_repo, "abc123"), ("org/model-fp8", "")]
-    assert row.inference_identity() != base.inference_identity()
-
-
-@pytest.mark.parametrize(
-    "preset, gpus, overrides, match",
-    [
-        (None, "B300", {"H200": H200_WEIGHTS}, "not in inference_gpu"),
-        (None, ["B300", "H200"], {"H200": {"trainer_gpu": "H200"}}, "can only set"),
-        (
-            None,
-            ["B300", "H200"],
-            {"H200": {"weights_revision": "abc"}},
-            "different repo",
-        ),
-        (None, ["B300", "H200"], {"H200": {"sglang_cfg.dp_size": 2}}, "dp_size"),
-        ("qwen35-4b-fft-64k", ["H200", "B300"], {"B300": H200_WEIGHTS}, "LoRA"),
-    ],
-)
-def test_invalid_inference_gpu_overrides_fail_at_deploy(preset, gpus, overrides, match):
-    spec = recipe(
-        preset or "qwen35-9b-lora-16k",
-        inference_gpu=gpus,
-        inference_gpu_overrides=overrides,
-    )
-    with pytest.raises(ValueError, match=match):
-        resolved(spec)
 
 
 def test_trainer_image_is_part_of_trainer_identity():
