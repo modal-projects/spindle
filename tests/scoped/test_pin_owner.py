@@ -43,6 +43,7 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
         assert tags["_modal_job_type"] == "serving"
         assert tags["_modal_framework"] == "sglang"
         assert tags["_modal_model_name"] == "qwen3.6-35b-a3b"
+        assert tags["team"] == "ranking"
         return child
 
     monkeypatch.setattr(modal, "App", create_app)
@@ -59,6 +60,7 @@ def test_pinned_app_preserves_complete_model_identity(monkeypatch, model_id):
             registry_name="registry",
             pool=object(),
             proxy_secret=None,
+            tags={"team": "ranking"},
         ) as route:
             assert route == {
                 "url": "https://sampler",

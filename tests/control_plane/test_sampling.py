@@ -1,9 +1,11 @@
 import asyncio
+import time
 
 import pytest
 
 from tests.support import EchoExecutor, TinkerStubSampler
 from spindle.control_plane import ControlPlane, FutureResolutionStatus
+from spindle.control_plane.service import SAMPLER_WARM_FOR_S
 from spindle.control_plane.keys import (
     sample_task_key,
     sampling_session_creation_key,
@@ -278,5 +280,77 @@ def test_submit_sample_checks_the_session_once_and_records_the_touch() -> None:
         await plane.close_session(session.session_id, "done")
         with pytest.raises(RecordUnavailable):
             await plane.submit_sample(sample_request(sampling.sampling_session_id, 1))
+
+    asyncio.run(run())
+
+
+def test_slow_samples_explain_startup_until_the_pool_completes_one() -> None:
+    async def run() -> None:
+        gates: dict[tuple[str, int], asyncio.Event] = {}
+
+        async def gated(task: SamplingTask) -> object:
+            key = (task.sampling_session_id, task.payload["seq_id"])
+            await gates.setdefault(key, asyncio.Event()).wait()
+            return {"type": "sample", "sequences": []}
+
+        plane, _, session_id, sampling_session_id = await sampling_plane(gated)
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+
+        async def slow_sample(sampler: str, seq_id: int = 0):
+            request_id = await plane.submit_sample(sample_request(sampler, seq_id))
+            now[0] += 45
+            return request_id, await plane.retrieve(request_id)
+
+        first, cold = await slow_sample(sampling_session_id)
+        assert cold.status == FutureResolutionStatus.PENDING
+        assert cold.reason.startswith(
+            f"starting a sampler for {BASE_MODEL} (45s so far)"
+        )
+        gates[(sampling_session_id, 0)].set()
+        resolution = await plane.retrieve(first, timeout=5)
+        assert resolution.status == FutureResolutionStatus.COMPLETE
+
+        # RL loops open a new sampling session every step on the same warm pool.
+        next_step = await plane.create_sampling_session(
+            session_id=session_id,
+            sampling_session_seq_id=1,
+            base_model=BASE_MODEL,
+            engine_definition_id=DEFINITION,
+        )
+        _, warm = await slow_sample(next_step.sampling_session_id)
+        assert warm.status == FutureResolutionStatus.PENDING
+        assert warm.reason is None
+
+        now[0] += SAMPLER_WARM_FOR_S
+        _, idle = await slow_sample(sampling_session_id, 1)
+        assert idle.reason.startswith(f"starting a sampler for {BASE_MODEL}")
+        for gate in gates.values():
+            gate.set()
+
+    asyncio.run(run())
+
+
+def test_base_model_samples_report_the_weight_download() -> None:
+    async def run() -> None:
+        released = asyncio.Event()
+
+        async def blocked(task: SamplingTask) -> object:
+            await released.wait()
+            return {"type": "sample", "sequences": []}
+
+        async def downloading(definition_id: str) -> float | None:
+            assert definition_id == DEFINITION
+            return plane.clock() - 5
+
+        plane, _, _, sampling_session_id = await sampling_plane(blocked)
+        plane.downloading_weights = downloading
+        request_id = await plane.submit_sample(sample_request(sampling_session_id))
+        resolution = await plane.retrieve(request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            f"downloading weights for {BASE_MODEL} (5s so far)"
+        )
+        released.set()
 
     asyncio.run(run())

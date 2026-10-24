@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 
+from spindle.deployments import split_run_definition
 from spindle.encoding import fingerprint
 from spindle.engine.api import EngineApi, FutureStatus
 from spindle.errors import (
@@ -31,7 +32,6 @@ from spindle.providers.contracts import (
     SessionKeyValueStores,
 )
 from spindle.telemetry.metadata import experiment_tags
-from spindle.resource_scope import ResourcePolicy, scoped_definition, definition_owner
 
 from .keys import (
     model_creation_key,
@@ -39,6 +39,7 @@ from .keys import (
     placement_claim_key,
     placement_key,
     sample_task_key,
+    sampler_warm_key,
     sampler_artifact_key,
     sampler_export_result_key,
     sampler_export_submission_key,
@@ -103,6 +104,47 @@ class FutureResolutionStatus(StrEnum):
     RETRYABLE = "retryable"
 
 
+STARTING_AFTER_S = 30
+# Pools scale to zero after five idle minutes by default.
+SAMPLER_WARM_FOR_S = 300
+SAMPLER_WARM_REFRESH_S = 60
+
+
+def _elapsed(waited: float) -> str:
+    minutes, seconds = divmod(int(waited), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {seconds:02d}s" if minutes else f"{seconds}s"
+
+
+def starting_reason(role: str, model: str, waited: float) -> str:
+    return (
+        f"starting a {role} for {model} ({_elapsed(waited)} so far). The first "
+        "request for a model starts GPUs and loads weights, which can take several "
+        "minutes"
+    )
+
+
+def downloading_reason(model: str, waited: float) -> str:
+    return (
+        f"downloading weights for {model} ({_elapsed(waited)} so far). Weights "
+        "download once per model; large models can take an hour or more"
+    )
+
+
+def gpu_capacity_reason(role: str, model: str, gpus: str, waited: float) -> str:
+    return (
+        f"waiting for {gpus} GPUs to become available to start a {role} for {model} "
+        f"({_elapsed(waited)} so far). The request stays queued and the {role} "
+        "starts automatically once GPUs free up"
+    )
+
+
+def sampler_pool_key(session: SamplingSessionRecord) -> str:
+    return sampler_warm_key(session.engine_definition_id or session.base_model)
+
+
 @dataclass(frozen=True)
 class FutureResolution:
     request_id: str
@@ -110,6 +152,7 @@ class FutureResolution:
     result: object | None = None
     error: str | None = None
     category: str = "server"
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,14 +179,15 @@ class ControlPlane:
         | None = None,
         reconcile_trainers: Callable[[str], Awaitable[bool | None]] | None = None,
         prepare_model: Callable[[ModelRecord], Awaitable[None]] | None = None,
+        downloading_weights: Callable[[str], Awaitable[float | None]] | None = None,
         trainer_autoscaling: Callable[[str], bool] = lambda _: False,
         list_checkpoints: CheckpointListing | None = None,
         delete_checkpoint: Callable[[str], Awaitable[None]] | None = None,
         checkpoint_root: str = "/checkpoints",
         creation_error: Callable[[str], Awaitable[str | None]] | None = None,
-        resource_policy: ResourcePolicy | None = None,
-        resource_namespace: str = "spindle",
-        cleanup_session: Callable[[str], Awaitable[None]] | None = None,
+        trainer_gpu_wait: Callable[[str], Awaitable[str | None]] | None = None,
+        run_definition: Callable[[str, str, Mapping[str, object]], Awaitable[str]]
+        | None = None,
     ) -> None:
         self.kv = kv
         self.engines = engines
@@ -156,16 +200,17 @@ class ControlPlane:
         self.read_checkpoint_metadata = read_checkpoint_metadata
         self.reconcile_trainers = reconcile_trainers
         self.prepare_model = prepare_model
+        self.downloading_weights = downloading_weights
         self.trainer_autoscaling = trainer_autoscaling
         self.list_checkpoints = list_checkpoints
         self.delete_checkpoint = delete_checkpoint
         self.checkpoint_root = checkpoint_root
         self.creation_error = creation_error
-        self.resource_policy = resource_policy or ResourcePolicy()
-        self.resource_namespace = resource_namespace
-        self.cleanup_session = cleanup_session
+        self.trainer_gpu_wait = trainer_gpu_wait
+        self.run_definition = run_definition
         self._session_touches: dict[str, asyncio.Task] = {}
         self._route_reads: dict[str, asyncio.Task] = {}
+        self._sampler_warm_at: dict[str, float] = {}
 
     async def create_session(
         self,
@@ -175,16 +220,12 @@ class ControlPlane:
         sdk_version: str | None = None,
     ) -> SessionRecord:
         now = self.clock()
-        session_id = self.session_id_factory()
         session = SessionRecord(
-            session_id=session_id,
+            session_id=self.session_id_factory(),
             created_at=now,
             tags=tags,
             user_metadata=user_metadata,
             sdk_version=sdk_version,
-            attribution=self.resource_policy.session_attribution(
-                session_id, user_metadata
-            ),
         )
         await self.kv.put_if_absent(
             session_key(session.session_id),
@@ -219,14 +260,7 @@ class ControlPlane:
             closed.model_dump(mode="json"),
         )
         await self._unload_session_models(session_id)
-        if self.cleanup_session is not None:
-            await self.cleanup_session(session_id)
         return SessionClosedRecord.model_validate(inserted.value)
-
-    def _resource_definition(self, definition_id: str, session_id: str) -> str:
-        if self.resource_policy.scope == "shared":
-            return definition_id
-        return scoped_definition(definition_id, self.resource_namespace, session_id)
 
     async def create_model(
         self,
@@ -237,8 +271,16 @@ class ControlPlane:
         spec: dict[str, object],
         model_id: str | None = None,
     ) -> ModelCreation:
-        await self._touch_session(session_id)
-        definition_id = self._resource_definition(definition_id, session_id)
+        session = await self._open_session(session_id)
+        await self._share_session_touch(session_id)
+        if self.run_definition is not None:
+            metadata = {
+                **(session.user_metadata or {}),
+                **(spec.get("user_metadata") or {}),
+            }
+            definition_id = await self.run_definition(
+                definition_id, session_id, metadata
+            )
         mark = fingerprint(
             "create_model",
             {
@@ -429,7 +471,7 @@ class ControlPlane:
         metadata = await self.checkpoint_metadata(path)
         path = self.resolve_checkpoint_path(path)
         saved_base_model = metadata["base_model"]
-        definition_id = definition_owner(metadata["engine_definition_id"])[0]
+        definition_id = split_run_definition(metadata["engine_definition_id"])[0]
         parameterization = metadata["parameterization"]
         lora_config = metadata["lora_config"]
         if base_model is not None and base_model != saved_base_model:
@@ -545,8 +587,6 @@ class ControlPlane:
         engine_definition_id: str | None = None,
     ) -> SamplingSessionRecord:
         await self._touch_session(session_id)
-        if engine_definition_id is not None:
-            engine_definition_id = self._resource_definition(engine_definition_id, session_id)
         mark = fingerprint(
             "create_sampling_session",
             {"base_model": base_model, "model_path": model_path},
@@ -586,17 +626,14 @@ class ControlPlane:
         telemetry_tags = {}
         if model_path is not None:
             artifact = await self.get_sampler_artifact(model_path)
-            if self.resource_policy.scope == "session":
-                owner = await self.get_model(artifact.model_id)
-                if owner.session_id != session_id:
-                    raise ValueError("sampler weights belong to another session")
             telemetry_tags = artifact.telemetry_tags
             if base_model is not None and base_model != artifact.base_model:
                 raise ValueError("base_model does not match model_path")
             if (
                 engine_definition_id is not None
                 and artifact.engine_definition_id is not None
-                and engine_definition_id != artifact.engine_definition_id
+                and split_run_definition(engine_definition_id)[0]
+                != split_run_definition(artifact.engine_definition_id)[0]
             ):
                 raise ValueError("engine_definition_id does not match model_path")
             base_model = artifact.base_model
@@ -1143,7 +1180,11 @@ class ControlPlane:
         if record.request_id != request_id:
             raise RecordNotFound("future", request_id)
         if record.task_id is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if self.sampling_tasks is None:
             return FutureResolution(
                 request_id,
@@ -1158,8 +1199,13 @@ class ControlPlane:
                 error="sampling task was lost",
             )
         if state.status == SamplingTaskStatus.PENDING:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason=await self._sampler_starting(session, record),
+            )
         if state.status == SamplingTaskStatus.COMPLETE:
+            await self._mark_sampler_warm(session)
             return FutureResolution(
                 request_id,
                 FutureResolutionStatus.COMPLETE,
@@ -1170,6 +1216,77 @@ class ControlPlane:
             FutureResolutionStatus.FAILED,
             error=state.error,
         )
+
+    async def _sampler_starting(
+        self, session: SamplingSessionRecord, record: SampleTaskRecord
+    ) -> str | None:
+        """Explain a slow sample while its pool hasn't recently completed one."""
+        if session.model_id is None:
+            try:
+                downloading = await self._downloading(
+                    session.engine_definition_id, session.base_model
+                )
+            except ValueError:
+                downloading = None
+            if downloading:
+                return downloading
+        waited = self.clock() - record.created_at
+        if waited < STARTING_AFTER_S:
+            return None
+        key = sampler_pool_key(session)
+        warm_at = self._sampler_warm_at.get(key)
+        if warm_at is None or self.clock() - warm_at >= SAMPLER_WARM_FOR_S:
+            value = await self.kv.get(key)
+            if value is not None:
+                warm_at = float(value["warm_at"])
+                self._sampler_warm_at[key] = warm_at
+        if warm_at is not None and self.clock() - warm_at < SAMPLER_WARM_FOR_S:
+            return None
+        return starting_reason("sampler", session.base_model, waited)
+
+    async def _mark_sampler_warm(self, session: SamplingSessionRecord) -> None:
+        key = sampler_pool_key(session)
+        warm_at = self._sampler_warm_at.get(key)
+        if warm_at is not None and self.clock() - warm_at < SAMPLER_WARM_REFRESH_S:
+            return
+        self._sampler_warm_at[key] = self.clock()
+        await self.kv.put(key, {"warm_at": self.clock()})
+
+    async def _trainer_starting(self, model: ModelRecord) -> str | None:
+        """Explain a slow creation while no trainer for its definition is running."""
+        base_model = str(model.spec.get("base_model") or model.engine_definition_id)
+        downloading = await self._downloading(model.engine_definition_id, base_model)
+        if downloading:
+            return downloading
+        waited = self.clock() - model.created_at
+        if waited < STARTING_AFTER_S:
+            return None
+        try:
+            active = await self.engines.active_instances(model.engine_definition_id)
+        except Exception:
+            return None
+        if any(instance.state == "running" for instance in active):
+            return None
+        if gpus := await self._trainer_gpu_wait(model.engine_definition_id):
+            return gpu_capacity_reason("trainer", base_model, gpus, waited)
+        return starting_reason("trainer", base_model, waited)
+
+    async def _trainer_gpu_wait(self, definition_id: str) -> str | None:
+        if self.trainer_gpu_wait is None:
+            return None
+        try:
+            return await self.trainer_gpu_wait(definition_id)
+        except Exception:
+            logging.getLogger(__name__).exception("trainer GPU wait %s", definition_id)
+            return None
+
+    async def _downloading(self, definition_id: str | None, model: str) -> str | None:
+        if self.downloading_weights is None or definition_id is None:
+            return None
+        started = await self.downloading_weights(definition_id)
+        if started is None:
+            return None
+        return downloading_reason(model, self.clock() - started)
 
     def _sampling_task_store(self, session_id: str) -> KeyValueStore:
         if self.sampling_task_stores is None:
@@ -1187,6 +1304,9 @@ class ControlPlane:
                 error = await self.creation_error(model.engine_definition_id)
                 if error:
                     raise ValueError(error)
+            reason = (
+                None if placement is not None else await self._trainer_starting(model)
+            )
         except ModelLost:
             return FutureResolution(
                 request_id,
@@ -1207,7 +1327,9 @@ class ControlPlane:
                 category="user",
             )
         if placement is None:
-            return FutureResolution(request_id, FutureResolutionStatus.PENDING)
+            return FutureResolution(
+                request_id, FutureResolutionStatus.PENDING, reason=reason
+            )
         try:
             await self._live_instance(placement)
         except ModelLost:
@@ -1465,15 +1587,7 @@ class ControlPlane:
             closed_sessions.add(session_id)
             closed.append(session_id)
 
-        cleanup_failed = set()
         for session_id in closed_sessions:
-            if self.cleanup_session is not None:
-                try:
-                    await self.cleanup_session(session_id)
-                except Exception:
-                    logging.getLogger(__name__).exception("cleanup session %s", session_id)
-                    cleanup_failed.add(session_id)
-                    continue
             for model in models_by_session[session_id]:
                 if model.model_id not in placed:
                     continue
@@ -1482,8 +1596,6 @@ class ControlPlane:
                     placed.discard(model.model_id)
 
         for session_id in closed_sessions:
-            if session_id in cleanup_failed:
-                continue
             models = models_by_session[session_id]
             if any(model.model_id in placed for model in models):
                 continue

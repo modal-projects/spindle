@@ -6,8 +6,8 @@ import pytest
 import zstandard
 from tinker.proto.response_conv import deserialize_forward_backward_output
 
+import spindle
 from spindle.control_plane import ControlPlane, create_control_plane_app
-from spindle.resource_scope import ResourcePolicy
 from spindle.control_plane import http as control_http
 from spindle.control_plane.service import FutureResolution, FutureResolutionStatus
 from spindle.proto import tinker_public_pb2
@@ -253,7 +253,9 @@ def test_pending_future_returns_try_again_408() -> None:
     asyncio.run(run())
 
 
-def test_service_endpoints() -> None:
+def test_service_endpoints(monkeypatch) -> None:
+    monkeypatch.setenv("SPINDLE_COMMIT", "abc123")
+
     async def run() -> None:
         client = http_client()
         assert (await client.get("/api/v1/healthz")).json() == {"status": "ok"}
@@ -262,6 +264,8 @@ def test_service_endpoints() -> None:
             "supported_models": [
                 {"model_name": BASE_MODEL, "max_context_length": 16_384}
             ],
+            "spindle_version": spindle.__version__,
+            "spindle_commit": "abc123",
         }
         config = await client.post("/api/v1/client/config", json={})
         assert config.json()["use_pyqwest_transport"] is False
@@ -333,8 +337,6 @@ def test_base_sampling_session_uses_first_deployment() -> None:
 
 def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
     class CaptureControlPlane:
-        resource_policy = ResourcePolicy()
-
         def __init__(self) -> None:
             self.requests = []
 
@@ -374,8 +376,6 @@ def test_sample_endpoint_forwards_optional_cache_affinity_key() -> None:
 
 def test_sample_endpoint_returns_one_sequence_id_per_requested_sample() -> None:
     class CaptureControlPlane:
-        resource_policy = ResourcePolicy()
-
         async def submit_sample(self, request):
             return "request-a"
 
@@ -618,8 +618,6 @@ def test_result_timing_counts_actual_response_bytes(monkeypatch):
     marks = []
 
     class Plane:
-        resource_policy = ResourcePolicy()
-
         async def retrieve(self, request_id, timeout):
             return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
 
@@ -666,8 +664,6 @@ def test_result_negotiation_constructs_one_response_before_timing(
     marks = []
 
     class Plane:
-        resource_policy = ResourcePolicy()
-
         async def retrieve(self, request_id, timeout):
             return FutureResolution(request_id, FutureResolutionStatus.COMPLETE, result)
 
@@ -727,5 +723,43 @@ def test_result_negotiation_constructs_one_response_before_timing(
                     "bytes": len(response.content),
                 }
             ]
+
+    asyncio.run(run())
+
+
+def test_pending_future_with_a_reason_reports_a_starting_queue_state() -> None:
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+        )
+
+        async def retrieve(request_id: str, timeout: float = 0.0) -> FutureResolution:
+            return FutureResolution(
+                request_id,
+                FutureResolutionStatus.PENDING,
+                reason="starting a sampler for Qwen/Qwen3-4B (45s so far)",
+            )
+
+        plane.retrieve = retrieve
+        app = create_control_plane_app(
+            plane, DEFINITIONS, api_key="tml-test", retrieve_window=1.0
+        )
+        client = httpx.AsyncClient(
+            base_url="http://control-plane",
+            headers={"X-API-Key": "tml-test"},
+            transport=httpx.ASGITransport(app=app),
+        )
+        retrieved = await client.post(
+            "/api/v1/retrieve_future", json={"request_id": "sample-abc:0"}
+        )
+        assert retrieved.status_code == 408
+        assert retrieved.json() == {
+            "type": "try_again",
+            "request_id": "sample-abc:0",
+            "queue_state": "starting",
+            "queue_state_reason": "starting a sampler for Qwen/Qwen3-4B (45s so far)",
+        }
+        await client.aclose()
 
     asyncio.run(run())

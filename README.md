@@ -28,32 +28,36 @@ Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a pr
 ```bash
 uv init --python 3.12 my-spindle-project
 cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git'
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.1'
 ```
+
+This pins a release tag. Releases and their changes are listed in [CHANGELOG.md](CHANGELOG.md), and `uv run spindle --version` prints the installed version and commit.
 
 **If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
 
 ## Set up the server
 
 Authenticate with a [Modal account](https://modal.com/docs/guide/workspaces) that can deploy apps and create
-secrets, and select the environment to deploy into **before** creating secrets, so the secrets and the
-deployment end up in the same environment:
+secrets, then create and select the [environment](https://modal.com/docs/guide/environments) to deploy into
+**before** creating secrets, so the secrets and the deployment end up in the same environment:
 
 ```bash
 modal token new
-export MODAL_ENVIRONMENT=your-environment
-modal environment list
+modal environment create my-spindle
+export MODAL_ENVIRONMENT=my-spindle
 ```
 
-For automation, supply existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials instead of the interactive login.
+To use an existing environment, skip `modal environment create` and export its name. For automation, supply
+existing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` credentials instead of the interactive login.
 
-Spindle uses three separate credentials:
+Spindle uses four separate credentials:
 
 | Credential | Purpose | Who needs it |
 | --- | --- | --- |
 | Modal API token / local profile | Manage Modal resources | Deployer |
 | `TINKER_API_KEY` in the `spindle-api` secret | Authenticate calls to the Spindle API | Deployer and API clients |
 | Proxy token in the `spindle-proxy` secret | Let Spindle reach protected sampler pools | Deployed control plane and trainers |
+| `HF_TOKEN` in the `huggingface-secret` secret | Download base model weights from Hugging Face | Deployed trainers |
 
 Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
 
@@ -83,13 +87,53 @@ modal secret create spindle-proxy \
   MODAL_PROXY_TOKEN_SECRET="$MODAL_PROXY_TOKEN_SECRET"
 ```
 
-To deploy the Spindle server, simply run:
+Spindle downloads base weights from Hugging Face. Create a **Read** token at
+[huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) (for a gated model, also accept its
+license on the model page with the same account) and store it under `huggingface-secret`:
 
 ```bash
-spindle deploy
+modal secret create huggingface-secret HF_TOKEN=hf_...
 ```
 
-You'll want to save the `server` URL from the above deployment output.
+### Deploy
+
+From your project, run:
+
+```bash
+uv run spindle deploy
+```
+
+(With the project's virtual environment activated, `spindle deploy` works too.)
+
+In a terminal, this starts an interactive deploy. It first checks that each secret above exists in
+`MODAL_ENVIRONMENT` with its required keys, and prints the command to create any that are missing:
+
+<img src="docs/assets/spindle-deploy/setup-check-missing.png" alt="Setup check reporting a missing huggingface-secret" width="800">
+
+It then asks:
+
+1. Which models to post-train. Qwen3.6-35B-A3B is selected by default.
+2. LoRA or full fine-tuning, for models that support both. LoRA is selected by default.
+3. The longest sequence you'll train on (prompt + completion). Each model gets its smallest bundled config that fits.
+
+<img src="docs/assets/spindle-deploy/model-picker.png" alt="Model picker grouped by provider" width="800">
+
+After you confirm the plan, it deploys a trainer and an inference app per config, shows progress for each, and prints
+the server URL to use as `TINKER_BASE_URL`.
+
+<img src="docs/assets/spindle-deploy/deployed.png" alt="Interactive spindle deploy accepting the defaults" width="800">
+
+For scripts, CI, and agents, pass bundled config names (the interactive deploy prints the equivalent command) or
+config files:
+
+```bash
+uv run spindle deploy qwen36-35b-a3b-lora-32k
+uv run spindle deploy --all          # every bundled config
+```
+
+Without a terminal and without arguments, `spindle deploy` exits with this guidance instead of deploying. Bundled
+configs live in [`src/spindle/configs`](src/spindle/configs). Each deploy sets the complete list of configs the
+server serves, so include every config you want to keep serving.
 
 A single deployment can serve multiple concurrent independent training jobs across different base models, training parameterizations, and experiment scales.
 GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times. See
@@ -100,8 +144,9 @@ before running a larger workload.
 
 Spindle-created Modal apps carry `_modal_source=spindle` and `spindle_role` tags
 for usage reporting. Roles distinguish frontend, trainer, inference,
-inference-provisioner, and combined scoped apps. No environment variables are
-needed to set these tags.
+inference-provisioner, and combined scoped apps. `spindle_version` and
+`spindle_commit` (short SHA) record the release and source commit an app was
+deployed from. No environment variables are needed to set these tags.
 
 Apps also expose reporting metadata:
 
@@ -117,6 +162,57 @@ Model-specific apps set `_modal_model_name` to the lowercased model basename
 (e.g. `Qwen/Qwen3.6-35B-A3B` becomes `qwen3.6-35b-a3b`). The frontend can serve
 multiple models, so it omits that tag. `training_spindle` avoids matching the
 Dojo report's source-independent `training` filter.
+
+Add your own tags, such as a team name, with the recipe's `tags` field. Spindle
+applies them to the recipe's trainer, inference provisioner, and sampler apps.
+Modal allows 8 tags per app and Spindle's own tags use up to 7, so an app keeps
+only the first of your tags that fit.
+Changing `tags` redeploys those apps on the next `spindle deploy`. For scoped
+runs, pass `spindle.run(..., tags={...})`.
+
+#### Per-run apps
+
+By default, all runs on a recipe share its trainer and sampler apps, so Modal
+reports their cost together. To see the cost of each run, set
+`per_run_apps = True` on a LoRA recipe:
+
+```python
+from spindle.configs.qwen36_35b_a3b_lora_32k import Config as Base
+
+
+class Config(Base):
+    per_run_apps = True
+    tags = {"team": "ranking"}
+```
+
+Each training run then gets its own trainer app and its own sampler app, tagged
+with the run's `run_id`. Spindle adds the recipe's `tags` and then the rest of
+the run's `user_metadata` while Modal's tag limit allows. Name the run with
+stock Tinker, either on the service client or on the training client:
+
+```python
+service = tinker.ServiceClient(base_url=url, user_metadata={"run_id": "sft-123"})
+training = service.create_lora_training_client(
+    base_model, rank=32, user_metadata={"run_id": "sft-123", "owner": "ana"}
+)
+```
+
+Training clients with the same `run_id` share one set of apps, so a resumed run
+keeps its tags and its warm trainer. A client without a `run_id` gets its own
+apps, tagged with its session ID. Modal tags allow only letters, digits, `.`,
+`_`, and `-`, up to 63 characters, so Spindle replaces other characters with `-`
+and shortens long values. It skips values that are not strings and keys that
+start with `_modal_` or `spindle_`.
+
+The trade-off is sharing. A per-run trainer serves only that run's adapters, and
+each new run pays a trainer and sampler cold start. Sampling the base model,
+without trained weights, still uses the recipe's shared sampler. When a run has
+no models left, its sampler stops after `pool_idle_timeout_s` and the cleaner
+stops its trainer app after `session_idle_timeout_s`. Each run can use up to
+`trainer_max_instances` trainers. Sampling a finished run's saved weights starts
+its sampler again, still tagged. If `spindle deploy` changes the recipe's sampler
+settings, each run's sampler restarts on next use. If it changes trainer
+settings, a run's trainer app is rebuilt the next time the run starts a trainer.
 
 Read the tags of a deployed app with the Modal SDK:
 
@@ -320,6 +416,19 @@ To deploy the above config, it's just:
 ```bash
 spindle deploy config.py
 ```
+
+## Upgrade Spindle
+
+Check your current version with `uv run spindle --version`. Installs older than 0.1.1 don't have that flag; `uv pip freeze | grep modal-spindle` shows the commit they were installed from.
+
+Read the [CHANGELOG.md](CHANGELOG.md) sections between your version and the new one; minor releases can change config defaults. Then point the dependency at the new tag and redeploy:
+
+```bash
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.2.0'
+spindle deploy config.py
+```
+
+To check which release a deployment runs, read the `spindle_version` and `spindle_commit` tags on its apps (see [App attribution](#app-attribution)), or call `/api/v1/get_server_capabilities`, which reports the version and full commit SHA.
 
 ## Clean up
 

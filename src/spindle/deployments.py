@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import runpy
@@ -9,15 +10,38 @@ import sys
 from importlib.resources import files
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
+from spindle import __version__
 from spindle.backends.deployment import resolve_backend_settings
 from spindle.configuration import BaseConfig
-from spindle.resource_scope import ResourcePolicy, SessionAttribution, resource_name, scoped_definition, definition_owner
+
+# Modal's smallest ephemeral disk request.
+MIN_EPHEMERAL_DISK_MIB = 524_288
+MODAL_APP_NAME_MAX = 63
+RUN_SEPARATOR = ".run-"
 
 
 def _jsonable(value):
     return json.loads(json.dumps(value))
+
+
+def run_key(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode()).hexdigest()[:12]
+
+
+def split_run_definition(definition_id: str) -> tuple[str, str | None]:
+    """Return the recipe name and run key of a per-run definition ID."""
+    name, separator, run = definition_id.partition(RUN_SEPARATOR)
+    return name, (run if separator else None)
+
+
+def modal_app_name(prefix: str, definition_id: str) -> str:
+    name = f"{prefix}{definition_id}"
+    if len(name) <= MODAL_APP_NAME_MAX:
+        return name
+    digest = hashlib.sha256(definition_id.encode()).hexdigest()[:10]
+    return f"{name[: MODAL_APP_NAME_MAX - len(digest) - 1]}-{digest}"
 
 
 class DeploymentConfig(BaseModel):
@@ -28,24 +52,19 @@ class DeploymentConfig(BaseModel):
     recipe: BaseConfig
     trainer_settings: dict
     inference_settings: dict
-    attribution: SessionAttribution | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Configs saved before versioning have no version and report 0.1.0.
+    spindle_version: str = "0.1.0"
+    # Set on a per-run copy of a recipe with per_run_apps enabled.
+    run: str | None = None
+    run_tags: dict[str, str] = {}
 
-    def for_session(self, namespace: str, attribution: SessionAttribution):
-        recipe = BaseConfig(**_jsonable(vars(self.recipe)))
-        recipe.name = scoped_definition(self.definition_id, namespace, attribution.session_id)
-        return self.model_copy(update={"recipe": recipe, "attribution": attribution})
-
-    @property
-    def base_definition_id(self) -> str:
-        return definition_owner(self.definition_id)[0]
+    def for_run(self, run: str, tags: dict[str, str] | None = None):
+        return self.model_copy(update={"run": run, "run_tags": dict(tags or {})})
 
     @field_validator("recipe", mode="before")
     @classmethod
     def restore_recipe(cls, value):
-        recipe = BaseConfig(**value) if isinstance(value, dict) else value
-        if isinstance(recipe, BaseConfig):
-            ResourcePolicy.from_platform(recipe.platform)
-        return recipe
+        return BaseConfig(**value) if isinstance(value, dict) else value
 
     @field_serializer("recipe")
     def serialize_recipe(self, recipe):
@@ -55,6 +74,12 @@ class DeploymentConfig(BaseModel):
     def create(cls, recipe: BaseConfig) -> DeploymentConfig:
         """Copy the recipe and attach backend settings."""
         pinned = BaseConfig(**_jsonable(vars(recipe)))
+        for field in ("trainer_disk_mib", "inference_disk_mib"):
+            disk = getattr(pinned, field)
+            if disk and disk < MIN_EPHEMERAL_DISK_MIB:
+                raise ValueError(
+                    f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
+                )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
@@ -62,6 +87,7 @@ class DeploymentConfig(BaseModel):
             recipe=pinned,
             trainer_settings=_jsonable(trainer_settings),
             inference_settings=_jsonable(inference_settings),
+            spindle_version=__version__,
         )
 
     @property
@@ -82,15 +108,25 @@ class DeploymentConfig(BaseModel):
 
     @property
     def definition_id(self) -> str:
-        return self.recipe.name
+        if self.run is None:
+            return self.recipe.name
+        return f"{self.recipe.name}{RUN_SEPARATOR}{self.run}"
+
+    @property
+    def app_tags(self) -> dict[str, str]:
+        """User tags in priority order: run_id, recipe tags, other run metadata."""
+        run_id = (
+            {"run_id": self.run_tags["run_id"]} if "run_id" in self.run_tags else {}
+        )
+        return {**run_id, **self.recipe.tags, **self.run_tags, **run_id}
 
     @property
     def trainer_app_name(self) -> str:
-        return resource_name("trainer", self.recipe.name)
+        return modal_app_name("spindle-trainer-", self.definition_id)
 
     @property
     def inference_app_name(self) -> str:
-        return f"spindle-inference-{self.base_definition_id}"
+        return f"spindle-inference-{self.recipe.name}"
 
     @property
     def weights_repo(self) -> str:
@@ -113,6 +149,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -124,11 +161,16 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_nodes,
             recipe.trainer_cpu,
             recipe.trainer_memory_mib,
+            recipe.trainer_disk_mib,
             recipe.trainer_max_instances,
             recipe.trainer_max_clients_per_instance,
+            recipe.trainer_max_clients_per_batch,
             recipe.trainer_timeout_s,
             recipe.trainer_env,
+            recipe.trainer_image,
+            recipe.tags,
             self.trainer_settings,
+            self.spindle_version,
         )
 
     def inference_identity(self) -> tuple:
@@ -137,6 +179,7 @@ class DeploymentConfig(BaseModel):
             recipe.name,
             recipe.model,
             recipe.model_weights,
+            recipe.weights_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
@@ -144,13 +187,16 @@ class DeploymentConfig(BaseModel):
             recipe.inference_gpus_per_node,
             recipe.inference_cpu,
             recipe.inference_memory_mib,
+            recipe.inference_disk_mib,
             recipe.inference_min_replicas,
             recipe.inference_max_replicas,
             recipe.inference_target_concurrency,
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
+            recipe.tags,
             self.inference_settings,
+            self.spindle_version,
         )
 
 
@@ -187,7 +233,10 @@ def validate_frontend(recipes: list[BaseConfig]) -> None:
         raise ValueError("duplicate deployment name")
     first = recipes[0]
     for recipe in recipes:
-        ResourcePolicy.from_platform(recipe.platform)
+        if RUN_SEPARATOR in recipe.name:
+            raise ValueError(f"deployment names cannot contain {RUN_SEPARATOR!r}")
+        if recipe.per_run_apps and recipe.parameterization != "lora":
+            raise ValueError("per_run_apps requires a LoRA deployment")
         if recipe.platform != first.platform:
             raise ValueError("deployments on one frontend must share platform settings")
         if (

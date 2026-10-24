@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from spindle.resource_scope import SessionAttribution
+from pydantic import BaseModel, ConfigDict, Field
 
 Identifier = Annotated[str, Field(min_length=1, pattern=r"^[^:]+$")]
 ModelIdentifier = Annotated[str, Field(min_length=1)]
@@ -26,15 +24,6 @@ class SessionRecord(DurableRecord):
     tags: tuple[str, ...] = ()
     user_metadata: dict[str, str] | None = None
     sdk_version: str | None = None
-    attribution: SessionAttribution | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-
-    @model_validator(mode="after")
-    def validate_attribution_owner(self):
-        if self.attribution is not None and self.attribution.session_id != self.session_id:
-            raise ValueError("attribution must belong to the session")
-        return self
 
 
 class SessionLastSeenRecord(DurableRecord):

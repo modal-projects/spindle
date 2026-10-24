@@ -14,7 +14,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from stitch.types import VersionConstraint, VersionRef
 
+from spindle.startup_timing import timeline
+
 from .bulletin import SnapshotBulletin, SnapshotNotFound
+
+FETCH_METRICS_TIMEOUT_SECONDS = 2.0
 
 
 def create_app(
@@ -47,6 +51,20 @@ def create_app(
             await app.state.client.aclose()
 
     app = FastAPI(lifespan=lifespan)
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        try:
+            response = await app.state.client.get(
+                "/metrics", timeout=FETCH_METRICS_TIMEOUT_SECONDS
+            )
+        except httpx.RequestError:
+            return Response(status_code=503)
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            media_type=response.headers.get("content-type"),
+        )
 
     @app.get("/health")
     async def health() -> Response:
@@ -161,6 +179,10 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
+                if not app.state.registered_adapters:
+                    timeline("sampler-sidecar").mark(
+                        "first_adapter_loaded", adapter=resolved.identity
+                    )
                 app.state.registered_adapters[resolved.identity] = str(path)
                 return resolved, None
 

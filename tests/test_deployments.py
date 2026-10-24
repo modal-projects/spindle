@@ -11,6 +11,7 @@ import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
 from spindle.backends.megatron_config import parse_backend_config
+from spindle.backends.miles_config import MilesBackendConfig, lora_target_flags
 from spindle.backends.miles_arguments import (
     apply_config_overrides,
     defer_config_overrides,
@@ -24,6 +25,7 @@ from spindle.deployments import (
     DeploymentConfig,
     config_path,
     load,
+    split_run_definition,
     validate_frontend,
 )
 from spindle.providers.local import InMemoryKeyValueStore
@@ -45,31 +47,19 @@ def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
 
 
-def test_resource_policy_is_validated_when_loading_saved_deployments():
-    row = resolved()
-    assert "resource_scope" not in row.recipe.platform
-    saved = row.model_dump(mode="json")
-    saved["recipe"]["platform"]["resource_scope"] = "sesion"
-    with pytest.raises(ValueError, match="scope"):
-        DeploymentConfig.model_validate(saved)
+@pytest.mark.parametrize("preset", ["qwen35-9b-lora-16k", "qwen35-4b-fft-64k"])
+def test_sampler_metrics_are_enabled_by_default_and_can_be_disabled(preset):
+    assert resolved(recipe(preset)).inference_settings["enable_metrics"] is True
+    disabled = resolved(recipe(preset, sglang_cfg__enable_metrics=False))
+    assert disabled.inference_settings["enable_metrics"] is False
 
 
-def test_session_policy_and_allowlist_round_trip_without_changing_worker_settings():
-    shared = resolved()
-    isolated = resolved(recipe(platform__resource_scope="session", platform__resource_tag_keys=["project"]))
-    restored = DeploymentConfig.model_validate_json(isolated.model_dump_json())
-    assert restored.recipe.platform["resource_scope"] == "session"
-    assert restored.recipe.platform["resource_tag_keys"] == ["project"]
-    assert isolated.trainer_identity() == shared.trainer_identity()
-    assert isolated.inference_identity() == shared.inference_identity()
-    validate_frontend([isolated.recipe])
-    with pytest.raises(ValueError, match="share platform settings"):
-        validate_frontend([isolated.recipe, recipe(name="other")])
-
-
-def test_frontend_validation_rejects_invalid_resource_policy():
-    with pytest.raises(ValueError, match="reserved"):
-        validate_frontend([recipe(platform__resource_tag_keys=["spindle_session_id"])])
+def test_multi_node_lora_captures_land_on_the_checkpoint_volume():
+    assert "capture_dir" not in backend_config(recipe())
+    multi_node = backend_config(recipe("qwen38-27b-lora-256k"))
+    assert multi_node["capture_dir"] == "/checkpoints/.spindle-captures"
+    dsv41 = backend_config(recipe("deepseek-v41-flash-lora-8k"))
+    assert dsv41["capture_dir"] == "/checkpoints/.spindle-captures"
 
 
 def test_presets_context_topology_and_backend_options():
@@ -115,6 +105,7 @@ def test_no_model_catalog_required():
         ({"sglang_cfg": {"model_path": "other"}}, "managed"),
         ({"sglang_cfg": {"tp_size": 2}}, "replica GPU"),
         ({"trainer_max_clients_per_instance": 7}, "max_lora_slots"),
+        ({"trainer_max_clients_per_batch": 0}, "trainer_max_clients_per_batch"),
     ],
 )
 def test_invalid_integrations_fail_when_building_backend_settings(changes, match):
@@ -124,11 +115,56 @@ def test_invalid_integrations_fail_when_building_backend_settings(changes, match
         serving_options(spec)
 
 
+def test_deepseek_v41_lora_recipe():
+    row = resolved(recipe("deepseek-v41-flash-lora-8k"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert (
+        miles.world_size,
+        miles.tensor_model_parallel_size,
+        miles.context_parallel_size,
+        miles.expert_model_parallel_size,
+        miles.expert_tensor_parallel_size,
+    ) == (16, 4, 1, 16, 1)
+    arguments = miles.miles_arguments()
+    assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert "--use-dynamic-batch-size" not in arguments
+    assert miles.cli_options["qkv_format"] == "bshd"
+    assert miles.cli_options["moe_router_freeze_gate"] is True
+    assert lora_target_flags(miles.target_modules) == (True, True, False)
+
+    serving = row.inference_settings
+    assert serving["enable_lora"] is True
+    assert serving["max_lora_rank"] == 32
+    assert serving["lora_target_modules"] == [
+        "attn.wq_a",
+        "attn.wkv",
+        "attn.wq_b",
+        "attn.wo_b",
+        "ffn.shared_experts.w1",
+        "ffn.shared_experts.w2",
+        "ffn.shared_experts.w3",
+    ]
+    assert serving["disable_shared_experts_fusion"] is True
+    assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert serving["weight_loader_disable_mmap"] is False
+    assert row.recipe.trainer_image == "miles-v0.1.2"
+    assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash"
+    assert row.asset_path == "/assets/PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
+    assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
+
+
 def test_asset_paths_follow_the_model():
     a = resolved()
     assert a.asset_path == f"/assets/{a.recipe.model}"
     b = resolved(recipe(model="other/Qwen3.5-9B-Base"))
     assert a.asset_path != b.asset_path
+
+
+@pytest.mark.parametrize("field", ["trainer_disk_mib", "inference_disk_mib"])
+def test_disk_requests_below_modal_minimum_are_rejected(field):
+    with pytest.raises(ValueError, match=field):
+        resolved(**{field: 100_000})
 
 
 def test_model_weights_override_assets_but_not_the_served_model():
@@ -139,6 +175,18 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.trainer_settings["miles"]["hf_checkpoint"] == row.asset_path
     assert row.trainer_identity() != resolved().trainer_identity()
     assert row.inference_identity() != resolved().inference_identity()
+
+
+def test_trainer_image_is_part_of_trainer_identity():
+    trainer = resolved(recipe(trainer_image="trainer-x"))
+    assert trainer.trainer_identity() != resolved().trainer_identity()
+    assert trainer.inference_identity() == resolved().inference_identity()
+
+
+def test_tag_changes_redeploy_trainer_and_inference_apps():
+    tagged = resolved(tags={"team": "ranking"})
+    assert tagged.trainer_identity() != resolved().trainer_identity()
+    assert tagged.inference_identity() != resolved().inference_identity()
 
 
 def test_routing_uses_deployment_order():
@@ -563,3 +611,29 @@ def test_override_values_replace_dictionaries_and_lists():
     )
     assert config.inference_gpu == "H200"
     assert config.sglang_cfg == {}
+
+
+def test_runs_get_their_own_short_app_names_and_tags():
+    base = resolved(
+        recipe("nemotron3-super-120b-a12b-lora-64k-b300", tags={"team": "a"})
+    )
+    run = base.for_run("0123456789ab", {"run_id": "run-1"})
+    assert run.definition_id == f"{base.name}.run-0123456789ab"
+    assert run.name == base.name
+    assert run.inference_app_name == base.inference_app_name
+    assert run.trainer_app_name != base.trainer_app_name
+    assert len(run.trainer_app_name) <= 63
+    assert run.app_tags == {"team": "a", "run_id": "run-1"}
+    assert split_run_definition(run.definition_id) == (base.name, "0123456789ab")
+    assert split_run_definition(base.definition_id) == (base.name, None)
+    saved = DeploymentConfig.model_validate_json(run.model_dump_json())
+    assert saved.definition_id == run.definition_id
+    assert saved.app_tags == run.app_tags
+
+
+def test_per_run_apps_are_lora_only_and_names_stay_parseable():
+    with pytest.raises(ValueError, match="LoRA"):
+        validate_frontend([recipe("qwen35-4b-fft-64k", per_run_apps=True)])
+    with pytest.raises(ValueError, match="cannot contain"):
+        validate_frontend([recipe(name="a.run-b")])
+    validate_frontend([recipe(per_run_apps=True)])

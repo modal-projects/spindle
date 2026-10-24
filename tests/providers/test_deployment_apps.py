@@ -11,6 +11,7 @@ import modal
 import pytest
 from modal._serialization import serialize
 
+import spindle
 import spindle.backends.deployment as backend
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.local import InMemoryKeyValueStore
@@ -83,6 +84,7 @@ def test_trainer_declaration_and_executor_configuration(
     assert app.tags["spindle_role"] == "trainer"
     declaration, _ = app.functions["trainer"]
     assert declaration["gpu"] == "H100:4"
+    assert declaration["ephemeral_disk"] is None
     assert declaration["region"] is None
     assert declaration["max_containers"] is None
     assert declaration["single_use_containers"] is True
@@ -241,7 +243,7 @@ def test_real_modal_app_constructs_from_configs_without_legacy_catalog(tmp_path)
             """
 import importlib, sys, modal
 from spindle.providers.modal import deployment_apps, deployment_configs
-deployment_apps.image_for = lambda backend: modal.Image.debian_slim()
+deployment_apps.image_for = lambda backend, name="": modal.Image.debian_slim()
 app = importlib.import_module('spindle.providers.modal.app')
 assert len(app.DEFINITIONS) == 1
 assert app.APP_NAME == 'spindle'
@@ -470,15 +472,18 @@ def test_declared_compute_settings_reach_modal(builders):
     spec.trainer_timeout_s = 90
     spec.trainer_cpu = 12
     spec.trainer_memory_mib = 123456
+    spec.trainer_disk_mib = 600_000
     spec.inference_startup_timeout_s = 90
     spec.inference_min_replicas = 1
     spec.inference_max_replicas = 3
     spec.inference_cpu = 6
     spec.inference_memory_mib = 45000
+    spec.inference_disk_mib = 550_000
     row = DeploymentConfig.create(spec)
     trainer_app, _ = deployment_apps.build_trainer_app(row, image="test")
     trainer, _ = trainer_app.functions["trainer"]
     assert (trainer["cpu"], trainer["memory"], trainer["timeout"]) == (12, 123456, 90)
+    assert trainer["ephemeral_disk"] == 600_000
     pool_app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
@@ -489,6 +494,31 @@ def test_declared_compute_settings_reach_modal(builders):
         90,
     )
     assert (server["min_containers"], server["max_containers"]) == (1, 3)
+    assert server["ephemeral_disk"] == 550_000
+
+
+def test_recipes_select_trainer_images(builders, monkeypatch):
+    image_for = deployment_apps.image_for
+    assert image_for("miles") is deployment_apps.miles_image
+    assert image_for("sglang") is deployment_apps.rollout_image
+    with pytest.raises(ValueError, match="unknown trainer image"):
+        image_for("miles", "missing")
+
+    trainer_image = object()
+    monkeypatch.setitem(deployment_apps.TRAINER_IMAGES, "trainer-x", trainer_image)
+    spec = deepcopy(deployment().recipe)
+    spec.trainer_image = "trainer-x"
+    row = DeploymentConfig.create(spec)
+    trainer_app, _ = deployment_apps.build_trainer_app(row)
+    trainer, _ = trainer_app.functions["trainer"]
+    assert trainer["image"] is trainer_image
+
+
+def test_deepseek_v41_lora_trainer_image_is_registered():
+    assert (
+        deployment_apps.image_for("miles", "miles-v0.1.2")
+        is deployment_apps.miles_v012_image
+    )
 
 
 def test_gpu_type_lists_become_modal_fallbacks(builders):
@@ -501,6 +531,21 @@ def test_gpu_type_lists_become_modal_fallbacks(builders):
     )
     assert trainer_app.functions["trainer"][0]["gpu"] == ["H200:8", "B300:8"]
     assert pool_app.servers["Server"][0]["gpu"] == ["H200:2", "B200:2"]
+
+
+def test_deployed_apps_carry_version_tags(builders, monkeypatch):
+    monkeypatch.setenv("SPINDLE_COMMIT", "54ba00b8cf90d3bead803e334bfdad56584da548")
+    row = deployment()
+    apps = [
+        deployment_apps.build_trainer_app(row, image="test")[0],
+        deployment_apps.build_inference_app(row, image="test")[0],
+        deployment_apps.build_rollout_app(
+            row, LoraPoolSpec(row.definition_id), image="test"
+        )[0],
+    ]
+    for app in apps:
+        assert app.tags["spindle_version"] == spindle.__version__
+        assert app.tags["spindle_commit"] == "54ba00b"
 
 
 def test_gpu_type_lists_survive_saved_config_round_trip():
@@ -608,15 +653,58 @@ def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     )
 
 
-def test_owned_trainer_and_sampler_receive_identical_immutable_tags(builders):
-    from spindle.resource_scope import SessionAttribution
-    attribution = SessionAttribution(session_id='session-a', run_id='run-1', client_tags=(('client', 'a'),))
-    for preset in ('qwen35-9b-lora-16k', 'qwen35-4b-fft-64k'):
-        row = deployment(preset).for_session('frontend/metaflow', attribution)
-        trainer, _ = deployment_apps.build_trainer_app(row, image=object())
-        pool = LoraPoolSpec(row.definition_id) if row.parameterization == 'lora' else FFTPoolSpec.base(row.definition_id)
-        sampler, _ = deployment_apps.build_rollout_app(row, pool, image=object())
-        for app in (trainer, sampler):
-            assert all(app.tags[key] == value for key, value in attribution.app_tags().items())
-        assert trainer.tags['spindle_role'] == 'trainer'
-        assert sampler.tags['spindle_role'] == 'inference'
+def test_recipe_tags_reach_every_recipe_app(builders):
+    row = deployment()
+    row.recipe.tags = {"team": "ranking", "job": "sft-123"}
+    trainer, _ = deployment_apps.build_trainer_app(row, image="test")
+    provisioner, _ = deployment_apps.build_inference_app(row, image="test")
+    pool, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    for app in (trainer, provisioner, pool):
+        assert app.tags["team"] == "ranking"
+        assert len(app.tags) <= 8
+    assert provisioner.tags["job"] == "sft-123"
+    assert trainer.tags["spindle_role"] == "trainer"
+
+
+def test_run_apps_carry_run_tags_and_only_run_their_own_definition(
+    builders, monkeypatch
+):
+    base = deployment()
+    base.recipe.per_run_apps = True
+    base.recipe.tags = {"team": "a"}
+    run = base.for_run("0123456789ab", {"owner": "ana", "run_id": "run-1"})
+    trainer_app, trainer = deployment_apps.build_trainer_app(run, image="test")
+    pool_app, _ = deployment_apps.build_rollout_app(
+        run, LoraPoolSpec(run.definition_id), image="test"
+    )
+    for app in (trainer_app, pool_app):
+        assert app.tags["run_id"] == "run-1"
+        assert len(app.tags) <= 8
+    assert list(run.app_tags) == ["run_id", "team", "owner"]
+    assert trainer_app.name == run.trainer_app_name
+    with pytest.raises(ValueError, match="do not match"):
+        trainer("engine-1", base.model_dump_json(), "ap-frontend")
+
+    provisioner_app, _ = deployment_apps.build_inference_app(base, image="test")
+    _, provision_trainer = provisioner_app.functions["provision_trainer"]
+    commands = []
+    monkeypatch.setattr(deployment_apps.shutil, "which", lambda _: "modal")
+    monkeypatch.setattr(
+        deployment_apps.subprocess,
+        "run",
+        lambda command, env, check: commands.append((command, env)),
+    )
+    forwarded = {"SPINDLE_REQUEST_TIMING": "1", "LD_PRELOAD": "x"}
+    provision_trainer(run.model_dump_json(), forwarded)
+    command, env = commands[0]
+    assert command[command.index("--name") + 1] == run.trainer_app_name
+    assert env["SPINDLE_REQUEST_TIMING"] == "1"
+    assert env.get("LD_PRELOAD") != "x"
+    assert (
+        DeploymentConfig.model_validate_json(env["SPINDLE_TRAINER_DEPLOYMENT"]).app_tags
+        == run.app_tags
+    )
+    with pytest.raises(ValueError, match="per-run trainer"):
+        provision_trainer(base.model_dump_json(), {})

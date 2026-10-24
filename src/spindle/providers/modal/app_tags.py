@@ -1,6 +1,8 @@
 """Attribution for every Modal app created by Spindle."""
 
-from spindle.resource_scope import SessionAttribution, MODAL_MAX_APP_TAGS
+import re
+
+from spindle.version import version_tags
 
 JOB_TYPES = {
     "frontend": "control-plane",
@@ -11,27 +13,59 @@ JOB_TYPES = {
 }
 
 
+MODAL_MAX_APP_TAGS = 8
+RESERVED_PREFIXES = ("_modal_", "spindle_")
+# Modal's tag rule, checked up front so a bad tag fails before any app deploys.
+TAG_PATTERN = re.compile(r"[a-zA-Z0-9._-]{1,63}")
+
+
+def validate_user_tags(tags: dict[str, str]) -> None:
+    for key, value in tags.items():
+        for text in (key, value):
+            if not isinstance(text, str) or not TAG_PATTERN.fullmatch(text):
+                raise ValueError(
+                    f"invalid app tag {key!r}: {value!r}; keys and values must be "
+                    "1-63 letters, digits, '.', '_' or '-'"
+                )
+        if key.startswith(RESERVED_PREFIXES):
+            raise ValueError(f"app tag key {key!r} is reserved for Spindle")
+
+
+def metadata_tags(metadata: dict[str, object]) -> dict[str, str]:
+    """Tags from Tinker user_metadata, rewriting what Modal would reject."""
+    tags = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        key, value = (
+            re.sub(r"[^a-zA-Z0-9._-]", "-", text)[:63] for text in (key, value)
+        )
+        if key and value and not key.startswith(RESERVED_PREFIXES):
+            tags[key] = value
+    return tags
+
+
 def app_tags(
     role: str,
     *,
     model: str = "",
     framework: str = "",
-    attribution: SessionAttribution | None = None,
+    extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    extra = extra or {}
+    validate_user_tags(extra)
     tags = {
         "_modal_source": "spindle",
         "spindle_role": role,
         # Dojo's report also matches job_type=training without checking source.
         "_modal_job_type": JOB_TYPES[role],
+        **version_tags(),
     }
     if framework:
         tags["_modal_framework"] = framework
     if model:
         tags["_modal_model_name"] = model.rsplit("/", 1)[-1].lower()
-    if attribution is not None:
-        tags.update(attribution.app_tags())
-        if len(tags) > MODAL_MAX_APP_TAGS:
-            tags.pop("_modal_framework", None)
-    if len(tags) > MODAL_MAX_APP_TAGS:
-        raise ValueError("Modal permits at most eight app tags")
+    # Modal rejects apps with more tags; user tags fill what Spindle leaves, in order.
+    for key, value in list(extra.items())[: MODAL_MAX_APP_TAGS - len(tags)]:
+        tags[key] = value
     return tags

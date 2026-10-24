@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import pytest
 
@@ -551,5 +552,179 @@ def test_model_creation_reuses_released_slot_at_trainer_cap() -> None:
             creations[1].model.model_id,
             creations[2].model.model_id,
         )
+
+    asyncio.run(run())
+
+
+def test_pending_creation_explains_trainer_startup() -> None:
+    async def scaling(definition_id: str) -> bool:
+        return True
+
+    async def run() -> None:
+        engines = LocalEnginePlatform(DEFINITION, EchoExecutor)
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            engines,
+            reconcile_trainers=scaling,
+            trainer_autoscaling=lambda _: True,
+        )
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"base_model": "Qwen/Qwen3-4B"},
+        )
+        assert (await plane.retrieve(creation.request_id)).reason is None
+        now[0] += 75
+        resolution = await plane.retrieve(creation.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            "starting a trainer for Qwen/Qwen3-4B (1m 15s so far)"
+        )
+
+        await engines.spawn_instance(DEFINITION)
+        placed = await plane.retrieve(creation.request_id)
+        assert placed.status == FutureResolutionStatus.COMPLETE
+
+    asyncio.run(run())
+
+
+def test_pending_creation_reports_gpu_capacity_wait() -> None:
+    async def scaling(definition_id: str) -> bool:
+        return True
+
+    async def run() -> None:
+        queued = ["8× H200"]
+
+        async def trainer_gpu_wait(definition_id: str) -> str | None:
+            assert definition_id == DEFINITION
+            return queued[0]
+
+        engines = LocalEnginePlatform(DEFINITION, EchoExecutor)
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            engines,
+            reconcile_trainers=scaling,
+            trainer_autoscaling=lambda _: True,
+            trainer_gpu_wait=trainer_gpu_wait,
+        )
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"base_model": "Qwen/Qwen3-4B"},
+        )
+        now[0] += 2 * 60 * 60 + 10 * 60
+        resolution = await plane.retrieve(creation.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            "waiting for 8× H200 GPUs to become available to start a trainer for "
+            "Qwen/Qwen3-4B (2h 10m so far)"
+        )
+
+        queued[0] = None
+        booting = await plane.retrieve(creation.request_id)
+        assert booting.reason.startswith("starting a trainer for Qwen/Qwen3-4B")
+
+    asyncio.run(run())
+
+
+def test_gpu_wait_errors_fall_back_to_startup_reason() -> None:
+    async def scaling(definition_id: str) -> bool:
+        return True
+
+    async def failing(definition_id: str) -> str | None:
+        raise ConnectionError("stats unavailable")
+
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+            reconcile_trainers=scaling,
+            trainer_autoscaling=lambda _: True,
+            trainer_gpu_wait=failing,
+        )
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"base_model": "Qwen/Qwen3-4B"},
+        )
+        now[0] += 75
+        resolution = await plane.retrieve(creation.request_id)
+        assert resolution.reason.startswith("starting a trainer for Qwen/Qwen3-4B")
+
+    asyncio.run(run())
+
+
+def test_waiting_for_a_trainer_slot_is_not_reported_as_startup() -> None:
+    async def run() -> None:
+        plane, session_id = await session_and_plane(max_models=1)
+        now = [time.time()]
+        plane.clock = lambda: now[0]
+        spec = {"base_model": "Qwen/Qwen3-4B"}
+        first = await plane.create_model(
+            session_id=session_id, model_seq_id=0, definition_id=DEFINITION, spec=spec
+        )
+        assert (
+            await plane.retrieve(first.request_id)
+        ).status == FutureResolutionStatus.COMPLETE
+        overflow = await plane.create_model(
+            session_id=session_id, model_seq_id=1, definition_id=DEFINITION, spec=spec
+        )
+        now[0] += 20 * 60
+        resolution = await plane.retrieve(overflow.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason is None
+
+    asyncio.run(run())
+
+
+def test_pending_creation_reports_the_weight_download_and_its_failure() -> None:
+    download: dict[str, object] = {"state": 1000.0}
+
+    async def downloading(definition_id: str) -> float | None:
+        if isinstance(download["state"], Exception):
+            raise download["state"]
+        return download["state"]
+
+    async def scaling(definition_id: str) -> bool:
+        return True
+
+    async def run() -> None:
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            LocalEnginePlatform(DEFINITION, EchoExecutor),
+            reconcile_trainers=scaling,
+            trainer_autoscaling=lambda _: True,
+            downloading_weights=downloading,
+        )
+        plane.clock = lambda: 1065.0
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"base_model": "Qwen/Qwen3-4B"},
+        )
+        resolution = await plane.retrieve(creation.request_id)
+        assert resolution.status == FutureResolutionStatus.PENDING
+        assert resolution.reason.startswith(
+            "downloading weights for Qwen/Qwen3-4B (1m 05s so far)"
+        )
+
+        download["state"] = ValueError("Downloading weights failed: 401")
+        failed = await plane.retrieve(creation.request_id)
+        assert failed.status == FutureResolutionStatus.FAILED
+        assert failed.error == "Downloading weights failed: 401"
 
     asyncio.run(run())

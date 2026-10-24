@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -25,9 +26,11 @@ from spindle.inference.serving import (
     terminate,
     wait_http,
 )
+from spindle.startup_timing import SAMPLER_COMPONENT, TRAINER_COMPONENT, timeline
 
 from .app_tags import app_tags
-from .deployment import trainer_deployment_env
+from .deployment import FORWARDED_DEPLOYMENT_ENVS, trainer_deployment_env
+from .deployment_configs import PLATFORM_ENV, TRAINER_CONFIG_ENV
 from .fft_pool import FFTPoolSpec
 from .fft_pool import deploy_pool as deploy_fft
 from .image_dependencies import (
@@ -41,18 +44,36 @@ from .kv import shared_kv
 from .lora_pool import LoraPoolSpec
 from .lora_pool import deploy_pool as deploy_lora
 from .megatron_image import image as megatron_image
+from .miles_v012_image import image as miles_v012_image
 from .miles_image import image as miles_image
 from .ray_cluster import start_trainer_cluster
 from .rollout_image import image as rollout_image
 from .serve import run_engine_with_backend
 
 
-def image_for(backend):
+TRAINER_IMAGES = {"miles-v0.1.2": miles_v012_image}
+
+
+def image_for(backend, name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
+    if name:
+        if name not in TRAINER_IMAGES:
+            raise ValueError(
+                f"unknown trainer image {name!r}; choose from {sorted(TRAINER_IMAGES)}"
+            )
+        return TRAINER_IMAGES[name]
     return {"miles": miles_image, "megatron": megatron_image, "sglang": rollout_image}[
         backend
     ]
+
+
+def build_sampler_image(frontend, environment):
+    """Build the pool image ahead of the first request; pools reuse the cached build."""
+    app = modal.App.lookup(
+        frontend, environment_name=environment, create_if_missing=True
+    )
+    image_for("sglang").build(app)
 
 
 def volumes_for(platform):
@@ -122,10 +143,15 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     if platform is None:
         platform = deployment.recipe.platform
     recipe = deployment.recipe
-    trainer_name = recipe.name
+    trainer_definition = deployment.definition_id
     app = modal.App(
         deployment.trainer_app_name,
-        tags=app_tags("trainer", model=recipe.model, framework=recipe.backend, attribution=deployment.attribution),
+        tags=app_tags(
+            "trainer",
+            model=recipe.model,
+            framework=recipe.backend,
+            extra=deployment.app_tags,
+        ),
     )
 
     env = {
@@ -135,8 +161,11 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     }
 
     def trainer(instance_id: str, config_json: str, frontend_app_id: str):
+        timeline(TRAINER_COMPONENT, instance_id=instance_id).mark(
+            "trainer_function_entered"
+        )
         saved = DeploymentConfig.model_validate_json(config_json)
-        if saved.name != trainer_name:
+        if saved.definition_id != trainer_definition:
             raise ValueError("trainer settings do not match the deployed app")
         os.environ["SPINDLE_FRONTEND_APP_ID"] = frontend_app_id
         log_scheduled_gpus("trainer")
@@ -147,11 +176,16 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
     trainer = app.function(
         name="trainer",
         serialized=True,
-        image=image if image is not None else image_for(recipe.backend),
+        image=(
+            image
+            if image is not None
+            else image_for(recipe.backend, recipe.trainer_image)
+        ),
         gpu=gpu_request(recipe.trainer_gpu, recipe.trainer_gpus_per_node),
         region=platform["modal"]["region"],
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
+        ephemeral_disk=recipe.trainer_disk_mib or None,
         timeout=recipe.trainer_timeout_s,
         max_containers=None,
         min_containers=0,
@@ -171,6 +205,7 @@ def run_trainer(deployment, instance_id, platform=None):
     recipe = deployment.recipe
     settings = deployment.trainer_settings
     assets = volumes_for(platform)["/assets"]
+    startup = timeline(TRAINER_COMPONENT, instance_id=instance_id)
     if recipe.trainer_nodes > 1:
         ray_address = start_trainer_cluster(
             recipe.trainer_nodes,
@@ -179,11 +214,14 @@ def run_trainer(deployment, instance_id, platform=None):
         )
         if ray_address is None:
             return
+        startup.mark("ray_cluster_joined")
     else:
         assets.reload()
         ray_address = None
+        startup.mark("assets_reloaded")
     if recipe.parameterization == "lora":
         _warm_lora_pool(platform["frontend"], deployment.definition_id)
+        startup.mark("lora_pool_warm_requested")
     env = {
         **KERNEL_CACHE_ENV,
         **deployment_env(recipe.trainer_env),
@@ -220,6 +258,7 @@ def run_trainer(deployment, instance_id, platform=None):
         nproc=1 if recipe.backend == "miles" else recipe.trainer_gpus_per_node,
         max_models=recipe.trainer_max_clients_per_instance,
         sampler_persistence_concurrency=recipe.sampler_persistence_concurrency,
+        max_forward_backward_models=recipe.trainer_max_clients_per_batch,
         on_startup_error=failed,
     )
 
@@ -244,7 +283,12 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         raise ValueError("pool does not match deployment")
     app = modal.App(
         pool.app_name,
-        tags=app_tags("inference", model=recipe.model, framework="sglang", attribution=deployment.attribution),
+        tags=app_tags(
+            "inference",
+            model=recipe.model,
+            framework="sglang",
+            extra=deployment.app_tags,
+        ),
     )
     options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
@@ -262,6 +306,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
+        ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),
@@ -280,6 +325,8 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
             self.sidecar = None
             self.sglang = None
             log_scheduled_gpus("sampler")
+            startup = timeline(SAMPLER_COMPONENT, pool=pool.app_name)
+            startup.mark("server_enter")
 
             self.sglang = subprocess.Popen(
                 [
@@ -297,6 +344,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sglang,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sglang_healthy")
                 kwargs = dict(
                     port=8000,
                     sglang_port=8001,
@@ -318,6 +366,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     self.sidecar,
                     recipe.inference_startup_timeout_s,
                 )
+                startup.mark("sidecar_healthy")
             except BaseException:
                 terminate(self.sidecar)
                 terminate(self.sglang)
@@ -347,14 +396,18 @@ def build_inference_app(deployment, platform=None, *, image=None):
         )
     app = modal.App(
         deployment.inference_app_name,
-        tags=app_tags("inference-provisioner", model=deployment.recipe.model),
+        tags=app_tags(
+            "inference-provisioner",
+            model=deployment.recipe.model,
+            extra=deployment.recipe.tags,
+        ),
     )
     inference_name = deployment.name
 
     @app.function(name="provision", image=image, serialized=True, timeout=1800)
     def provision(config_json: str, pool_data: dict):
         saved = DeploymentConfig.model_validate_json(config_json)
-        if saved.base_definition_id != inference_name:
+        if saved.name != inference_name:
             raise ValueError("inference settings do not match the deployed app")
         if pool_data["definition_id"] != saved.definition_id:
             raise ValueError("pool definition does not match deployment")
@@ -367,11 +420,39 @@ def build_inference_app(deployment, platform=None, *, image=None):
         )
 
     @app.function(name="provision_trainer", image=image, serialized=True, timeout=1800)
-    def provision_trainer(config_json: str):
+    def provision_trainer(config_json: str, forwarded_env: dict[str, str]):
         saved = DeploymentConfig.model_validate_json(config_json)
-        if saved.base_definition_id != inference_name or saved.attribution is None:
-            raise ValueError("trainer ownership does not match the deployed app")
-        from .session_resources import deploy_trainer
-        return deploy_trainer(saved, platform)
+        if saved.name != inference_name or saved.run is None:
+            raise ValueError("per-run trainer does not match the deployed app")
+        deploy_run_trainer(saved, platform, forwarded_env)
 
     return app, provision
+
+
+def deploy_run_trainer(deployment, platform, forwarded_env=None):
+    """Deploy a per-run trainer app from the provisioner, like a sampler pool."""
+    modal_cli = shutil.which("modal")
+    if modal_cli is None:
+        raise RuntimeError("modal CLI is unavailable")
+    command = [
+        modal_cli,
+        "deploy",
+        "-m",
+        "spindle.providers.modal.deployment_trainer_app",
+        "--name",
+        deployment.trainer_app_name,
+    ]
+    environment = platform["modal"]["environment"]
+    if environment:
+        command.extend(["--env", environment])
+    env = {
+        **os.environ,
+        **{
+            name: value
+            for name, value in (forwarded_env or {}).items()
+            if name in FORWARDED_DEPLOYMENT_ENVS
+        },
+        TRAINER_CONFIG_ENV: deployment.model_dump_json(),
+        PLATFORM_ENV: json.dumps(platform),
+    }
+    subprocess.run(command, env=env, check=True)

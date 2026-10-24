@@ -46,6 +46,7 @@ def miles():
     logit.build_local_sampling_mask = lambda *args, **kwargs: None
     loss = SimpleNamespace()
     loss._target_logprobs = lambda *args: "ordinary"
+    loss._response_masks = lambda *args: []
     loss.get_log_probs_and_entropy = lambda logits, **kwargs: {"log_probs": kwargs}
     dependencies = dict(
         megatron_model=model,
@@ -119,6 +120,9 @@ def test_mask_fields_forwarded_and_temperature_is_request_local(miles):
     assert result["unconcat_tokens"][0].tolist() == [1, 2, 3, 4]
     mask = result["rollout_sampling_mask"][0]
     assert mask._select_masks([2, 0, 1])[0].tolist() == [4, 3, 5]
-    assert miles.loss._target_logprobs(args, {}, None) == "ordinary"
+    assert (
+        miles.loss._target_logprobs(args, {"target_tokens": [[2, 3, 4]]}, None)
+        == "ordinary"
+    )
     with pytest.raises(ValueError, match="outside the model vocabulary"):
         miles.loss._target_logprobs(SimpleNamespace(vocab_size=5), batch, None)
