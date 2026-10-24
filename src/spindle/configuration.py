@@ -65,7 +65,6 @@ class BaseConfig:
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}
-    # Sampler settings for one inference_gpu type; see docs/deployment-configs.md.
     inference_gpu_overrides = {}
 
     miles_cfg = {}

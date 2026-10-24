@@ -89,27 +89,29 @@ class DeploymentConfig(BaseModel):
         gpus = self.recipe.inference_gpu
         gpus = [gpus] if isinstance(gpus, str) else gpus
         for gpu, overrides in self.recipe.inference_gpu_overrides.items():
+            fields = {path.split(".")[0] for path in overrides}
             if gpu not in gpus:
                 raise ValueError(
                     f"inference_gpu_overrides: {gpu} is not in inference_gpu"
                 )
-            keys = {path.split(".")[0] for path in overrides}
-            if keys - INFERENCE_GPU_OVERRIDABLE:
-                unknown = sorted(keys - INFERENCE_GPU_OVERRIDABLE)
-                raise ValueError(f"inference_gpu_overrides cannot set {unknown}")
-            weights = keys & {"model_weights", "weights_revision"}
-            if weights and self.parameterization != "lora":
-                raise ValueError("only LoRA samplers can serve other weights")
-            serving = self._with_overrides(overrides)
-            for key in SHARED_SERVING_SETTINGS:
-                if serving.inference_settings.get(key) != self.inference_settings.get(
-                    key
-                ):
-                    raise ValueError(f"inference_gpu_overrides cannot change {key}")
-            if not all(
-                isinstance(v, str) for v in serving.recipe.inference_env.values()
+            if not fields <= INFERENCE_GPU_OVERRIDABLE:
+                raise ValueError(
+                    f"inference_gpu_overrides can only set {sorted(INFERENCE_GPU_OVERRIDABLE)}"
+                )
+            if (
+                fields & {"model_weights", "weights_revision"}
+                and self.parameterization != "lora"
             ):
-                raise ValueError("inference_env values must be strings")
+                raise ValueError("only LoRA samplers can serve other weights")
+            serving = self._with_overrides(overrides).inference_settings
+            changed = [
+                key
+                for key in SHARED_SERVING_SETTINGS
+                if serving.get(key) != self.inference_settings.get(key)
+            ]
+            if changed:
+                raise ValueError(f"inference_gpu_overrides cannot change {changed}")
+        # Two revisions of one repo would share a download directory.
         self.weight_sets()
 
     def _with_overrides(self, overrides: dict) -> DeploymentConfig:
