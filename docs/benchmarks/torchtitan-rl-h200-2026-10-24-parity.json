@@ -1,0 +1,162 @@
+{
+  "model": "Qwen/Qwen3.8-27B",
+  "started_at": 1792879472.084632,
+  "passed": false,
+  "model_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "prompt_tokens": [
+    248045,
+    846,
+    198,
+    35728,
+    799,
+    6321,
+    11,
+    357,
+    466,
+    417,
+    13,
+    17308,
+    440,
+    1132,
+    421,
+    6321,
+    13,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    271,
+    248069,
+    271
+  ],
+  "probe_tokens": [
+    [
+      248045,
+      846,
+      198,
+      35728,
+      799,
+      6321,
+      11,
+      357,
+      466,
+      417,
+      13,
+      17308,
+      440,
+      1132,
+      421,
+      6321,
+      13,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      271,
+      248069,
+      271,
+      32
+    ],
+    [
+      248045,
+      846,
+      198,
+      35728,
+      799,
+      6321,
+      11,
+      357,
+      466,
+      417,
+      13,
+      17308,
+      440,
+      1132,
+      421,
+      6321,
+      13,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      271,
+      248069,
+      271,
+      33
+    ]
+  ],
+  "clients": [
+    {
+      "index": 0,
+      "preferred_letter": "A",
+      "steps": [],
+      "model_id": "6ff87d4ce7e81349ef86fe595ff79572",
+      "initial_version": 1,
+      "initial_sglang": [
+        -0.0832216739654541,
+        -2.583221673965454
+      ],
+      "initial_torchtitan": [
+        -0.09355354309082031,
+        -2.4685535430908203
+      ],
+      "initial_difference": {
+        "max_absolute": 0.11466813087463379,
+        "mean_absolute": 0.0625
+      }
+    },
+    {
+      "index": 1,
+      "preferred_letter": "B",
+      "steps": [],
+      "model_id": "c8267105ccedabe6c8e0a7cf6c98663e",
+      "initial_version": 1
+    }
+  ],
+  "error": "Traceback (most recent call last):\n  File \"/root/torchtitan_rl_trainer.py\", line 373, in main\n    asyncio.run(run_clients(base_url, result))\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/root/torchtitan_rl_trainer.py\", line 277, in run_clients\n    await asyncio.gather(client_loop(0), client_loop(1))\n  File \"/root/torchtitan_rl_trainer.py\", line 187, in client_loop\n    assert client[\"initial_difference\"][\"mean_absolute\"] < 0.05, client\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: {'index': 0, 'preferred_letter': 'A', 'steps': [], 'model_id': '6ff87d4ce7e81349ef86fe595ff79572', 'initial_version': 1, 'initial_sglang': [-0.0832216739654541, -2.583221673965454], 'initial_torchtitan': [-0.09355354309082031, -2.4685535430908203], 'initial_difference': {'max_absolute': 0.11466813087463379, 'mean_absolute': 0.0625}}\n",
+  "finished_at": 1792879861.86997,
+  "sampling_events": [],
+  "local_manifests": [
+    {
+      "files": {
+        "adapter_config.json": {
+          "sha256": "c81454d213233712fa5d1d0a2a5a5883e894b1c3cd6c252a52762f8b9f00f6a3",
+          "size": 281
+        },
+        "adapter_model.safetensors": {
+          "sha256": "8d3d48b6734d1f8c901aa197c4e095d35dc13c3c9248743c6ce832d5f0c52a7a",
+          "size": 318835640
+        }
+      },
+      "ref": "6ff87d4ce7e81349ef86fe595ff79572/weight_v000001"
+    },
+    {
+      "files": {
+        "adapter_config.json": {
+          "sha256": "c81454d213233712fa5d1d0a2a5a5883e894b1c3cd6c252a52762f8b9f00f6a3",
+          "size": 281
+        },
+        "adapter_model.safetensors": {
+          "sha256": "c489cc570fbf42046e811d90297607e3ebdb811472ad6d053ffb168f99bef6ce",
+          "size": 318835640
+        }
+      },
+      "ref": "c8267105ccedabe6c8e0a7cf6c98663e/weight_v000001"
+    }
+  ],
+  "function_call_ids": [
+    "fc-01M5QZ2AXV5M3R7SPSKX2KPZN2",
+    "fc-01M5QZ2MA0MZA9KJQNAKHCKVEY"
+  ],
+  "elapsed_seconds": 442.1322145462036,
+  "torchtitan_commit": "58350410517dd62a15026e6816be874d0d5cb548",
+  "sglang_revision": "d050d06437d96196fc68d5b4e5c246408790d537",
+  "gpu": "2 x H200",
+  "timeout_seconds_per_gpu": 600
+}

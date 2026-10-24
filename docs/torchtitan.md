@@ -3,8 +3,9 @@
 This backend runs a native TorchTitan Qwen decoder with a shared frozen BF16
 base and independently optimized LoRA adapters. H200 checks cover Qwen3.5-4B and
 Qwen3.8-27B; measured configurations and numerical limits are recorded below.
-The integration remains experimental: SGLang sampler parity and asynchronous SDK
-throughput have not been validated.
+The integration remains experimental. The 27B integration test found and fixed a
+snapshot-reload failure, but strict TorchTitan/SGLang numerical parity has not
+passed. Asynchronous SDK throughput has not been benchmarked.
 
 The runtime pins TorchTitan to
 [`58350410517dd62a15026e6816be874d0d5cb548`](https://github.com/pytorch/torchtitan/tree/58350410517dd62a15026e6816be874d0d5cb548)
@@ -89,6 +90,11 @@ Use Python 3.12 to match the serialized Modal Functions' images. A CPU-only
 preflight verifies Volume commit/reload from the worker's subprocess before GPU
 allocation. Workers use Modal's built-in Function credentials.
 
+The default stops on a failed numerical check. `--diagnose-parity` continues the
+RL loop while recording those failures; it does not change the thresholds or
+turn a failed parity result into a pass. The result separately records
+`rl_completed`, `numerical_parity_passed`, and `old_versions_stable`.
+
 The default is five updates per client, with a five-second start stagger. Each
 rollout samples four short answers and receives a positive or negative reward
 for choosing the client's preferred letter. This is an integration check, not
@@ -119,6 +125,48 @@ and per-client timings. Both GPU workers have hard timeouts of at most 30 minute
 the launcher also enforces a shared deadline, terminates the workers, and deletes
 its temporary Volume on exit. Retries
 need to fit the overall experiment budget; they are not automatic.
+
+The first 27B integration attempt to reach SGLang loaded one adapter, then failed
+to reload the Volume for the second client. The
+[failure report](benchmarks/torchtitan-rl-h200-2026-10-24-reload-failure.json)
+records the unsuccessful run. After local staging, both clients' adapters loaded
+and generated successfully. The initial numerical check still failed: mean
+absolute log-probability difference **0.0625**, maximum **0.114668**, for the fixed
+`A`/`B` answers before any update. See the
+[strict parity report](benchmarks/torchtitan-rl-h200-2026-10-24-parity.json).
+The difference is present with zero-initialized LoRA B matrices, so a successful
+adapter transfer alone is insufficient to establish matching training/sampling
+probabilities. Its exact numerical cause has not been isolated.
+
+The subsequent [RL diagnostic](benchmarks/torchtitan-rl-h200-2026-10-24.json)
+completed **five updates for each of two independent clients** on two H200s.
+All ten Adam updates had finite, nonzero gradients. Both clients published
+versions **1, 5, 9, 13, 17, 21**; these are command sequence numbers. All ten
+four-sample SDK requests served exactly their requested versions. Each client's
+six exported weight files had distinct hashes, and generation from the original
+version retained **exactly unchanged** fixed-answer log probabilities after
+every update. The adapters learned opposite letter preferences.
+
+Independent progress was observed: client A started its second rollout 59.900 s
+after its first, while client B's first step finished at 63.241 s on the same
+clock. First steps included kernel warmup and the deliberate second-client pause;
+later steps took roughly 12–14 s including publication and diagnostic probes.
+These timings are not an RL throughput benchmark.
+
+The diagnostic explicitly reports `rl_completed=true`,
+`independent_progress=true`, and `old_versions_stable=true`, while
+`numerical_parity_passed=false` and overall `passed=false`. On the actual sampled
+tokens, the maximum training-versus-sampling log-probability difference was
+**0.010334**. Fixed-answer probes reached **0.625** maximum and **0.3125** mean
+absolute difference, on a low-probability alternative after the fourth update.
+The transfer/versioning checks therefore succeeded, but strict numerical parity
+did not. This short, single-prompt reward experiment does not establish downstream
+training quality or parity across a representative prompt distribution.
+
+The final diagnostic took 552 s including startup and downloads, within its shared
+ten-minute deadline. Both GPU workers were terminated afterward. Local validation
+of this change passed **696 CPU tests (2 skipped)** under Python 3.12 and **17 native
+TorchTitan tests** in the pinned environment; CI on the staging fix also passed.
 
 ## Validation
 

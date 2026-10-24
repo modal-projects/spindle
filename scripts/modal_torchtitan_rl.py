@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
+    parser.add_argument("--diagnose-parity", action="store_true")
     args = parser.parse_args()
     if sys.version_info[:2] != (3, 12):
         parser.error("use Python 3.12 to match the Modal Function images")
@@ -84,6 +85,7 @@ def main():
         "MODAL_ENVIRONMENT": environment_name,
         "RL_API_KEY": "tml-" + secrets.token_urlsafe(32),
         "RL_STEPS": str(args.steps),
+        "RL_DIAGNOSE_PARITY": "1" if args.diagnose_parity else "0",
         "PYTHONUNBUFFERED": "1",
     }
     modal.Volume.objects.create(

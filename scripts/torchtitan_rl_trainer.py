@@ -72,6 +72,8 @@ def difference(left, right):
 
 
 async def run_clients(base_url, result):
+    diagnose_parity = os.environ.get("RL_DIAGNOSE_PARITY") == "1"
+    result["diagnose_parity"] = diagnose_parity
     model = os.environ["RL_MODEL"]
     tokenizer = AutoTokenizer.from_pretrained(
         model, revision=os.environ.get("RL_MODEL_REVISION")
@@ -183,8 +185,12 @@ async def run_clients(base_url, result):
                 initial_difference=difference(baseline, titan_baseline),
             )
             print("RL_BASELINE=" + json.dumps(client), flush=True)
-            assert client["initial_difference"]["max_absolute"] < 0.25, client
-            assert client["initial_difference"]["mean_absolute"] < 0.05, client
+            client["initial_parity_passed"] = (
+                client["initial_difference"]["max_absolute"] < 0.25
+                and client["initial_difference"]["mean_absolute"] < 0.05
+            )
+            if not diagnose_parity:
+                assert client["initial_parity_passed"], client
             for step in range(int(os.environ.get("RL_STEPS", "5"))):
                 record = {
                     "step": step + 1,
@@ -267,10 +273,17 @@ async def run_clients(base_url, result):
                 record["wall_seconds"] = (
                     record["sampling_policy_ready"] - record["rollout_start"]
                 )
+                record["parity_passed"] = (
+                    record["difference"]["max_absolute"] < 0.25
+                    and record["difference"]["mean_absolute"] < 0.05
+                )
+                record["old_version_stable"] = (
+                    record["old_version_drift"]["max_absolute"] < 1e-4
+                )
                 print("RL_STEP=" + json.dumps({"client": index, **record}), flush=True)
-                assert record["old_version_drift"]["max_absolute"] < 1e-4, record
-                assert record["difference"]["max_absolute"] < 0.25, record
-                assert record["difference"]["mean_absolute"] < 0.05, record
+                if not diagnose_parity:
+                    assert record["old_version_stable"], record
+                    assert record["parity_passed"], record
                 assert record["policy_change"]["max_absolute"] > 1e-3, record
             client["final_version"] = version
 
@@ -293,6 +306,15 @@ async def run_clients(base_url, result):
         response = await http.get("/validation/manifests")
         response.raise_for_status()
         result["manifests"] = response.json()
+        result["rl_completed"] = True
+        result["numerical_parity_passed"] = all(
+            client["initial_parity_passed"]
+            and all(step["parity_passed"] for step in client["steps"])
+            for client in clients
+        )
+        result["old_versions_stable"] = all(
+            step["old_version_stable"] for client in clients for step in client["steps"]
+        )
 
 
 def main():
@@ -371,7 +393,9 @@ def main():
             )
             with serve(app, 8000) as base_url:
                 asyncio.run(run_clients(base_url, result))
-        result["passed"] = True
+        result["passed"] = (
+            result["numerical_parity_passed"] and result["old_versions_stable"]
+        )
     except Exception:
         result["error"] = traceback.format_exc()
         traceback.print_exc()

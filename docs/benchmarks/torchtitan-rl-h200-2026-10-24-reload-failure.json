@@ -1,0 +1,149 @@
+{
+  "model": "Qwen/Qwen3.8-27B",
+  "started_at": 1792878819.4413326,
+  "passed": false,
+  "prompt_tokens": [
+    248045,
+    846,
+    198,
+    35728,
+    799,
+    6321,
+    11,
+    357,
+    466,
+    417,
+    13,
+    17308,
+    440,
+    1132,
+    421,
+    6321,
+    13,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    271,
+    248069,
+    271
+  ],
+  "probe_tokens": [
+    [
+      248045,
+      846,
+      198,
+      35728,
+      799,
+      6321,
+      11,
+      357,
+      466,
+      417,
+      13,
+      17308,
+      440,
+      1132,
+      421,
+      6321,
+      13,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      271,
+      248069,
+      271,
+      32
+    ],
+    [
+      248045,
+      846,
+      198,
+      35728,
+      799,
+      6321,
+      11,
+      357,
+      466,
+      417,
+      13,
+      17308,
+      440,
+      1132,
+      421,
+      6321,
+      13,
+      248046,
+      198,
+      248045,
+      74455,
+      198,
+      248068,
+      271,
+      248069,
+      271,
+      33
+    ]
+  ],
+  "clients": [
+    {
+      "index": 0,
+      "preferred_letter": "A",
+      "steps": [],
+      "model_id": "63ae26b26d6d66df7f10db1184789c23",
+      "initial_version": 1
+    },
+    {
+      "index": 1,
+      "preferred_letter": "B",
+      "steps": [],
+      "model_id": "2bd816a0c86ca27b64ca85b71b96cd55",
+      "initial_version": 1
+    }
+  ],
+  "error": "Traceback (most recent call last):\n  File \"/root/torchtitan_rl_trainer.py\", line 369, in main\n    asyncio.run(run_clients(base_url, result))\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 195, in run\n    return runner.run(main)\n           ^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/runners.py\", line 118, in run\n    return self._loop.run_until_complete(task)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.12/asyncio/base_events.py\", line 691, in run_until_complete\n    return future.result()\n           ^^^^^^^^^^^^^^^\n  File \"/root/torchtitan_rl_trainer.py\", line 275, in run_clients\n    await asyncio.gather(client_loop(0), client_loop(1))\n  File \"/root/torchtitan_rl_trainer.py\", line 176, in client_loop\n    baseline = await sglang_probe(model_id, version)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/torchtitan_rl_trainer.py\", line 128, in sglang_probe\n    response.raise_for_status()\n  File \"/usr/local/lib/python3.12/site-packages/httpx/_models.py\", line 829, in raise_for_status\n    raise HTTPStatusError(message, request=request, response=self)\nhttpx.HTTPStatusError: Server error '500 Internal Server Error' for url 'https://ta-01m5qyeny1webjhc1mc78fsrcr-8000-9rt3ugrgcdkm1g0h6ik8ib8eg.w.modal.host/generate'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500\n",
+  "finished_at": 1792879171.5073647,
+  "sampling_events": [],
+  "local_manifests": [
+    {
+      "files": {
+        "adapter_config.json": {
+          "sha256": "c81454d213233712fa5d1d0a2a5a5883e894b1c3cd6c252a52762f8b9f00f6a3",
+          "size": 281
+        },
+        "adapter_model.safetensors": {
+          "sha256": "c489cc570fbf42046e811d90297607e3ebdb811472ad6d053ffb168f99bef6ce",
+          "size": 318835640
+        }
+      },
+      "ref": "2bd816a0c86ca27b64ca85b71b96cd55/weight_v000001"
+    },
+    {
+      "files": {
+        "adapter_config.json": {
+          "sha256": "c81454d213233712fa5d1d0a2a5a5883e894b1c3cd6c252a52762f8b9f00f6a3",
+          "size": 281
+        },
+        "adapter_model.safetensors": {
+          "sha256": "8d3d48b6734d1f8c901aa197c4e095d35dc13c3c9248743c6ce832d5f0c52a7a",
+          "size": 318835640
+        }
+      },
+      "ref": "63ae26b26d6d66df7f10db1184789c23/weight_v000001"
+    }
+  ],
+  "function_call_ids": [
+    "fc-01M5QYENQGN53FQQ5TWD7VW4B1",
+    "fc-01M5QYEW84C79X83Q2DX6AM4JF"
+  ],
+  "elapsed_seconds": 424.4974694252014,
+  "torchtitan_commit": "58350410517dd62a15026e6816be874d0d5cb548",
+  "sglang_revision": "d050d06437d96196fc68d5b4e5c246408790d537",
+  "gpu": "2 x H200",
+  "timeout_seconds_per_gpu": 650
+}
