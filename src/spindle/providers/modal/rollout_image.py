@@ -9,7 +9,8 @@ from .image_dependencies import (
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-# A commit, not a branch: Modal caches the clone layer, so a branch can stay stale.
+# Modal caches this layer by command, so fetching a branch by name would keep
+# serving an older head.
 SGLANG_COMMIT = "9fa429d9bc6d34e93d43cc81610ce2c0c7315b2d"
 
 image = (

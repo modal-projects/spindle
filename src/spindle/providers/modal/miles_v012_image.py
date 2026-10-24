@@ -5,7 +5,8 @@ from .miles_release_image import MILES_PATH, release_image
 
 MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
 MILES_BRANCH = "spindle-miles-v0.1.2"
-# A commit, not the branch: Modal caches the fetch layer, so a branch can stay stale.
+# Head of MILES_BRANCH. Modal caches this layer by command, so fetching the branch
+# by name would keep serving an older head.
 MILES_COMMIT = "b0c5721131f707de560c600ec6fa110f7ea273db"
 
 image = release_image.run_commands(

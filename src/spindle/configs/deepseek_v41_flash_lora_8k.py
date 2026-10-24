@@ -6,7 +6,6 @@ class Config(BaseConfig):
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
-    # The release is FP8/FP4; training and Blackwell samplers use exact BF16 weights.
     model_weights = "PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
     weights_revision = "60a77a60c81e63f197c33e0b427c67f26ab27147"
     max_context_length = 8192
@@ -60,8 +59,8 @@ class Config(BaseConfig):
     trainer_env = {
         # Lazily loaded kernels can deadlock against in-flight cross-node expert all-to-alls.
         "CUDA_MODULE_LOADING": "EAGER",
-        # cuBLASLt still loads kernels while an expert all-to-all is in flight, which
-        # hangs B200 trainers; blocking collectives keep the two apart.
+        # cuBLASLt still loads kernels while an expert all-to-all is in flight,
+        # which can hang trainers.
         "TORCH_NCCL_BLOCKING_WAIT": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
