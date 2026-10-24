@@ -4,6 +4,17 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- `inference_gpu_overrides` gives samplers on one GPU type their own weights, environment and SGLang settings. `spindle deploy` downloads every weight set.
+- `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers. H200 samplers serve DeepSeek's FP8/FP4 release.
+- DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four.
+
+### Fixed
+
+- Miles' gloo process group waits as long as `distributed_timeout_minutes`, so trainers on slow-loading hosts no longer time out after 30 minutes.
+- The Miles v0.1.2 trainer image and the SGLang image are pinned to fork commits, so a cached build cannot serve an older fork branch.
+
 ## 0.1.1 - 2026-10-23
 
 The first versioned release. Deployments made before it report `0.1.0`.

@@ -6,13 +6,13 @@ class Config(BaseConfig):
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
-    # The release is FP8/FP4; training and serving both use exact BF16 weights.
+    # The release is FP8/FP4; training and Blackwell samplers use exact BF16 weights.
     model_weights = "PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
     weights_revision = "60a77a60c81e63f197c33e0b427c67f26ab27147"
     max_context_length = 8192
     backend = "miles"
     trainer_image = "miles-v0.1.2"
-    trainer_gpu = "B300"
+    trainer_gpu = ["B300", "B200", "H200"]
     trainer_gpus_per_node = 8
     trainer_nodes = 2
     trainer_cpu = 64
@@ -60,6 +60,9 @@ class Config(BaseConfig):
     trainer_env = {
         # Lazily loaded kernels can deadlock against in-flight cross-node expert all-to-alls.
         "CUDA_MODULE_LOADING": "EAGER",
+        # cuBLASLt still loads kernels while an expert all-to-all is in flight, which
+        # hangs B200 trainers; blocking collectives keep the two apart.
+        "TORCH_NCCL_BLOCKING_WAIT": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
@@ -67,7 +70,19 @@ class Config(BaseConfig):
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
-    inference_gpu = "B300"
+    inference_gpu = ["B300", "B200", "H200"]
+    inference_gpu_overrides = {
+        "B200": {"sglang_cfg.mem_fraction_static": 0.9},
+        # BF16 weights do not fit on H200, so it serves the FP8/FP4 release,
+        # with routed experts dequantized to FP8 because MXFP4 kernels need Blackwell.
+        "H200": {
+            "model_weights": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "weights_revision": "2cba9e42aa026125f3ed06c6d98c1db82f7ca027",
+            "inference_env.SGLANG_DSV4_FP4_EXPERTS": "1",
+            "inference_env.SGLANG_DSV4_FP4_DEQUANT": "1",
+            "sglang_cfg.mem_fraction_static": 0.9,
+        },
+    }
     inference_gpus_per_node = 8
     inference_cpu = 32
     inference_memory_mib = 700_000
