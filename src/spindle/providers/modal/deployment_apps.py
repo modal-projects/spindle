@@ -17,7 +17,7 @@ import modal
 import modal.experimental
 from modal.config import config
 
-from spindle.deployments import WEIGHTS_MARKER, DeploymentConfig
+from spindle.deployments import DeploymentConfig
 from spindle.inference.serving import (
     start_fft_sidecar,
     start_lora_sidecar,
@@ -50,7 +50,6 @@ from .serve import run_engine_with_backend
 
 
 TRAINER_IMAGES = {"miles-v0.1.2": miles_v012_image}
-WEIGHTS_POLL_S = 30
 
 
 def image_for(backend, name=""):
@@ -117,7 +116,7 @@ def gpu_request(gpu: str | list[str], count: int) -> str | list[str]:
     return [f"{name}:{count}" for name in gpu]
 
 
-def log_scheduled_gpus(role: str) -> list[str]:
+def log_scheduled_gpus(role: str) -> None:
     try:
         names = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -127,9 +126,8 @@ def log_scheduled_gpus(role: str) -> list[str]:
         ).stdout.splitlines()
     except (OSError, subprocess.CalledProcessError):
         logging.getLogger(__name__).exception("query scheduled GPUs")
-        return []
+        return
     print(f"spindle {role} scheduled on {len(names)}x {', '.join(sorted(set(names)))}")
-    return names
 
 
 def deployment_env(values):
@@ -268,24 +266,6 @@ def _warm_lora_pool(frontend: str, definition_id: str) -> None:
         logging.getLogger(__name__).exception("warm LoRA pool %s", definition_id)
 
 
-def wait_for_weights(serving: DeploymentConfig, assets, timeout_s: float) -> None:
-    """Wait for `spindle deploy` to finish weights that only some samplers load."""
-    marker = os.path.join(serving.asset_path, WEIGHTS_MARKER)
-    deadline = time.monotonic() + timeout_s
-    while True:
-        try:
-            with open(marker) as file:
-                if file.read() == serving.recipe.weights_revision:
-                    return
-        except FileNotFoundError:
-            pass
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"weights for {serving.weights_repo} are not downloaded")
-        print(f"spindle sampler waiting for {serving.weights_repo} to download")
-        time.sleep(WEIGHTS_POLL_S)
-        assets.reload()
-
-
 def build_rollout_app(deployment, pool, platform=None, *, image=None):
     """Create one frozen-base LoRA pool or one FFT latest/pinned/base pool."""
     if platform is None:
@@ -298,6 +278,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         pool.app_name,
         tags=app_tags("inference", model=recipe.model, framework="sglang"),
     )
+    options = deployment.inference_settings
     minimum = recipe.inference_min_replicas
     maximum = recipe.inference_max_replicas
     window = recipe.inference_scaledown_window_s
@@ -305,7 +286,6 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         minimum = minimum if pool.min_containers is None else pool.min_containers
         maximum = maximum if pool.max_containers is None else pool.max_containers
         window = window if pool.scaledown_window is None else pool.scaledown_window
-    volumes = volumes_for(platform)
 
     @app.server(
         name="Server",
@@ -315,7 +295,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,
         ephemeral_disk=recipe.inference_disk_mib or None,
-        volumes=volumes,
+        volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(recipe.inference_env),
         min_containers=minimum,
@@ -332,16 +312,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         def start(self):
             self.sidecar = None
             self.sglang = None
-            gpus = log_scheduled_gpus("sampler")
-            if recipe.inference_gpu_overrides and not gpus:
-                raise RuntimeError(
-                    "cannot read the GPU type for inference_gpu_overrides"
-                )
-            serving = deployment.for_inference_gpu(gpus[0] if gpus else "")
-            if serving.asset_path != deployment.asset_path:
-                wait_for_weights(
-                    serving, volumes["/assets"], recipe.inference_startup_timeout_s
-                )
+            log_scheduled_gpus("sampler")
             startup = timeline(SAMPLER_COMPONENT, pool=pool.app_name)
             startup.mark("server_enter")
 
@@ -350,10 +321,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                     sys.executable,
                     "-m",
                     "spindle.inference.sglang",
-                    serving.asset_path,
-                    json.dumps(serving.inference_settings),
+                    deployment.asset_path,
+                    json.dumps(options),
                 ],
-                env={**os.environ, **serving.recipe.inference_env},
                 start_new_session=True,
             )
             try:

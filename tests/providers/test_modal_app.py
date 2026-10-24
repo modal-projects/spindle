@@ -480,8 +480,9 @@ def base_task(definition):
     }
 
 
-def fake_asset_downloads(monkeypatch, registry) -> list:
+def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
     events = []
 
     def download(*, repo_id: str, revision: str | None, local_dir: str) -> None:
@@ -491,63 +492,21 @@ def fake_asset_downloads(monkeypatch, registry) -> list:
         events.append(("commit",))
 
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
-    monkeypatch.setattr(
-        modal_app,
-        "_mark_weights_complete",
-        lambda checkpoint, revision: events.append(("mark", checkpoint, revision)),
-    )
     monkeypatch.setattr(modal_app, "shared_kv", lambda: registry)
     monkeypatch.setattr(
         modal_app,
         "model_assets",
         SimpleNamespace(commit=SimpleNamespace(aio=commit)),
     )
-    return events
-
-
-def test_prepare_model_assets_marks_weights_ready_after_commit(monkeypatch) -> None:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    registry = InMemoryKeyValueStore()
-    events = fake_asset_downloads(monkeypatch, registry)
 
     asyncio.run(modal_app.prepare_model_assets.local(FULL_DEFINITION))
 
     definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
         ("download", definition.model, None, definition.asset_path),
-        ("mark", definition.asset_path, ""),
         ("commit",),
     ]
     assert asyncio.run(registry.get(modal_app._weights_ready_key(FULL_DEFINITION)))
-
-
-def test_sampler_only_weights_download_before_weights_are_ready(monkeypatch) -> None:
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    registry = InMemoryKeyValueStore()
-    original = modal_app.module_for(LORA_DEFINITION)
-    recipe = original.recipe
-    # Deployments without sampler-only weights keep their existing ready key.
-    assert modal_app._weights_id(LORA_DEFINITION) == (
-        f"{LORA_DEFINITION}:{original.weights_repo}@{recipe.weights_revision}"
-    )
-    definition = DeploymentConfig.create(
-        type(recipe)(
-            **{
-                **vars(recipe),
-                "inference_gpu": [recipe.inference_gpu, "H200"],
-                "inference_gpu_overrides": {"H200": {"model_weights": "org/fp8"}},
-            }
-        )
-    )
-    monkeypatch.setattr(modal_app, "module_for", lambda definition_id: definition)
-    events = fake_asset_downloads(monkeypatch, registry)
-
-    asyncio.run(modal_app.prepare_model_assets.local(LORA_DEFINITION))
-
-    downloads = [event[3] for event in events if event[0] == "download"]
-    assert downloads == [original.asset_path, "/assets/org/fp8"]
-    assert ("mark", "/assets/org/fp8", "") in events
-    assert asyncio.run(modal_app._weights_are_ready(LORA_DEFINITION))
 
 
 def test_ensure_pool_sizes_latest_pool_from_model_rollout_config(monkeypatch) -> None:
