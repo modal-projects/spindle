@@ -13,6 +13,7 @@ from spindle.replay import REPLAY_FIELDS
 from spindle.telemetry import backend as telemetry
 
 from ...contract import ForwardBatch
+from .score_centering import mis_weights, replay_logprobs, validate_support
 
 
 def log_packing(
@@ -88,6 +89,11 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
         "cispo": frozenset({"clip_low_threshold", "clip_high_threshold"}),
         "dro": frozenset({"beta"}),
         "dppo": frozenset({"tv_threshold"}),
+        "mis": frozenset({"mis_low", "mis_high", "sampling_temperature"}),
+        "score_centered": frozenset({"sampling_temperature"}),
+        "score_centered_mis": frozenset(
+            {"mis_low", "mis_high", "sampling_temperature"}
+        ),
     }
     if loss_name not in allowed:
         raise ValueError(f"unsupported loss_fn: {loss_name}")
@@ -99,6 +105,12 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
     values = {key: float(value) for key, value in config.items()}
     if any(not math.isfinite(value) for value in values.values()):
         raise ValueError("loss_fn_config values must be finite")
+    if "mis" in loss_name and not 0 < values.get("mis_low", 0.2) <= values.get(
+        "mis_high", 5.0
+    ):
+        raise ValueError("MIS thresholds must satisfy 0 < mis_low <= mis_high")
+    if values.get("sampling_temperature", 1.0) <= 0:
+        raise ValueError("sampling_temperature must be positive")
     if loss_name in {"ppo", "cispo"}:
         low = values.get(
             "clip_low_threshold",
@@ -117,7 +129,18 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
     return values
 
 
-RL_LOSSES = frozenset({"importance_sampling", "ppo", "cispo", "dro", "dppo"})
+RL_LOSSES = frozenset(
+    {
+        "importance_sampling",
+        "ppo",
+        "cispo",
+        "dro",
+        "dppo",
+        "mis",
+        "score_centered",
+        "score_centered_mis",
+    }
+)
 
 
 def build_sequence_batches(
@@ -141,9 +164,17 @@ def build_sequence_batches(
         if not item.data:
             raise ValueError(f"forward_backward has no data for job {item.model_id}")
         for output_index, datum in enumerate(item.data):
-            if REPLAY_FIELDS & datum.loss_fn_inputs.keys():
+            replay_fields = REPLAY_FIELDS & datum.loss_fn_inputs.keys()
+            supports_replay = loss_name in {
+                "mis",
+                "score_centered",
+                "score_centered_mis",
+            }
+            if replay_fields and (
+                not supports_replay or "routed_experts" in replay_fields
+            ):
                 raise ValueError(
-                    "sampler replay is currently supported only by the Miles LoRA backend"
+                    "sampler replay requires a supported loss; router replay requires the Miles LoRA backend"
                 )
             input_ids = list(datum.model_input.to_ints())
             if not input_ids:
@@ -217,6 +248,15 @@ def build_sequence_batches(
                 "loss_name": loss_name,
                 "loss_config": loss_config,
             }
+            if loss_name.startswith("score_centered") or replay_fields:
+                sequence.update(
+                    validate_support(
+                        datum.loss_fn_inputs,
+                        labels,
+                        weights,
+                        centered=loss_name.startswith("score_centered"),
+                    )
+                )
             if slot is not None:
                 adapter_token_counts = [0] * max_slots
                 adapter_token_counts[slot] = len(input_ids)
@@ -341,6 +381,24 @@ def pack_microbatches(
         }
         if adapter_token_counts is not None:
             batch["adapter_token_counts"] = adapter_token_counts
+        if any("sampling_mask_offsets" in item for item in items):
+            if not all("sampling_mask_offsets" in item for item in items):
+                raise ValueError(
+                    "sampling supports must be supplied for every datum in a replay batch"
+                )
+            ids, logq, offsets = [], [], [0]
+            for item, length, padded_length in zip(
+                items, lengths, padded_lengths, strict=True
+            ):
+                ids.append(item["sampling_mask_ids"])
+                logq.append(item["sampling_mask_logprobs"])
+                offset = offsets[-1]
+                offsets.extend((item["sampling_mask_offsets"][1:] + offset).tolist())
+                offsets.extend([offsets[-1]] * (padded_length - length))
+            offsets.extend([offsets[-1]] * total_padding)
+            batch["sampling_mask_ids"] = torch.cat(ids)
+            batch["sampling_mask_logprobs"] = torch.cat(logq)
+            batch["sampling_mask_offsets"] = torch.tensor(offsets, dtype=torch.long)
         packed.append(batch)
     return packed
 
@@ -404,13 +462,31 @@ def _loss(
         sampling_logprobs = batch["sampling_logprobs"].to(logprobs.device).reshape(-1)
         advantages = batch["advantages"].to(logprobs.device).reshape(-1)
         probability_ratio = torch.exp(logprobs - sampling_logprobs)
-        if loss_name == "importance_sampling":
+        if loss_name in {"mis", "score_centered_mis", "score_centered"}:
+            ratio = (
+                torch.ones_like(logprobs)
+                if loss_name == "score_centered"
+                else mis_weights(
+                    logprobs.detach() - sampling_logprobs,
+                    batch["loss_config"].get("mis_low", 0.2),
+                    batch["loss_config"].get("mis_high", 5.0),
+                )
+            )
+            objective = ratio * logprobs
+            if loss_name.startswith("score_centered"):
+                objective = objective - batch["score_correction"]
+            objective = objective * advantages
+        elif loss_name == "importance_sampling":
             objective = probability_ratio * advantages
         elif loss_name == "dppo":
             threshold = batch["loss_config"].get("tv_threshold", 0.1)
             ratio = probability_ratio.detach()
-            divergence = (ratio * sampling_logprobs.exp() - sampling_logprobs.exp()).abs()
-            leaving = ((advantages > 0) & (ratio > 1)) | ((advantages < 0) & (ratio < 1))
+            divergence = (
+                ratio * sampling_logprobs.exp() - sampling_logprobs.exp()
+            ).abs()
+            leaving = ((advantages > 0) & (ratio > 1)) | (
+                (advantages < 0) & (ratio < 1)
+            )
             blocked = leaving & (divergence > threshold)
             objective = probability_ratio * advantages * (~blocked).to(logprobs.dtype)
         elif loss_name == "ppo":
@@ -526,7 +602,21 @@ def make_forward_step(
         )
 
         def loss_func(output):
-            logprobs = _vocab_parallel_logprobs(output, batch["labels"])
+            diagnostics = {}
+            if "sampling_mask_offsets" in batch:
+                logprobs, batch["score_correction"], diagnostics = replay_logprobs(
+                    output,
+                    batch,
+                    tp_rank=parallel_state.get_tensor_model_parallel_rank(),
+                    tp_size=parallel_state.get_tensor_model_parallel_world_size(),
+                    tp_group=parallel_state.get_tensor_model_parallel_group(),
+                )
+            else:
+                temperature = batch["loss_config"].get("sampling_temperature", 1.0)
+                logprobs = _vocab_parallel_logprobs(
+                    output if temperature == 1.0 else output / temperature,
+                    batch["labels"],
+                )
             loss, token_count = _loss(logprobs, batch)
             positions = batch["token_indices"].reshape(-1)
             for job_id, output_index, start, length, is_dummy in zip(
@@ -553,6 +643,10 @@ def make_forward_step(
                     "sampling_logprobs": batch["sampling_logprobs"][selected],
                     "advantages": batch["advantages"][selected],
                 }
+                if "score_correction" in batch:
+                    sequence_batch["score_correction"] = batch["score_correction"][
+                        selected
+                    ]
                 sequence_loss, sequence_tokens = _loss(
                     logprobs[selected],
                     sequence_batch,
@@ -568,6 +662,10 @@ def make_forward_step(
                 metrics["loss"] += sequence_loss.detach()
                 metrics["tokens"] += sequence_tokens.detach()
                 metrics["sequences"] += 1
+                active = batch["loss_mask"][selected] != 0
+                for name, values in diagnostics.items():
+                    metrics.setdefault(name, torch.zeros((), device=loss.device))
+                    metrics[name] += values[selected][active].sum().detach()
 
             report = torch.stack([token_count.detach().float(), loss.detach().float()])
             return (
@@ -615,8 +713,9 @@ def _merge_payloads(
                 job_id,
                 {"loss": 0.0, "tokens": 0.0, "sequences": 0.0},
             )
-            target["loss"] += metrics["loss"]
-            target["tokens"] += metrics["tokens"]
+            for name, value in metrics.items():
+                if name != "sequences":
+                    target[name] = target.get(name, 0.0) + value
             if context_parallel:
                 target["sequences"] = max(
                     target["sequences"],
@@ -728,6 +827,9 @@ def build_outputs(
                     "cispo": "MegatronCISPOLoss",
                     "dro": "MegatronDROLoss",
                     "dppo": "MegatronDPPOLoss",
+                    "mis": "MegatronMISLoss",
+                    "score_centered": "MegatronScoreCenteredLoss",
+                    "score_centered_mis": "MegatronScoreCenteredMISLoss",
                 }[str(batch.loss_fn)],
                 loss_fn_outputs=loss_outputs,
                 metrics={
@@ -736,6 +838,16 @@ def build_outputs(
                     "tokens:sum": tokens,
                     "n_sequences:sum": sequences,
                     "response_length:mean": tokens / max(sequences, 1.0),
+                    **{
+                        f"{name}:sum": value
+                        for name, value in metrics.items()
+                        if name not in {"loss", "tokens", "sequences"}
+                    },
+                    **{
+                        f"{name}:mean": value / max(tokens, 1.0)
+                        for name, value in metrics.items()
+                        if name not in {"loss", "tokens", "sequences"}
+                    },
                 },
             )
         )

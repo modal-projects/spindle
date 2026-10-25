@@ -109,6 +109,8 @@ def test_trainer_declaration_and_executor_configuration(
 @pytest.mark.parametrize("kind", ["lora", "base", "latest", "pinned"])
 def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, kind):
     row = deployment("qwen35-9b-lora-16k" if kind == "lora" else "qwen35-4b-fft-64k")
+    if kind == "latest":
+        row.recipe.inference_region = ("us",)
     pool = (
         LoraPoolSpec(row.definition_id)
         if kind == "lora"
@@ -127,7 +129,8 @@ def test_pool_starts_native_server_and_correct_sidecar(builders, monkeypatch, ki
     )
     assert settings["min_containers"] == 0
     assert settings["target_concurrency"] == 16
-    assert settings["compute_region"] == "us-west"
+    assert settings["compute_region"] == (("us",) if kind == "latest" else "us-west")
+    assert settings["routing_region"] == "us-west"
 
     calls, commands, stops = [], [], []
     process = object()

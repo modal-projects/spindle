@@ -94,6 +94,7 @@ class DeploymentConfig(BaseModel):
         return (
             recipe.name,
             recipe.model,
+            recipe.model_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.backend,
@@ -101,6 +102,7 @@ class DeploymentConfig(BaseModel):
             recipe.megatron_cfg,
             recipe.sampler_persistence_concurrency,
             recipe.trainer_gpu,
+            recipe.trainer_region,
             recipe.trainer_gpus_per_node,
             recipe.trainer_nodes,
             recipe.trainer_cpu,
@@ -117,10 +119,12 @@ class DeploymentConfig(BaseModel):
         return (
             recipe.name,
             recipe.model,
+            recipe.model_revision,
             recipe.parameterization,
             recipe.max_context_length,
             recipe.sglang_cfg,
             recipe.inference_gpu,
+            recipe.inference_region,
             recipe.inference_gpus_per_node,
             recipe.inference_cpu,
             recipe.inference_memory_mib,

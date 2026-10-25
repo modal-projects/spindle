@@ -1,18 +1,59 @@
 # Sampler replay
 
-The Miles LoRA backend can train using the expert routes and token sampling
-supports captured by SGLang. Capture is opt-in per sampling request:
+Spindle can train using token sampling supports captured by SGLang. The Miles
+LoRA backend also supports expert-route replay. Capture is opt-in per request:
 
 - `return_routed_experts=True` captures the selected MoE expert IDs. Training
   reuses those selections while computing routing weights from its own logits.
 - `return_sampling_mask=True` captures the allowed token IDs after top-k,
   top-p, and min-p filtering, together with log probabilities normalized over
   that support. Training normalizes over the same support and temperature.
+- `return_sampling_probabilities=True` additionally captures normalized log
+  probabilities for **every** candidate in that support, for exact score centering.
+  This implies `return_sampling_mask=True`.
 
 Ordinary Tinker sampling discards additional response fields. Use
 `spindle.sample_with_replay()` to receive them, then pass its replay tensors through
-`Datum.loss_fn_inputs`. The Megatron full-training backend currently rejects
-these fields; this integration is for the Miles LoRA backend.
+`Datum.loss_fn_inputs`. Megatron supports token replay with the native `mis`,
+`score_centered`, and `score_centered_mis` losses. Router replay remains specific
+to the Miles LoRA backend.
+
+## Native MIS and score centering
+
+For full-parameter Megatron training, request `return_sampling_probabilities=True`
+and call `training.forward_backward(data, "score_centered_mis", loss_fn_config)`.
+Include `**sequence.replay.loss_fn_config()` in the config, plus `mis_low` and
+`mis_high` (defaults 0.2 and 5.0). No custom-forward/backward callback is needed.
+
+For each target, let `q` be the recorded sampler probabilities and `p` the
+trainer's probabilities renormalized on exactly the recorded support. The
+native loss has gradient
+
+```text
+-A * (w[y] * grad(log p[y]) - sum_v q[v] * w[v] * grad(log p[v]))
+w[v] = (p[v] / q[v]) * indicator(mis_low <= p[v] / q[v] <= mis_high)
+```
+
+Both importance weights and correction coefficients are detached. The correction
+remains when the sampled action is masked. `score_centered` uses `w=1`; `mis`
+omits the correction. Candidate probabilities are required for both centered
+losses; a chosen-token log probability alone cannot determine the correction.
+
+The bundled SGLang patch supports exact candidate probabilities with
+`sglang_cfg = {"sampling_backend": "pytorch", ...}`, without speculative decoding
+or prefill/decode disaggregation. It rejects unsupported modes. Set `top_k=-1`
+explicitly when intending pure top-p sampling. A support that exceeds
+`sampling_mask_max_tokens` is an error, never silently truncated.
+
+`sampling_mask_logprobs` is a float32 tensor aligned one-to-one with the flattened
+`sampling_mask_ids`; offsets have one entry per target plus a final endpoint.
+Native replay gathers only support logits across tensor-parallel ranks and
+preserves the original positions across context partitioning and packed padding.
+Metrics include entropy on the replayed support, `KL(q || p)` on that support,
+and the fraction of sampled tokens rejected by MIS.
+
+See [the mixed-sampler reproduction](../examples/mixed-samplers/README.md) for a
+token-preserving, multi-turn asynchronous training loop.
 
 ## Server configuration
 

@@ -11,9 +11,9 @@ from typing import Any
 import httpx
 from stitch.publish import constrain_request
 
-from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
-from spindle.telemetry.http_trace import HTTPTrace
 from spindle.replay import capture_replay
+from spindle.telemetry.http_trace import HTTPTrace
+from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 
 RETRY_INITIAL_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 5.0
@@ -59,11 +59,17 @@ async def sample_task(
         ),
     )
     replay_flags = {}
-    for key in ("return_routed_experts", "return_sampling_mask"):
+    for key in (
+        "return_routed_experts",
+        "return_sampling_mask",
+        "return_sampling_probabilities",
+    ):
         value = request.get(key, False)
         if type(value) is not bool:
             raise ValueError(f"{key} must be a boolean")
         replay_flags[key] = value
+    if replay_flags["return_sampling_probabilities"]:
+        replay_flags["return_sampling_mask"] = True
     model_id = task.get("model_id")
     version = task.get("publish_version")
     latest = bool(task.get("latest"))
@@ -150,6 +156,7 @@ async def sample_task(
                 temperature=params.get("temperature", 1.0),
                 routes=replay_flags["return_routed_experts"],
                 mask=replay_flags["return_sampling_mask"],
+                probabilities=replay_flags["return_sampling_probabilities"],
             )
     if stats is not None:
         meta = outputs[0].get("meta_info") or {}
@@ -209,7 +216,15 @@ async def _sample_one(
         "return_logprob": True,
         "routed_dp_rank": routed_dp_rank,
     }
-    body.update({key: value for key, value in replay_flags.items() if value})
+    body.update(
+        {
+            key: value
+            for key, value in replay_flags.items()
+            if value and key != "return_sampling_probabilities"
+        }
+    )
+    if replay_flags.get("return_sampling_probabilities"):
+        body["sampling_logprobs_mode"] = "support"
     if replay_flags["return_routed_experts"]:
         body["routed_experts_start_len"] = 0
     if cache_affinity_id is not None:

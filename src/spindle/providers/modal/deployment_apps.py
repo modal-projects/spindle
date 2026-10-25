@@ -116,7 +116,11 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         serialized=True,
         image=image if image is not None else image_for(recipe.backend),
         gpu=f"{recipe.trainer_gpu}:{recipe.trainer_gpus_per_node}",
-        region=platform["modal"]["region"],
+        region=(
+            recipe.trainer_region
+            if recipe.trainer_region is not None
+            else platform["modal"]["region"]
+        ),
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
         timeout=recipe.trainer_timeout_s,
@@ -225,7 +229,11 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         exit_grace_period=300,
         port=8000,
         routing_region=platform["modal"]["region"],
-        compute_region=platform["modal"]["region"],
+        compute_region=(
+            recipe.inference_region
+            if recipe.inference_region is not None
+            else platform["modal"]["region"]
+        ),
     )
     class Server:
         @modal.enter()

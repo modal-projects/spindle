@@ -1,7 +1,9 @@
 """Exercise the public helper through the real SDK and HTTP control plane."""
 
+import math
 from types import SimpleNamespace
 
+import pytest
 import tinker
 from tinker import types
 
@@ -17,8 +19,10 @@ from spindle.replay import capture_replay
 from tests.support import TinkerStubExecutor, serve
 
 
-def test_sdk_replay_roundtrip():
+@pytest.mark.parametrize("loss", ["ppo", "mis", "score_centered", "score_centered_mis"])
+def test_sdk_replay_roundtrip(loss):
     seen = []
+    probabilities = loss != "ppo"
 
     class Executor(TinkerStubExecutor):
         async def execute(self, model_id, kind, payload):
@@ -39,13 +43,18 @@ def test_sdk_replay_roundtrip():
                     "replay": capture_replay(
                         {
                             "output_token_sampling_mask": [[3, 5], [4]],
-                            "output_token_sampling_logprobs": [-0.3, 0.0],
+                            "output_token_sampling_logprobs": (
+                                [[math.log(0.7), math.log(0.3)], [0.0]]
+                                if probabilities
+                                else [-0.3, 0.0]
+                            ),
                         },
                         [3, 4],
                         prompt_tokens=2,
                         temperature=0.7,
                         routes=False,
                         mask=True,
+                        probabilities=probabilities,
                     ),
                 }
             ],
@@ -77,12 +86,16 @@ def test_sdk_replay_roundtrip():
                     max_tokens=2, temperature=0.7, top_p=0.9
                 ),
                 return_sampling_mask=True,
+                return_sampling_probabilities=probabilities,
             )
             .result(timeout=30)
             .sequences[0]
         )
         assert sequence.logprobs == [-2.0, -3.0]
-        assert sequence.replay.sampling_logprobs == [-0.3, 0.0]
+        assert sequence.replay.sampling_logprobs == [
+            math.log(0.7) if probabilities else -0.3,
+            0.0,
+        ]
         training = service.create_lora_training_client(
             base_model=definition.model, rank=16
         )
@@ -96,7 +109,7 @@ def test_sdk_replay_roundtrip():
         )
         training.forward_backward(
             [datum],
-            "ppo",
+            loss,
             loss_fn_config=sequence.replay.loss_fn_config(),
         ).result(timeout=30)
     assert len(seen) == 1
@@ -104,3 +117,8 @@ def test_sdk_replay_roundtrip():
     assert list(inputs["sampling_mask_offsets"].data) == [0, 0, 2, 3]
     assert list(inputs["sampling_mask_ids"].data) == [3, 5, 4]
     assert seen[0].loss_fn_config["sampling_temperature"] == 0.7
+    assert seen[0].loss_fn == loss
+    if probabilities:
+        assert list(inputs["sampling_mask_logprobs"].data) == pytest.approx(
+            [math.log(0.7), math.log(0.3), 0.0]
+        )
