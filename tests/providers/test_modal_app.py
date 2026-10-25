@@ -181,12 +181,17 @@ def test_prepare_model_spawns_sized_latest_pool_for_full_models(monkeypatch) -> 
     ]
 
 
-def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> None:
+@pytest.mark.parametrize("revision", [None, "995ad96eacd98c81ed38be0c5b274b04031597b0"])
+def test_prepare_model_assets_validates_snapshot_before_commit(
+    monkeypatch, revision
+) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     events = []
+    definition = modal_app.module_for(FULL_DEFINITION)
+    monkeypatch.setattr(definition.recipe, "model_revision", revision)
 
-    def download(*, repo_id: str, local_dir: str) -> None:
-        events.append(("download", repo_id, local_dir))
+    def download(*, repo_id: str, local_dir: str, revision: str | None) -> None:
+        events.append(("download", repo_id, local_dir, revision))
 
     monkeypatch.setattr("spindle.providers.modal.app.snapshot_download", download)
     monkeypatch.setattr(
@@ -197,9 +202,8 @@ def test_prepare_model_assets_validates_snapshot_before_commit(monkeypatch) -> N
 
     modal_app.prepare_model_assets.local(FULL_DEFINITION)
 
-    definition = modal_app.module_for(FULL_DEFINITION)
     assert events == [
-        ("download", definition.model, definition.asset_path),
+        ("download", definition.model, definition.asset_path, revision),
         ("commit",),
     ]
 

@@ -54,7 +54,8 @@ prompt, or the full sanitization procedure. This recipe chooses:
 - stop after three consecutive non-tool responses; the `submit` tool
   ends the agent session; binary test reward;
 - 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to
-  two serving replicas per group; target of 200 updates, checkpoint every 10.
+  two serving replicas per group, keeping one warm through fleet startup;
+  target of 200 updates, checkpoint every 10.
 
 All groups use PyTorch top-p selection so recorded supports and probabilities
 describe the actual categorical distribution. Their model execution still uses

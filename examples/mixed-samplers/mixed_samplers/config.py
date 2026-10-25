@@ -14,7 +14,7 @@ class Config(QwenConfig):
     trainer_memory_mib = 786432
     inference_cpu = 16
     inference_memory_mib = 262144
-    inference_min_replicas = 0
+    inference_min_replicas = 1  # Keep early groups warm while the rest initialize.
     inference_max_replicas = 2
     inference_target_concurrency = 16
     inference_startup_timeout_s = 2400
