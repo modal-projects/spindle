@@ -92,7 +92,7 @@ def main():
     axes[1].set(
         title="Mean policy age by sampler group",
         xlabel="Optimizer update",
-        ylabel="Publications behind trainer",
+        ylabel="Optimizer updates behind trainer",
     )
     for axis in axes:
         axis.grid(alpha=0.2)
