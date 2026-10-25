@@ -94,7 +94,7 @@ def sampler_config(group):
     return Config(
         name=f"{config.name}-{group['name']}",
         inference_gpu=group["gpu"],
-        inference_region=("us",) if group["name"] == "a100-bf16" else None,
+        inference_region=() if group["name"] == "a100-bf16" else None,
         inference_gpus_per_node=group["gpus"],
         inference_env={
             "SGLANG_FP8_BLOCK_ONLINE": "1",

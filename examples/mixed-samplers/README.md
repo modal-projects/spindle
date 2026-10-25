@@ -69,6 +69,8 @@ The public `XiaomiMiMo/mimoagent` environment is pinned to
 then replaces repository history with a single root commit. Grading applies the
 submitted diff in a fresh sandbox and runs the hidden test patch there. Verifier
 infrastructure errors fail the rollout rather than becoming zero rewards.
+Patch capture preserves its baseline outside the editable working directory, so
+agent commits or deletion of the working directory's `.git` still yield a diff.
 Container tags are published dataset tags; historical image digests are not
 available, so this is not a bitwise reconstruction of the original environments.
 
@@ -140,7 +142,7 @@ gradients are not checkpointed, so an interrupted update must be recomputed.
 Recovery retains the original validated capacity weights and runs fresh sampler
 checks alongside training, recording them in `startup-validation.json`. This lets
 the trainer consume saved trajectories while new serving replicas initialize.
-A sampler check failure cancels training. A100 compute can use any US region to
+A sampler check failure cancels training. A100 compute can use any available region to
 avoid a capacity bottleneck; its request endpoint remains in `us-west`.
 
 Long generated shell commands are transferred as script files to avoid Modal's

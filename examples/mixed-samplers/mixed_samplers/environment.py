@@ -27,6 +27,7 @@ def setup(task):
     environment = create_environment(task)
     try:
         environment.setup_environment()
+        git_dir = f"/tmp/spindle-baseline-{uuid.uuid4().hex}.git"
         # Start from one root commit. This removes all pre-task history, refs,
         # reflogs, unreachable objects, hooks, remotes and repository config.
         result = environment.execute(
@@ -41,16 +42,33 @@ def setup(task):
                 f"repository sanitization failed: {result['output'][-2000:]}"
             )
         baseline = result["output"].strip().splitlines()[-1]
-        return environment, baseline
+        copied = environment.execute(
+            f"cp -a -- .git {shlex.quote(git_dir)}",
+            cwd=task["cwd"],
+            timeout=300,
+        )
+        if copied["returncode"] != 0:
+            raise RuntimeError(
+                f"could not preserve repository baseline: {copied['output'][-2000:]}"
+            )
+        return environment, {"commit": baseline, "git_dir": git_dir}
     except BaseException:
         environment.cleanup()
         raise
 
 
 def capture_patch(environment, task, baseline):
+    # Agent commands can commit changes or replace the entire working directory.
+    # Keep our original tree and index independent of its editable .git metadata.
+    worktree = shlex.quote(task["cwd"])
+    git = (
+        f"git --git-dir={shlex.quote(baseline['git_dir'])} --work-tree={worktree} "
+        "-c core.hooksPath=/dev/null"
+    )
     result = environment.execute(
-        f"git add -A && git diff --binary {shlex.quote(baseline)} -- .",
-        cwd=task["cwd"],
+        f"mkdir -p -- {worktree} && cd -- {worktree} && {git} add -A && "
+        f"{git} diff --binary {shlex.quote(baseline['commit'])} -- .",
+        cwd="/",
         timeout=120,
     )
     if result["returncode"] != 0:
