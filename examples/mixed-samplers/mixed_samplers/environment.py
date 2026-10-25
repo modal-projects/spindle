@@ -53,7 +53,10 @@ def capture_patch(environment, task, baseline):
         timeout=120,
     )
     if result["returncode"] != 0:
-        raise RuntimeError("could not capture the submitted patch")
+        raise RuntimeError(
+            f"could not capture the submitted patch (exit {result['returncode']}): "
+            f"{result['output'][-2000:]}"
+        )
     return result["output"]
 
 
