@@ -133,6 +133,12 @@ avoid a capacity bottleneck; its request endpoint remains in `us-west`.
 
 ## Evidence to inspect
 
+Native diagnostic totals preserve token averages when Tinker splits a large
+request into chunks. The recipe reconstructs entropy, KL and MIS-mask means from
+those totals. Older deployed backends expose only means; reports explicitly label
+that fallback `sdk_chunk_means`. This affects diagnostic weighting, not the loss
+gradient, whose active-token weights are normalized across the full update.
+
 `manifest.json` records revisions, allocations, capacity measurements and chosen
 settings. `events.jsonl` records per-trajectory rewards, formatting failures,
 lengths and served versions; update records include entropy, sampler/trainer KL,

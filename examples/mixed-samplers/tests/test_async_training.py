@@ -11,6 +11,33 @@ import pytest
 training_module = importlib.import_module("mixed_samplers.train")
 
 
+def test_token_diagnostics_reconstruct_means_after_sdk_chunk_reduction():
+    from tinker import ForwardBackwardOutput
+    from tinker.lib.chunked_fwdbwd_helpers import combine_fwd_bwd_output_results
+
+    chunks = [
+        ForwardBackwardOutput(
+            loss_fn_output_type="MegatronScoreCenteredMISLoss",
+            loss_fn_outputs=[{}],
+            metrics={
+                "tokens:sum": count,
+                **{
+                    f"{name}:sum": count * value for name in training_module.DIAGNOSTICS
+                },
+                **{f"{name}:mean": value for name in training_module.DIAGNOSTICS},
+            },
+        )
+        for count, value in [(1, 0.1), (9, 0.9)]
+    ]
+    combined = combine_fwd_bwd_output_results(chunks)
+    metrics, aggregation = training_module.diagnostic_means(combined.metrics)
+    assert aggregation == "token_mean"
+    for name in training_module.DIAGNOSTICS:
+        assert metrics[f"{name}:mean"] == pytest.approx(0.82)
+    legacy = {k: v for k, v in combined.metrics.items() if not k.endswith(":sum")}
+    assert training_module.diagnostic_means(legacy) == (legacy, "sdk_chunk_means")
+
+
 @pytest.mark.parametrize("validation_fails", [False, True])
 def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fails):
     async def run():

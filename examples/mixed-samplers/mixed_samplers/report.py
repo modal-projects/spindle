@@ -23,6 +23,13 @@ def main():
             "No completed training updates; there are no stability curves to plot"
         )
     steps = [e["step"] for e in updates]
+    aggregation = sorted(
+        {
+            kind
+            for update in updates
+            for kind in update.get("diagnostic_aggregation", ["sdk_chunk_means"])
+        }
+    )
     figure, axes = plt.subplots(2, 4, figsize=(17, 7), constrained_layout=True)
     series = [
         ("Test pass rate", [e["reward"] for e in updates]),
@@ -56,7 +63,10 @@ def main():
         axis.plot(steps, values, linewidth=1.3)
         axis.set(xlabel="Optimizer update", title=label)
         axis.grid(alpha=0.2)
-    figure.suptitle(f"Asynchronous mixed-sampler RL — {len(updates)} measured updates")
+    figure.suptitle(
+        f"Asynchronous mixed-sampler RL — {len(updates)} measured updates\n"
+        f"Loss diagnostics: {', '.join(aggregation)}"
+    )
     figure.savefig(args.run / "training-curves.png", dpi=160)
     plt.close(figure)
     figure, axes = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
@@ -99,6 +109,7 @@ def main():
         )
     summary = {
         "completed_updates": len(updates),
+        "diagnostic_aggregation": aggregation,
         "first_update": updates[0],
         "last_update": updates[-1],
         "async_overlap": overlaps,

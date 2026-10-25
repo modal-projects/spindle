@@ -839,6 +839,11 @@ def build_outputs(
                     "n_sequences:sum": sequences,
                     "response_length:mean": tokens / max(sequences, 1.0),
                     **{
+                        f"{name}:sum": value
+                        for name, value in metrics.items()
+                        if name not in {"loss", "tokens", "sequences"}
+                    },
+                    **{
                         f"{name}:mean": value / max(tokens, 1.0)
                         for name, value in metrics.items()
                         if name not in {"loss", "tokens", "sequences"}

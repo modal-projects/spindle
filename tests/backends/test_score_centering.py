@@ -7,15 +7,48 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from tinker import Datum, ModelInput, TensorData
+from tinker.lib.chunked_fwdbwd_helpers import combine_fwd_bwd_output_results
 
 from spindle.backends import ForwardBatch, ForwardItem
 from spindle.backends.megatron_runtime.common.forward_backward import (
     _loss,
+    build_outputs,
     build_sequence_batches,
     pack_microbatches,
     shard_microbatches,
 )
 from spindle.backends.megatron_runtime.common.score_centering import replay_logprobs
+
+
+def test_diagnostic_totals_survive_sdk_chunks_with_unequal_token_counts():
+    request = ForwardBatch((ForwardItem("m", ()),), "score_centered_mis")
+    chunks = []
+    for count, entropy in [(1, 1.0), (9, 2.0)]:
+        chunks.extend(
+            build_outputs(
+                request,
+                {
+                    0: [
+                        {
+                            "output_index": 0,
+                            "positions": list(range(count)),
+                            "logprobs": [0.0] * count,
+                        }
+                    ]
+                },
+                {
+                    0: {
+                        "loss": 0.0,
+                        "tokens": count,
+                        "sequences": 1,
+                        "entropy": count * entropy,
+                    }
+                },
+            )
+        )
+    combined = combine_fwd_bwd_output_results(chunks)
+    assert combined.metrics["entropy:mean"] == 1.5  # SDK averages the two sequences.
+    assert combined.metrics["entropy:sum"] / combined.metrics["tokens:sum"] == 1.9
 
 
 def make_batch(targets, q, advantages, *, loss="score_centered_mis", config=None):

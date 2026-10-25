@@ -90,6 +90,22 @@ def trajectory_metadata(row):
     }
 
 
+DIAGNOSTICS = ("entropy", "sampler_trainer_kl", "mis_masked_fraction")
+
+
+def diagnostic_means(metrics):
+    # Tinker combines :mean by datum count, which biases token means when it
+    # splits a large request. Additive totals survive that SDK reduction.
+    result = dict(metrics)
+    exact = all(f"{name}:sum" in metrics for name in DIAGNOSTICS)
+    if exact:
+        for name in DIAGNOSTICS:
+            result[f"{name}:mean"] = metrics[f"{name}:sum"] / max(
+                metrics["tokens:sum"], 1.0
+            )
+    return result, "token_mean" if exact else "sdk_chunk_means"
+
+
 def initial_rollout_cache(path, tasks):
     manifest = json.loads((path / "manifest.json").read_text())
     expected = {
@@ -306,6 +322,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 tokens=total_tokens,
             )
             metrics = {}
+            diagnostic_aggregation = set()
             zero_variance_prompts = 0
             for prompt_number, rows in batch:
                 rewards = [m["reward"] for _, m in rows]
@@ -331,15 +348,18 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                     timeout=7200,
                 )
                 group_tokens = sum(m["generated_tokens"] for _, m in rows)
+                reported_metrics, aggregation = diagnostic_means(result.metrics)
+                diagnostic_aggregation.add(aggregation)
                 event(
                     "backward_completed",
                     step=step,
                     prompt=prompt_number,
                     elapsed=time.time() - backward_started,
                     tokens=group_tokens,
-                    metrics=result.metrics,
+                    metrics=reported_metrics,
+                    diagnostic_aggregation=aggregation,
                 )
-                for name, value in result.metrics.items():
+                for name, value in reported_metrics.items():
                     if not math.isfinite(value):
                         raise RuntimeError(
                             f"non-finite training metric {name}: {value}"
@@ -395,6 +415,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 publication=publication.path,
                 elapsed=time.time() - started,
                 metrics=metrics,
+                diagnostic_aggregation=sorted(diagnostic_aggregation),
                 optimizer=optimizer.metrics,
                 reward=sum(m["reward"] for m in all_meta) / len(all_meta),
                 format_error_rate=sum(m["format_error"] for m in all_meta)
