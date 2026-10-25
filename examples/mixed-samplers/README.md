@@ -51,6 +51,7 @@ prompt, or the full sanitization procedure. This recipe chooses:
   standard deviation plus 1e-6; token-mean loss over the full update;
 - Adam, LR 1e-6, betas (0.9, 0.95), epsilon 1e-8, no weight decay, clip norm 1;
 - up to 200 bash turns; each continuation may use the remaining 256K context budget;
+- a three-hour sampling request deadline, allowing long continuations to finish;
 - stop after three consecutive non-tool responses; the `submit` tool
   ends the agent session; binary test reward;
 - 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to

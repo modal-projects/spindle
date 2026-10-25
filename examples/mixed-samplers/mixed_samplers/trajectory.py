@@ -9,7 +9,14 @@ import uuid
 from spindle.inference.sampling import sample_task
 from spindle.providers.modal.fft_pool import proxy_auth_headers
 
-from .config import MAX_TOKENS_PER_TURN, MAX_TURNS, TEMPERATURE, TOP_P, config
+from .config import (
+    MAX_TOKENS_PER_TURN,
+    MAX_TURNS,
+    SAMPLING_TIMEOUT_SECONDS,
+    TEMPERATURE,
+    TOP_P,
+    config,
+)
 from .environment import capture_patch, grade_patch, setup
 
 TOOLS = [
@@ -154,6 +161,8 @@ async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
                     },
                 },
                 gateway,
+                timeout=SAMPLING_TIMEOUT_SECONDS,
+                retry_timeout=SAMPLING_TIMEOUT_SECONDS,
                 headers=proxy_auth_headers(),
                 session_id=session,
                 context_length=config.max_context_length,
