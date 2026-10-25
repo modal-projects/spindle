@@ -69,6 +69,7 @@ def test_initial_cache_keeps_clients_seeds_and_original_group_capacity(tmp_path)
         ("backend", "megatron"),
         ("rank", 16),
         ("initial_versions", [1, 2]),
+        ("initial_steps", [1, 0]),
         ("client_seeds", [42, 42]),
         ("dataset_revision", "different"),
         ("top_p", 1.0),

@@ -36,7 +36,7 @@ from .publication import latest_ref
 from .train import read_initial_rollouts, train
 
 
-def initial_client_rollouts(path, tasks, client_count):
+def previous_manifest(path, client_count):
     manifest = json.loads((path / "manifest.json").read_text())
     expected = {
         "backend": "miles",
@@ -53,18 +53,27 @@ def initial_client_rollouts(path, tasks, client_count):
         "batch_per_client": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
         "clients": client_count,
         "client_seeds": [SEED + index * 1_000_000 for index in range(client_count)],
-        "initial_versions": [1] * client_count,
     }
     if any(manifest.get(key) != value for key, value in expected.items()):
-        raise ValueError("initial Miles rollouts use a different recipe or client seed")
+        raise ValueError("previous Miles run uses a different recipe or client seed")
     capacity = manifest["capacity"]
     if set(capacity) != {g["name"] for g in GROUPS} or any(
         not math.isfinite(row["tokens_per_second"]) or row["tokens_per_second"] <= 0
         for row in capacity.values()
     ):
-        raise ValueError("initial Miles rollouts have invalid capacity measurements")
+        raise ValueError("previous Miles run has invalid capacity measurements")
+    return manifest
+
+
+def initial_client_rollouts(path, tasks, client_count):
+    manifest = previous_manifest(path, client_count)
+    if (
+        manifest.get("initial_versions") != [1] * client_count
+        or manifest.get("initial_steps", [0] * client_count) != [0] * client_count
+    ):
+        raise ValueError("initial Miles rollouts must come from untrained adapters")
     return {
-        "capacity": capacity,
+        "capacity": manifest["capacity"],
         "clients": [
             read_initial_rollouts(
                 path / f"client-{index}",
@@ -76,9 +85,39 @@ def initial_client_rollouts(path, tasks, client_count):
     }
 
 
-async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
+def checkpoint_resume(path, client_count, target_steps):
+    manifest = previous_manifest(path, client_count)
+    if manifest.get("lr") != LEARNING_RATE or manifest.get("context_length") != (
+        config.max_context_length
+    ):
+        raise ValueError("previous Miles run uses different training settings")
+    checkpoints = [
+        json.loads((path / f"client-{index}" / "checkpoint.json").read_text())
+        for index in range(client_count)
+    ]
+    for checkpoint in checkpoints:
+        step = checkpoint.get("step")
+        if type(step) is not int or not 0 < step <= target_steps:
+            raise ValueError("checkpoint step must be positive and within --steps")
+        if not isinstance(checkpoint.get("path"), str) or not checkpoint[
+            "path"
+        ].startswith("tinker://"):
+            raise ValueError("checkpoint must reference a saved Tinker optimizer state")
+    if all(checkpoint["step"] == target_steps for checkpoint in checkpoints):
+        raise ValueError("all clients already reached the requested --steps")
+    return {"capacity": manifest["capacity"], "checkpoints": checkpoints}
+
+
+async def run_clients(
+    args, service, gateways, tasks, url, key, *, cache=None, resume=None
+):
     clients = []
     initial_versions = []
+    initial_steps = (
+        [checkpoint["step"] for checkpoint in resume["checkpoints"]]
+        if resume is not None
+        else [0] * args.clients
+    )
     args.output.mkdir(parents=True, exist_ok=True)
     events = args.output / "clients.jsonl"
 
@@ -140,6 +179,18 @@ async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
                 3600,
             )
             clients.append(training)
+            if resume is not None:
+                checkpoint = resume["checkpoints"][index]
+                await asyncio.wait_for(
+                    training.load_state_with_optimizer(
+                        checkpoint["path"]
+                    ).result_async(),
+                    7200,
+                )
+                directory = args.output / f"client-{index}"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "checkpoint.json").write_text(json.dumps(checkpoint))
+                event("client_resumed", client=index, **checkpoint)
             publication = await asyncio.wait_for(
                 training.save_weights_for_sampler("initial").result_async(), 1800
             )
@@ -162,11 +213,8 @@ async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
                 for gateway in gateways.values()
             )
         )
-        capacity = (
-            [cache["capacity"][group] for group in gateways]
-            if cache is not None
-            else measured
-        )
+        previous = cache if cache is not None else resume
+        capacity = [previous["capacity"][g] for g in gateways] if previous else measured
         weights = [row["tokens_per_second"] for row in capacity]
         manifest = {
             "backend": "miles",
@@ -189,6 +237,8 @@ async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
             "lr": LEARNING_RATE,
             "model_ids": [client.model_id for client in clients],
             "initial_versions": initial_versions,
+            "initial_steps": initial_steps,
+            "resume_from": str(args.resume_from) if args.resume_from else None,
             "policy_age_unit": "optimizer_updates",
             "clients": args.clients,
             "rollout_concurrency_per_client": args.rollout_concurrency,
@@ -212,8 +262,8 @@ async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
             event("client_training_started", client=index, model_id=client.model_id)
             client_args = SimpleNamespace(
                 output=args.output / f"client-{index}",
-                start_step=0,
-                steps=args.steps,
+                start_step=initial_steps[index],
+                steps=args.steps - initial_steps[index],
                 inflight_prompts=args.inflight_prompts,
             )
             await train(
@@ -256,21 +306,35 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--clients", type=int, default=2)
     parser.add_argument("--stagger-seconds", type=float, default=60.0)
-    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=20,
+        help="Target total optimizer updates per client",
+    )
     parser.add_argument("--inflight-prompts", type=int, default=192)
     parser.add_argument("--rollout-concurrency", type=int, default=512)
     parser.add_argument("--trainer-validation", type=Path)
     parser.add_argument("--validation-adapters", type=Path)
-    parser.add_argument("--initial-rollout-cache", type=Path)
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--initial-rollout-cache", type=Path)
+    recovery.add_argument("--resume-from", type=Path)
     args = parser.parse_args()
     if not 1 <= args.clients <= config.trainer_max_clients_per_instance:
         raise ValueError("clients must fit the configured shared Miles trainer")
     if args.rollout_concurrency < 1:
         raise ValueError("rollout concurrency must be positive")
+    if args.steps < 1:
+        raise ValueError("steps must be positive")
     tasks = load_tasks()
     cache = (
         initial_client_rollouts(args.initial_rollout_cache, tasks, args.clients)
         if args.initial_rollout_cache
+        else None
+    )
+    resume = (
+        checkpoint_resume(args.resume_from, args.clients, args.steps)
+        if args.resume_from
         else None
     )
     url = modal.Function.from_name(
@@ -292,7 +356,11 @@ def main():
             )
             stack.enter_context(app.run(environment_name="kailash-dev"))
             gateways[group["name"]] = server.get_url()
-        asyncio.run(run_clients(args, service, gateways, tasks, url, key, cache=cache))
+        asyncio.run(
+            run_clients(
+                args, service, gateways, tasks, url, key, cache=cache, resume=resume
+            )
+        )
 
 
 if __name__ == "__main__":

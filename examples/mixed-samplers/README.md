@@ -184,8 +184,28 @@ The full-training entry point can resume with
 using `checkpoint.json`. Optimizer state is restored. Queued rollouts and producer
 RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
 Use a new output directory for each resumed attempt.
-The Miles entry point saves each adapter's optimizer checkpoint, but does not yet
-provide checkpoint resume. Before either client completes an optimizer update,
+The Miles entry point resumes both clients from their last saved optimizer
+checkpoints with `--resume-from <previous-Miles-run-directory>`. Use a new output
+directory. `--steps` is the target **total** update count for each client; their
+checkpoint steps may differ, and each independently runs its remaining updates.
+Both clients must have a saved checkpoint. Recovery retains the original sampler
+assignment weights, verifies the recipe and training settings, and publishes the
+restored adapters before sampling. A client already at the target performs no
+additional updates. For example:
+
+```bash
+uv run --frozen python -m mixed_samplers.train_miles \
+  --api-key-file /path/to/deployment-key --clients 2 --steps 20 \
+  --resume-from results/miles-run-001 --output results/miles-run-002
+```
+
+Queued rollouts, partial gradients, and producer RNG state are not restored.
+Each client's seeded task order restarts with fresh sampling from its checkpoint,
+so this is not a bitwise replay of scheduling. An update whose checkpoint did not
+finish is repeated from the last saved state. Initial-rollout caching and
+checkpoint resume are mutually exclusive.
+
+Before either client completes an optimizer update,
 `--initial-rollout-cache <previous-Miles-run-directory>` can reuse completed
 initial-policy trajectories. It checks each client's seed and task order, keeps
 the original sampler assignment weights, and creates fresh zero-delta adapters.
