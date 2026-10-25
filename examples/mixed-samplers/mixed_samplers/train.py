@@ -16,6 +16,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+import httpx
 import modal
 import tinker
 from tinker import types
@@ -222,7 +223,7 @@ async def train(training, gateways, weights, args, tasks):
             )
             metrics = {}
             zero_variance_prompts = 0
-            for _, rows in batch:
+            for prompt_number, rows in batch:
                 rewards = [m["reward"] for _, m in rows]
                 mean = sum(rewards) / len(rewards)
                 std = math.sqrt(sum((r - mean) ** 2 for r in rewards) / len(rewards))
@@ -232,16 +233,28 @@ async def train(training, gateways, weights, args, tasks):
                     row = await asyncio.to_thread(read_row, path)
                     advantage = (reward - mean) / (std + 1e-6)
                     data.append(datum(row, advantage, total_tokens))
-                result = await training.forward_backward(
-                    data,
-                    "score_centered_mis",
-                    {
-                        "mis_low": MIS_LOW,
-                        "mis_high": MIS_HIGH,
-                        "sampling_temperature": TEMPERATURE,
-                    },
-                ).result_async()
+                backward_started = time.time()
+                result = await asyncio.wait_for(
+                    training.forward_backward(
+                        data,
+                        "score_centered_mis",
+                        {
+                            "mis_low": MIS_LOW,
+                            "mis_high": MIS_HIGH,
+                            "sampling_temperature": TEMPERATURE,
+                        },
+                    ).result_async(),
+                    timeout=7200,
+                )
                 group_tokens = sum(m["generated_tokens"] for _, m in rows)
+                event(
+                    "backward_completed",
+                    step=step,
+                    prompt=prompt_number,
+                    elapsed=time.time() - backward_started,
+                    tokens=group_tokens,
+                    metrics=result.metrics,
+                )
                 for name, value in result.metrics.items():
                     if not math.isfinite(value):
                         raise RuntimeError(
@@ -251,23 +264,27 @@ async def train(training, gateways, weights, args, tasks):
                         metrics[name] = (
                             metrics.get(name, 0.0) + value * group_tokens / total_tokens
                         )
-            optimizer = await training.optim_step(
-                types.AdamParams(
-                    learning_rate=LEARNING_RATE,
-                    beta1=0.9,
-                    beta2=0.95,
-                    eps=1e-8,
-                    weight_decay=0.0,
-                    grad_clip_norm=1.0,
-                )
-            ).result_async()
+            optimizer = await asyncio.wait_for(
+                training.optim_step(
+                    types.AdamParams(
+                        learning_rate=LEARNING_RATE,
+                        beta1=0.9,
+                        beta2=0.95,
+                        eps=1e-8,
+                        weight_decay=0.0,
+                        grad_clip_norm=1.0,
+                    )
+                ).result_async(),
+                timeout=7200,
+            )
             if any(not math.isfinite(v) for v in optimizer.metrics.values()):
                 raise RuntimeError(f"non-finite optimizer metrics: {optimizer.metrics}")
             if optimizer.metrics["update_successful:mean"] != 1:
                 raise RuntimeError(f"optimizer skipped an update: {optimizer.metrics}")
-            publication = await training.save_weights_for_sampler(
-                f"step-{step:05d}"
-            ).result_async()
+            publication = await asyncio.wait_for(
+                training.save_weights_for_sampler(f"step-{step:05d}").result_async(),
+                timeout=3600,
+            )
             version += 1
             all_meta = [m for _, rows in batch for _, m in rows]
             group_metrics = {}
@@ -304,9 +321,10 @@ async def train(training, gateways, weights, args, tasks):
                 groups=group_metrics,
             )
             if step % CHECKPOINT_INTERVAL == 0 or step == args.start_step + args.steps:
-                checkpoint = await training.save_state(
-                    f"step-{step:05d}"
-                ).result_async()
+                checkpoint = await asyncio.wait_for(
+                    training.save_state(f"step-{step:05d}").result_async(),
+                    timeout=3600,
+                )
                 (output / "checkpoint.json").write_text(
                     json.dumps({"step": step, "path": checkpoint.path})
                 )
@@ -344,59 +362,76 @@ def main():
         json.dumps({"event": "trainer_created", "model_id": training.model_id}),
         flush=True,
     )
-    if args.checkpoint:
-        training.load_state_with_optimizer(args.checkpoint).result()
-    publication = training.save_weights_for_sampler("initial").result()
-    print(
-        json.dumps({"event": "initial_publication", "path": publication.path}),
-        flush=True,
-    )
-    wait_for_sampler_evidence(args.sampler_evidence)
-    gateways = {}
-    with modal.enable_output(), ExitStack() as stack:
-        stack.enter_context(worker_app.run(environment_name="kailash-dev"))
-        for group in GROUPS:
-            deployment = DeploymentConfig.create(sampler_config(group))
-            pool = FFTPoolSpec(deployment.definition_id, training.model_id, True, 0)
-            app, server = build_rollout_app(deployment, pool)
-            stack.enter_context(app.run(environment_name="kailash-dev"))
-            gateways[group["name"]] = server.get_url()
+    try:
+        if args.checkpoint:
+            training.load_state_with_optimizer(args.checkpoint).result(timeout=7200)
+        publication = training.save_weights_for_sampler("initial").result(timeout=3600)
+        print(
+            json.dumps({"event": "initial_publication", "path": publication.path}),
+            flush=True,
+        )
+        wait_for_sampler_evidence(args.sampler_evidence)
+        gateways = {}
+        with modal.enable_output(), ExitStack() as stack:
+            stack.enter_context(worker_app.run(environment_name="kailash-dev"))
+            for group in GROUPS:
+                deployment = DeploymentConfig.create(sampler_config(group))
+                pool = FFTPoolSpec(deployment.definition_id, training.model_id, True, 0)
+                app, server = build_rollout_app(deployment, pool)
+                stack.enter_context(app.run(environment_name="kailash-dev"))
+                gateways[group["name"]] = server.get_url()
 
-        async def capacities():
-            return await asyncio.gather(
-                *(
-                    measure_capacity.remote.aio(url, training.model_id, 1)
-                    for url in gateways.values()
+            async def capacities():
+                return await asyncio.gather(
+                    *(
+                        measure_capacity.remote.aio(url, training.model_id, 1)
+                        for url in gateways.values()
+                    )
                 )
-            )
 
-        measured = asyncio.run(capacities())
-        weights = [m["tokens_per_second"] for m in measured]
-        manifest = {
-            "model": config.model,
-            "model_revision": config.model_revision,
-            "dataset": DATASET,
-            "dataset_revision": DATASET_REVISION,
-            "groups": GROUPS,
-            "capacity": dict(zip(gateways, measured, strict=True)),
-            "top_p": TOP_P,
-            "temperature": TEMPERATURE,
-            "lr": LEARNING_RATE,
-            "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
-            "model_id": training.model_id,
-            "initial_publication": publication.path,
-            "arguments": {
-                k: [str(p) for p in v]
-                if k == "sampler_evidence"
-                else str(v)
-                if isinstance(v, Path)
-                else v
-                for k, v in vars(args).items()
-            },
-        }
-        Path(args.output).mkdir(parents=True, exist_ok=True)
-        (Path(args.output) / "manifest.json").write_text(json.dumps(manifest, indent=2))
-        asyncio.run(train(training, gateways, weights, args, tasks))
+            measured = asyncio.run(capacities())
+            weights = [m["tokens_per_second"] for m in measured]
+            manifest = {
+                "model": config.model,
+                "model_revision": config.model_revision,
+                "dataset": DATASET,
+                "dataset_revision": DATASET_REVISION,
+                "groups": GROUPS,
+                "capacity": dict(zip(gateways, measured, strict=True)),
+                "top_p": TOP_P,
+                "temperature": TEMPERATURE,
+                "lr": LEARNING_RATE,
+                "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
+                "model_id": training.model_id,
+                "initial_publication": publication.path,
+                "arguments": {
+                    k: [str(p) for p in v]
+                    if k == "sampler_evidence"
+                    else str(v)
+                    if isinstance(v, Path)
+                    else v
+                    for k, v in vars(args).items()
+                },
+            }
+            Path(args.output).mkdir(parents=True, exist_ok=True)
+            (Path(args.output) / "manifest.json").write_text(
+                json.dumps(manifest, indent=2)
+            )
+            asyncio.run(train(training, gateways, weights, args, tasks))
+    finally:
+        try:
+            response = httpx.post(
+                f"{url}/api/v1/unload_model",
+                headers={"X-API-Key": key},
+                json={"model_id": training.model_id},
+                timeout=300,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            print(
+                json.dumps({"event": "trainer_cleanup_failed", "error": str(exc)}),
+                flush=True,
+            )
 
 
 if __name__ == "__main__":

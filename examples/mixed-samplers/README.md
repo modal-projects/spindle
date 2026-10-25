@@ -109,6 +109,8 @@ controller owns ephemeral sampler/worker apps: keep it alive for the duration
 of the run. A failed controller stops those apps. A trajectory gets at most one
 infrastructure retry; repeated failure, non-finite metrics, a skipped optimizer
 step, or two hours without a completed prompt stops the run.
+Backward and optimizer waits are bounded at two hours, publication and checkpoint
+waits at one hour. The controller requests trainer unloading when it exits.
 
 Resume with `--checkpoint <path> --start-step <saved-step> --steps <remaining>`
 using `checkpoint.json`. Optimizer state is restored. Queued rollouts and producer
