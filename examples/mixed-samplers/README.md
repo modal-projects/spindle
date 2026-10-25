@@ -243,3 +243,7 @@ Generate measured curves with `uv run --frozen python -m mixed_samplers.report r
 For Miles, run the same report separately on `results/miles-run-001/client-0`
 and `client-1`. Each client's events include queue wait, training, publication,
 and time from the earliest rollout in its batch to publication.
+Run `uv run --frozen python -m mixed_samplers.report_miles results/miles-run-001`
+to compare the clients' curves and elapsed-time timelines. The combined summary
+counts fresh sampling and other clients' update events during each completed
+update, without requiring the clients to reach the same step.
