@@ -12,7 +12,7 @@ import torch
 
 
 def online_block_quantization():
-    return os.environ.get("SPINDLE_FP8_BLOCK_ONLINE") == "1"
+    return os.environ.get("SGLANG_FP8_BLOCK_ONLINE") == "1"
 
 
 def quantize_blocks(weight, block=128):

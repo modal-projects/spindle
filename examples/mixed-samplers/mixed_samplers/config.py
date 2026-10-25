@@ -95,7 +95,7 @@ def sampler_config(group):
         inference_gpu=group["gpu"],
         inference_gpus_per_node=group["gpus"],
         inference_env={
-            "SPINDLE_FP8_BLOCK_ONLINE": "1",
+            "SGLANG_FP8_BLOCK_ONLINE": "1",
             "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0",
             # Preserve Qwen's recurrent gates and routers in their source dtype.
             # These are also excluded by Qwen's official FP8 configuration.
