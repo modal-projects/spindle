@@ -48,6 +48,7 @@ class BaseConfig:
     sampler_persistence_concurrency = 8
 
     inference_gpu = "H100"
+    inference_region = None
     inference_gpus_per_node = 1
     inference_cpu = 8
     inference_memory_mib = 32768

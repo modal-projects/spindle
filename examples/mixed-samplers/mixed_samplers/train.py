@@ -97,6 +97,7 @@ def initial_rollout_cache(path, tasks):
         "model_revision": config.model_revision,
         "dataset": DATASET,
         "dataset_revision": DATASET_REVISION,
+        "groups": GROUPS,
         "top_p": TOP_P,
         "temperature": TEMPERATURE,
         "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
@@ -121,7 +122,18 @@ def initial_rollout_cache(path, tasks):
         for e in events
         if e["event"] == "trajectory_completed"
     }
-    return {"path": path, "prompts": prompts, "completed": completed}
+    capacity = manifest["capacity"]
+    if set(capacity) != {g["name"] for g in GROUPS} or any(
+        not math.isfinite(c["tokens_per_second"]) or c["tokens_per_second"] <= 0
+        for c in capacity.values()
+    ):
+        raise ValueError("initial rollout cache has invalid capacity measurements")
+    return {
+        "path": path,
+        "prompts": prompts,
+        "completed": completed,
+        "capacity": capacity,
+    }
 
 
 def wait_for_sampler_evidence(paths):
@@ -412,6 +424,13 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
         events_file.close()
 
 
+async def run_with_sampler_validation(training, validation=None):
+    async with asyncio.TaskGroup() as group:
+        if validation is not None:
+            group.create_task(validation)
+        group.create_task(training)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -473,7 +492,11 @@ def main():
                     )
                 )
 
-            measured = asyncio.run(capacities())
+            measured = (
+                [cache["capacity"][group] for group in gateways]
+                if cache is not None
+                else asyncio.run(capacities())
+            )
             weights = [m["tokens_per_second"] for m in measured]
             manifest = {
                 "model": config.model,
@@ -482,6 +505,13 @@ def main():
                 "dataset_revision": DATASET_REVISION,
                 "groups": GROUPS,
                 "capacity": dict(zip(gateways, measured, strict=True)),
+                "capacity_source": str(cache["path"]) if cache is not None else None,
+                "compute_regions": {
+                    group["name"]: sampler_config(group).inference_region
+                    if sampler_config(group).inference_region is not None
+                    else config.platform["modal"]["region"]
+                    for group in GROUPS
+                },
                 "top_p": TOP_P,
                 "temperature": TEMPERATURE,
                 "lr": LEARNING_RATE,
@@ -501,7 +531,19 @@ def main():
             (Path(args.output) / "manifest.json").write_text(
                 json.dumps(manifest, indent=2)
             )
-            asyncio.run(train(training, gateways, weights, args, tasks, cache=cache))
+
+            async def validate_samplers():
+                measured = await capacities()
+                (Path(args.output) / "startup-validation.json").write_text(
+                    json.dumps(dict(zip(gateways, measured, strict=True)), indent=2)
+                )
+
+            asyncio.run(
+                run_with_sampler_validation(
+                    train(training, gateways, weights, args, tasks, cache=cache),
+                    validate_samplers() if cache is not None else None,
+                )
+            )
     finally:
         try:
             response = httpx.post(

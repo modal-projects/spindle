@@ -11,6 +11,36 @@ import pytest
 training_module = importlib.import_module("mixed_samplers.train")
 
 
+@pytest.mark.parametrize("validation_fails", [False, True])
+def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fails):
+    async def run():
+        started, validated, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def train():
+            started.set()
+            try:
+                await validated.wait()
+            finally:
+                stopped.set()
+
+        async def validate():
+            await started.wait()
+            if validation_fails:
+                raise RuntimeError("sampler failed validation")
+            validated.set()
+
+        operation = training_module.run_with_sampler_validation(train(), validate())
+        if validation_fails:
+            with pytest.raises(ExceptionGroup) as exc:
+                await asyncio.wait_for(operation, timeout=1)
+            assert str(exc.value.exceptions[0]) == "sampler failed validation"
+        else:
+            await asyncio.wait_for(operation, timeout=1)
+        assert started.is_set() and stopped.is_set()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("cached_version", [None, 1, 2])
 def test_producers_continue_during_native_training_and_use_old_rollouts(
     tmp_path, monkeypatch, cached_version
@@ -106,6 +136,11 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
                     "model_revision": training_module.config.model_revision,
                     "dataset": training_module.DATASET,
                     "dataset_revision": training_module.DATASET_REVISION,
+                    "groups": training_module.GROUPS,
+                    "capacity": {
+                        g["name"]: {"tokens_per_second": 1.0}
+                        for g in training_module.GROUPS
+                    },
                     "top_p": training_module.TOP_P,
                     "temperature": training_module.TEMPERATURE,
                     "batch": [2, 2],

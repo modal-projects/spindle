@@ -229,7 +229,11 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         exit_grace_period=300,
         port=8000,
         routing_region=platform["modal"]["region"],
-        compute_region=platform["modal"]["region"],
+        compute_region=(
+            recipe.inference_region
+            if recipe.inference_region is not None
+            else platform["modal"]["region"]
+        ),
     )
     class Server:
         @modal.enter()

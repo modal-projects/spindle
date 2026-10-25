@@ -338,6 +338,10 @@ def test_recipe_app_names_follow_the_recipe_name():
     assert inference.trainer_identity() == base.trainer_identity()
     assert inference.inference_identity() != base.inference_identity()
 
+    region = resolved(recipe(inference_region=("us",)))
+    assert region.trainer_identity() == base.trainer_identity()
+    assert region.inference_identity() != base.inference_identity()
+
     trainer = resolved(recipe(miles_cfg__max_tokens_per_gpu=8192))
     assert trainer.trainer_app_name == base.trainer_app_name
     assert trainer.trainer_identity() != base.trainer_identity()

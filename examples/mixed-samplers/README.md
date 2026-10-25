@@ -125,6 +125,11 @@ reusing completed pretrained-policy trajectories. Missing trajectories are sampl
 by the independent producers. Restored trajectories have distinct events, so they
 do not count as newly completed rollouts in the overlap report. This option cannot
 be combined with checkpoint restoration or a nonzero starting step.
+Recovery retains the original validated capacity weights and runs fresh sampler
+checks alongside training, recording them in `startup-validation.json`. This lets
+the trainer consume saved trajectories while new serving replicas initialize.
+A sampler check failure cancels training. A100 compute can use any US region to
+avoid a capacity bottleneck; its request endpoint remains in `us-west`.
 
 ## Evidence to inspect
 

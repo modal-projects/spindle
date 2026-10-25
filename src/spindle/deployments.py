@@ -124,6 +124,7 @@ class DeploymentConfig(BaseModel):
             recipe.max_context_length,
             recipe.sglang_cfg,
             recipe.inference_gpu,
+            recipe.inference_region,
             recipe.inference_gpus_per_node,
             recipe.inference_cpu,
             recipe.inference_memory_mib,
