@@ -7,9 +7,9 @@ from .image_dependencies import (
     ignore_config_source,
 )
 
-SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
+SGLANG_IMAGE = "lmsysorg/sglang:v0.5.22@sha256:e3a4f06001a29542fc4a8638536d9ffc5eb9c9942b08603c09b19a56eae4a1ae"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-SGLANG_BRANCH = "spindle-sglang-v0.5.21"
+SGLANG_BRANCH = "spindle-sglang-v0.5.22"
 
 image = (
     modal.Image.from_registry(SGLANG_IMAGE)
