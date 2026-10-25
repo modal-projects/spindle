@@ -141,6 +141,7 @@ async def run_clients(args, service, gateways, tasks, url, key):
             "initial_versions": initial_versions,
             "policy_age_unit": "optimizer_updates",
             "clients": args.clients,
+            "rollout_concurrency_per_client": args.rollout_concurrency,
             "client_seeds": [SEED + index * 1_000_000 for index in range(args.clients)],
             "stagger_seconds": args.stagger_seconds,
             "steps_per_client": args.steps,
@@ -175,6 +176,7 @@ async def run_clients(args, service, gateways, tasks, url, key):
                 client_seed=SEED + index * 1_000_000,
                 initial_version=initial_versions[index],
                 version_resolver=version_resolver,
+                rollout_concurrency=args.rollout_concurrency,
             )
             event("client_training_completed", client=index, model_id=client.model_id)
 
@@ -205,16 +207,23 @@ def main():
     parser.add_argument("--stagger-seconds", type=float, default=60.0)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--inflight-prompts", type=int, default=192)
+    parser.add_argument("--rollout-concurrency", type=int, default=512)
     parser.add_argument("--trainer-validation", type=Path)
     parser.add_argument("--validation-adapters", type=Path)
     args = parser.parse_args()
     if not 1 <= args.clients <= config.trainer_max_clients_per_instance:
         raise ValueError("clients must fit the configured shared Miles trainer")
+    if args.rollout_concurrency < 1:
+        raise ValueError("rollout concurrency must be positive")
     url = modal.Function.from_name(
         config.platform["frontend"], "server", environment_name="kailash-dev"
     ).get_web_url()
     key = args.api_key_file.read_text().strip()
     service = tinker.ServiceClient(base_url=url, api_key=key)
+    args.output.mkdir(parents=True, exist_ok=True)
+    (args.output / "session.json").write_text(
+        json.dumps({"session_id": service.holder.get_session_id()})
+    )
     tasks = load_tasks()
     gateways = {}
     with modal.enable_output(), ExitStack() as stack:

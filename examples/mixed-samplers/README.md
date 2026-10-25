@@ -139,7 +139,10 @@ while the other client is still sampling, training or publishing. Sampler groups
 are shared across clients. `validate_miles` checks adapter isolation, native
 losses, optimizer updates and publication; its synthetic updates are discarded.
 `--validation-adapters` checks both trained validation adapters on all eight
-sampler groups before creating fresh RL clients.
+sampler groups before creating fresh RL clients. Each client limits outstanding
+rollout calls to 512 (`--rollout-concurrency`) so the two clients stay below the
+worker function's pending-input limit. Prompts remain queued locally, and the
+128×8 update batch and independent asynchronous loops are unchanged.
 The 20-update default is an early stability check, shorter than the article's run.
 
 For the existing full-training experiment:

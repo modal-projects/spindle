@@ -195,6 +195,7 @@ async def train(
     client_seed=SEED,
     initial_version=1,
     version_resolver=None,
+    rollout_concurrency=None,
 ):
     rollout_worker = sample_trajectory if rollout_worker is None else rollout_worker
     output = Path(args.output)
@@ -206,6 +207,14 @@ async def train(
         events_file.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
 
+    limit = (
+        args.inflight_prompts * TRAJECTORIES_PER_PROMPT
+        if rollout_concurrency is None
+        else rollout_concurrency
+    )
+    if limit < 1:
+        raise ValueError("rollout_concurrency must be positive")
+    rollout_slots = asyncio.Semaphore(limit)
     version = initial_version
     version_steps = {version: args.start_step}
     completed = asyncio.Queue(maxsize=args.inflight_prompts)
@@ -272,22 +281,25 @@ async def train(
                     return str(path), metadata
                 for attempt in range(2):
                     try:
-                        event(
-                            "trajectory_started",
-                            prompt=group_number,
-                            index=index,
-                            group=group,
-                            version=requested_version,
-                            attempt=attempt,
-                        )
-                        compressed = await rollout_worker.remote.aio(
-                            task,
-                            gateways[group],
-                            group,
-                            training.model_id,
-                            requested_version,
-                            client_seed + group_number * 10000 + index * 1000,
-                        )
+                        # Bound remote submissions without coupling this client's
+                        # rollout queue or optimizer steps to another client.
+                        async with rollout_slots:
+                            event(
+                                "trajectory_started",
+                                prompt=group_number,
+                                index=index,
+                                group=group,
+                                version=requested_version,
+                                attempt=attempt,
+                            )
+                            compressed = await rollout_worker.remote.aio(
+                                task,
+                                gateways[group],
+                                group,
+                                training.model_id,
+                                requested_version,
+                                client_seed + group_number * 10000 + index * 1000,
+                            )
                         path.write_bytes(compressed)
                         row = pickle.loads(gzip.decompress(compressed))
                         metadata = trajectory_metadata(row)

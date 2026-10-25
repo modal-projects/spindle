@@ -68,6 +68,7 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("rollout_concurrency", [None, 2])
 @pytest.mark.parametrize("published_versions", [None, (7, 19)])
 @pytest.mark.parametrize(
     ("cached_version", "cached_event", "start_step"),
@@ -83,18 +84,31 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
     ],
 )
 def test_producers_continue_during_native_training_and_use_old_rollouts(
-    tmp_path, monkeypatch, cached_version, cached_event, start_step, published_versions
+    tmp_path,
+    monkeypatch,
+    cached_version,
+    cached_event,
+    start_step,
+    published_versions,
+    rollout_concurrency,
 ):
     monkeypatch.setattr(training_module, "PROMPTS_PER_UPDATE", 2)
     monkeypatch.setattr(training_module, "TRAJECTORIES_PER_PROMPT", 2)
 
     sampled_seeds = []
     requested_versions = []
+    active_calls = peak_calls = 0
 
     async def sample(task, gateway, group, model_id, version, seed):
+        nonlocal active_calls, peak_calls
         sampled_seeds.append(seed)
         requested_versions.append(version)
-        await asyncio.sleep(0.01)
+        active_calls += 1
+        peak_calls = max(peak_calls, active_calls)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            active_calls -= 1
         row = {
             "instance_id": task["instance_id"],
             "tokens": [1, 2],
@@ -253,8 +267,11 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
             [{"instance_id": "one"}],
             cache=cache,
             version_resolver=version_resolver if published_versions else None,
+            rollout_concurrency=rollout_concurrency,
         )
     )
+    if rollout_concurrency is not None:
+        assert peak_calls == rollout_concurrency
     if cache is not None:
         assert 42 not in sampled_seeds
         assert 1042 in sampled_seeds
