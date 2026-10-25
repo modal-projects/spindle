@@ -84,7 +84,7 @@ MAX_TURNS = 200
 MAX_TOKENS_PER_TURN = 262144  # Each call is limited by its remaining context budget.
 SAMPLING_TIMEOUT_SECONDS = 10800  # A 256K continuation can exceed the SDK's 50 minutes.
 TRAINING_STEPS = 200
-CHECKPOINT_INTERVAL = 10
+CHECKPOINT_INTERVAL = 1
 SEED = 42
 
 config = Config()

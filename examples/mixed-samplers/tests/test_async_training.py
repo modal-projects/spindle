@@ -68,9 +68,18 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("cached_version", [None, 1, 2])
+@pytest.mark.parametrize(
+    ("cached_version", "cached_event"),
+    [
+        (None, None),
+        (1, "trajectory_completed"),
+        (1, "trajectory_restored"),
+        (2, "trajectory_completed"),
+        (2, "trajectory_restored"),
+    ],
+)
 def test_producers_continue_during_native_training_and_use_old_rollouts(
-    tmp_path, monkeypatch, cached_version
+    tmp_path, monkeypatch, cached_version, cached_event
 ):
     monkeypatch.setattr(training_module, "PROMPTS_PER_UPDATE", 2)
     monkeypatch.setattr(training_module, "TRAJECTORIES_PER_PROMPT", 2)
@@ -185,7 +194,7 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
                 }
             )
             + "\n"
-            + json.dumps({"event": "trajectory_completed", "prompt": 0, "index": 0})
+            + json.dumps({"event": cached_event, "prompt": 0, "index": 0})
             + "\n"
         )
         cache = training_module.initial_rollout_cache(

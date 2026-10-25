@@ -56,7 +56,7 @@ prompt, or the full sanitization procedure. This recipe chooses:
   ends the agent session; binary test reward;
 - 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to
   two serving replicas per group, keeping one warm through fleet startup;
-  target of 200 updates, checkpoint after the first update and every 10 thereafter.
+  target of 200 updates, checkpoint after every optimizer update.
 
 All groups use PyTorch top-p selection so recorded supports and probabilities
 describe the actual categorical distribution. Their model execution still uses
@@ -125,6 +125,8 @@ reusing completed pretrained-policy trajectories. Missing trajectories are sampl
 by the independent producers. Restored trajectories have distinct events, so they
 do not count as newly completed rollouts in the overlap report. This option cannot
 be combined with checkpoint restoration or a nonzero starting step.
+Repeated recovery also retains trajectories restored by earlier attempts. Pending
+gradients are not checkpointed, so an interrupted update must be recomputed.
 Recovery retains the original validated capacity weights and runs fresh sampler
 checks alongside training, recording them in `startup-validation.json`. This lets
 the trainer consume saved trajectories while new serving replicas initialize.

@@ -136,7 +136,7 @@ def initial_rollout_cache(path, tasks):
     completed = {
         (e["prompt"], e["index"])
         for e in events
-        if e["event"] == "trajectory_completed"
+        if e["event"] in {"trajectory_completed", "trajectory_restored"}
     }
     capacity = manifest["capacity"]
     if set(capacity) != {g["name"] for g in GROUPS} or any(
