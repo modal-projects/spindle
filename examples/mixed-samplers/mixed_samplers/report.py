@@ -23,7 +23,7 @@ def main():
             "No completed training updates; there are no stability curves to plot"
         )
     steps = [e["step"] for e in updates]
-    figure, axes = plt.subplots(2, 3, figsize=(14, 7), constrained_layout=True)
+    figure, axes = plt.subplots(2, 4, figsize=(17, 7), constrained_layout=True)
     series = [
         ("Test pass rate", [e["reward"] for e in updates]),
         (
@@ -43,6 +43,14 @@ def main():
             [e["mean_generated_tokens"] for e in updates],
         ),
         ("Tool format error rate", [e["format_error_rate"] for e in updates]),
+        (
+            "MIS masked token fraction",
+            [e["metrics"]["mis_masked_fraction:mean"] for e in updates],
+        ),
+        (
+            "Maximum policy age",
+            [max(g["policy_age_max"] for g in e["groups"].values()) for e in updates],
+        ),
     ]
     for axis, (label, values) in zip(axes.flat, series, strict=True):
         axis.plot(steps, values, linewidth=1.3)
@@ -71,6 +79,34 @@ def main():
     axes[1].legend(fontsize=8, loc="upper left", bbox_to_anchor=(1, 1))
     figure.savefig(args.run / "sampler-groups.png", dpi=160)
     plt.close(figure)
+    starts = {e["step"]: e["at"] for e in events if e["event"] == "training_started"}
+    overlaps = []
+    for update in updates:
+        during = [e for e in events if starts[update["step"]] < e["at"] < update["at"]]
+        overlaps.append(
+            {
+                "step": update["step"],
+                "prompts_started_during_training": sum(
+                    e["event"] == "prompt_started" for e in during
+                ),
+                "trajectories_completed_during_training": sum(
+                    e["event"] == "trajectory_completed" for e in during
+                ),
+            }
+        )
+    summary = {
+        "completed_updates": len(updates),
+        "first_update": updates[0],
+        "last_update": updates[-1],
+        "async_overlap": overlaps,
+        "trajectory_failures": [e for e in events if e["event"] == "trajectory_failed"],
+        "interpretation": (
+            "Measured curves and overlap evidence; finite updates alone do not establish "
+            "stable learning. Inspect reward, length, entropy, KL and format-error trends, "
+            "including differences between sampler groups and policy ages."
+        ),
+    }
+    (args.run / "summary.json").write_text(json.dumps(summary, indent=2))
     print(f"Wrote curves for {len(updates)} updates to {args.run}")
 
 
