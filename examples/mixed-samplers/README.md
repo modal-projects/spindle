@@ -90,7 +90,7 @@ From this directory, using Python 3.12:
 ```bash
 uv sync --frozen
 export MODAL_ENVIRONMENT=kailash-dev
-uv run --frozen spindle deploy mixed_samplers/config.py
+uv run --frozen spindle deploy mixed_samplers/config.py --refresh-trainer qwen36-mimo-mixed-256k
 uv run --frozen python -m mixed_samplers.validate --group all --weights --output sampler-validation.json
 uv run --frozen python -m mixed_samplers.validate_trainer --api-key-file /path/to/deployment-key
 uv run --frozen python -m mixed_samplers.train --api-key-file /path/to/deployment-key --output results/run-001
@@ -103,6 +103,9 @@ environment. The existing `spindle-proxy` secret remains inside Modal workers.
 The trainer has no geographic restriction; its API frontend remains in
 `us-west`. This avoids requiring an idle eight-B200 node in one region.
 H100 groups use Modal's `H100!` selector to prevent automatic H200 upgrades.
+The explicit trainer refresh publishes native-code changes even when the trainer
+configuration has not changed; an ordinary redeploy can retain the prior trainer
+code. Check the running backend's diagnostic aggregation in the event log.
 
 `validate_trainer` performs a synthetic native-loss check and unloads that model.
 It does not contribute samples or optimizer state to the experiment. The training
