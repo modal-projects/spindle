@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import math
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -32,10 +33,50 @@ from .miles_config import config, sampler_config
 from .miles_workers import app as worker_app
 from .miles_workers import measure_capacity, sample_trajectory
 from .publication import latest_ref
-from .train import train
+from .train import read_initial_rollouts, train
 
 
-async def run_clients(args, service, gateways, tasks, url, key):
+def initial_client_rollouts(path, tasks, client_count):
+    manifest = json.loads((path / "manifest.json").read_text())
+    expected = {
+        "backend": "miles",
+        "parameterization": "lora",
+        "model": config.model,
+        "model_revision": config.model_revision,
+        "rank": 32,
+        "alpha": 32,
+        "dataset": DATASET,
+        "dataset_revision": DATASET_REVISION,
+        "groups": GROUPS,
+        "top_p": TOP_P,
+        "temperature": TEMPERATURE,
+        "batch_per_client": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
+        "clients": client_count,
+        "client_seeds": [SEED + index * 1_000_000 for index in range(client_count)],
+        "initial_versions": [1] * client_count,
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError("initial Miles rollouts use a different recipe or client seed")
+    capacity = manifest["capacity"]
+    if set(capacity) != {g["name"] for g in GROUPS} or any(
+        not math.isfinite(row["tokens_per_second"]) or row["tokens_per_second"] <= 0
+        for row in capacity.values()
+    ):
+        raise ValueError("initial Miles rollouts have invalid capacity measurements")
+    return {
+        "capacity": capacity,
+        "clients": [
+            read_initial_rollouts(
+                path / f"client-{index}",
+                tasks,
+                client_seed=SEED + index * 1_000_000,
+            )
+            for index in range(client_count)
+        ],
+    }
+
+
+async def run_clients(args, service, gateways, tasks, url, key, *, cache=None):
     clients = []
     initial_versions = []
     args.output.mkdir(parents=True, exist_ok=True)
@@ -113,13 +154,18 @@ async def run_clients(args, service, gateways, tasks, url, key):
                 publication=publication.path,
                 version=ref.version,
             )
-        capacity = await asyncio.gather(
+        measured = await asyncio.gather(
             *(
                 measure_capacity.remote.aio(
                     gateway, clients[0].model_id, initial_versions[0]
                 )
                 for gateway in gateways.values()
             )
+        )
+        capacity = (
+            [cache["capacity"][group] for group in gateways]
+            if cache is not None
+            else measured
         )
         weights = [row["tokens_per_second"] for row in capacity]
         manifest = {
@@ -133,6 +179,10 @@ async def run_clients(args, service, gateways, tasks, url, key):
             "dataset_revision": DATASET_REVISION,
             "groups": GROUPS,
             "capacity": dict(zip(gateways, capacity, strict=True)),
+            "startup_capacity": dict(zip(gateways, measured, strict=True)),
+            "initial_rollout_cache": str(args.initial_rollout_cache)
+            if args.initial_rollout_cache
+            else None,
             "batch_per_client": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
             "top_p": TOP_P,
             "temperature": TEMPERATURE,
@@ -172,6 +222,7 @@ async def run_clients(args, service, gateways, tasks, url, key):
                 weights,
                 client_args,
                 tasks,
+                cache=cache["clients"][index] if cache is not None else None,
                 rollout_worker=sample_trajectory,
                 client_seed=SEED + index * 1_000_000,
                 initial_version=initial_versions[index],
@@ -210,11 +261,18 @@ def main():
     parser.add_argument("--rollout-concurrency", type=int, default=512)
     parser.add_argument("--trainer-validation", type=Path)
     parser.add_argument("--validation-adapters", type=Path)
+    parser.add_argument("--initial-rollout-cache", type=Path)
     args = parser.parse_args()
     if not 1 <= args.clients <= config.trainer_max_clients_per_instance:
         raise ValueError("clients must fit the configured shared Miles trainer")
     if args.rollout_concurrency < 1:
         raise ValueError("rollout concurrency must be positive")
+    tasks = load_tasks()
+    cache = (
+        initial_client_rollouts(args.initial_rollout_cache, tasks, args.clients)
+        if args.initial_rollout_cache
+        else None
+    )
     url = modal.Function.from_name(
         config.platform["frontend"], "server", environment_name="kailash-dev"
     ).get_web_url()
@@ -224,7 +282,6 @@ def main():
     (args.output / "session.json").write_text(
         json.dumps({"session_id": service.holder.get_session_id()})
     )
-    tasks = load_tasks()
     gateways = {}
     with modal.enable_output(), ExitStack() as stack:
         stack.enter_context(worker_app.run(environment_name="kailash-dev"))
@@ -235,7 +292,7 @@ def main():
             )
             stack.enter_context(app.run(environment_name="kailash-dev"))
             gateways[group["name"]] = server.get_url()
-        asyncio.run(run_clients(args, service, gateways, tasks, url, key))
+        asyncio.run(run_clients(args, service, gateways, tasks, url, key, cache=cache))
 
 
 if __name__ == "__main__":

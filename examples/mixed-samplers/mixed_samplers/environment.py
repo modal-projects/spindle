@@ -4,7 +4,25 @@ import os
 import shlex
 import uuid
 
+from mimoagent.environments.datasets.base import parse_git_head_output
+from mimoagent.environments.datasets.opensource_code import OpenSourceCodeEnvironment
 from mimoagent.environments.utils import make_dataset_env
+
+
+def capture_base_ref(environment):
+    # The pinned dataset wrapper takes the last whitespace-delimited word,
+    # but some images append shell startup diagnostics after successful stdout.
+    result = environment.execute("git rev-parse HEAD", cwd=environment.repo_path)
+    commit = parse_git_head_output(result.get("output", ""))
+    if result.get("returncode", 1) != 0 or commit is None:
+        raise RuntimeError(
+            f"{environment.instance_id}: could not resolve HEAD at "
+            f"{environment.repo_path}: {result.get('output', '')[-2000:]}"
+        )
+    return commit
+
+
+OpenSourceCodeEnvironment._capture_base_ref = capture_base_ref
 
 
 def create_environment(task):
@@ -44,7 +62,9 @@ def setup(task):
             raise RuntimeError(
                 f"repository sanitization failed: {result['output'][-2000:]}"
             )
-        baseline = result["output"].strip().splitlines()[-1]
+        baseline = parse_git_head_output(result["output"])
+        if baseline is None:
+            raise RuntimeError("sanitized repository did not return a commit hash")
         copied = environment.execute(
             f"cp -a -- .git {shlex.quote(git_dir)}",
             cwd=task["cwd"],
@@ -68,9 +88,12 @@ def capture_patch(environment, task, baseline):
         f"git --git-dir={shlex.quote(baseline['git_dir'])} --work-tree={worktree} "
         "-c core.hooksPath=/dev/null"
     )
+    marker = f"spindle-patch-{uuid.uuid4().hex}"
     result = environment.execute(
         f"mkdir -p -- {worktree} && cd -- {worktree} && {git} add -A && "
-        f"{git} diff --binary {shlex.quote(baseline['commit'])} -- .",
+        f"printf '%s\\n' {marker}-begin && "
+        f"{git} diff --binary {shlex.quote(baseline['commit'])} -- . && "
+        f"printf '%s\\n' {marker}-end",
         cwd="/",
         timeout=120,
     )
@@ -79,7 +102,12 @@ def capture_patch(environment, task, baseline):
             f"could not capture the submitted patch (exit {result['returncode']}): "
             f"{result['output'][-2000:]}"
         )
-    return result["output"]
+    # Shell startup warnings are outside these markers, including when the
+    # transport appends stderr after stdout. Preserve patch bytes and an empty
+    # diff rather than treating a warning as a submitted patch.
+    return (
+        result["output"].split(f"{marker}-begin\n", 1)[1].split(f"{marker}-end\n", 1)[0]
+    )
 
 
 def execute_command(environment, command, *, cwd, timeout):

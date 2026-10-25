@@ -127,13 +127,23 @@ def initial_rollout_cache(path, tasks, *, checkpoint=None, start_step=0):
         raise ValueError(
             "initial rollout cache uses a different initial training state"
         )
+    capacity = manifest["capacity"]
+    if set(capacity) != {g["name"] for g in GROUPS} or any(
+        not math.isfinite(c["tokens_per_second"]) or c["tokens_per_second"] <= 0
+        for c in capacity.values()
+    ):
+        raise ValueError("initial rollout cache has invalid capacity measurements")
+    return {**read_initial_rollouts(path, tasks), "capacity": capacity}
+
+
+def read_initial_rollouts(path, tasks, *, client_seed=SEED):
     events = [
         json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()
     ]
     if any(event["event"] == "training_completed" for event in events):
         raise ValueError("initial rollout cache must precede any completed update")
     order = list(range(len(tasks)))
-    random.Random(SEED).shuffle(order)
+    random.Random(client_seed).shuffle(order)
     prompts = {e["prompt"]: e for e in events if e["event"] == "prompt_started"}
     for number, prompt in prompts.items():
         if prompt["instance_id"] != tasks[order[number % len(order)]]["instance_id"]:
@@ -143,17 +153,10 @@ def initial_rollout_cache(path, tasks, *, checkpoint=None, start_step=0):
         for e in events
         if e["event"] in {"trajectory_completed", "trajectory_restored"}
     }
-    capacity = manifest["capacity"]
-    if set(capacity) != {g["name"] for g in GROUPS} or any(
-        not math.isfinite(c["tokens_per_second"]) or c["tokens_per_second"] <= 0
-        for c in capacity.values()
-    ):
-        raise ValueError("initial rollout cache has invalid capacity measurements")
     return {
         "path": path,
         "prompts": prompts,
         "completed": completed,
-        "capacity": capacity,
     }
 
 

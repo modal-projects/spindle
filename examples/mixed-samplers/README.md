@@ -78,6 +78,8 @@ The public `XiaomiMiMo/mimoagent` environment is pinned to
 then replaces repository history with a single root commit. Grading applies the
 submitted diff in a fresh sandbox and runs the hidden test patch there. Verifier
 infrastructure errors fail the rollout rather than becoming zero rewards.
+Commit parsing tolerates shell startup diagnostics in dataset images; patch
+capture excludes those diagnostics and preserves an empty diff.
 Patch capture preserves its baseline outside the editable working directory, so
 agent commits or deletion of the working directory's `.git` still yield a diff.
 Container tags are published dataset tags; historical image digests are not
@@ -181,9 +183,15 @@ using `checkpoint.json`. Optimizer state is restored. Queued rollouts and produc
 RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
 Use a new output directory for each resumed attempt.
 The Miles entry point saves each adapter's optimizer checkpoint, but does not yet
-provide automatic checkpoint or queued-rollout recovery.
+provide checkpoint resume. Before either client completes an optimizer update,
+`--initial-rollout-cache <previous-Miles-run-directory>` can reuse completed
+initial-policy trajectories. It checks each client's seed and task order, keeps
+the original sampler assignment weights, and creates fresh zero-delta adapters.
+Use a new output directory. It does not restore in-flight work or partially
+accumulated gradients; completion order can differ after a restart.
 
-If an attempt stops before completing any new optimizer update, restart with
+For full training, if an attempt stops before completing any new optimizer
+update, restart with
 `--initial-rollout-cache <previous-run-directory>` and a new output directory.
 This checks recipe pins, sampling settings, task order, served versions, and the
 initial checkpoint and step before reusing completed initial-policy trajectories.

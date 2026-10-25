@@ -10,16 +10,17 @@ from mixed_samplers.environment import execute_command
 
 
 class ShellEnvironment:
-    def __init__(self):
+    def __init__(self, startup_warning=""):
         self.paths = []
         self.commands = []
+        self.startup_warning = startup_warning
 
     def copy_text_to(self, text, destination):
         path = Path(destination)
         self.paths.append(path)
         path.write_text(text)
 
-    def execute(self, command, *, cwd, timeout):
+    def execute(self, command, *, cwd, timeout=10):
         assert len(command.encode("utf-8")) < 65536
         self.commands.append(command)
         result = subprocess.run(
@@ -32,7 +33,7 @@ class ShellEnvironment:
         )
         return {
             "returncode": result.returncode,
-            "output": result.stdout + result.stderr,
+            "output": result.stdout + result.stderr + self.startup_warning,
         }
 
     def setup_environment(self):
@@ -71,14 +72,15 @@ def test_short_commands_keep_the_existing_execution_path(tmp_path):
 @pytest.mark.parametrize(
     "operation", ["metadata_removed", "worktree_replaced", "worktree_deleted"]
 )
+@pytest.mark.parametrize("startup_warning", ["", "/root/.bashrc: missing activate\n"])
 def test_patch_survives_agent_commits_and_repository_deletion(
-    tmp_path, monkeypatch, operation
+    tmp_path, monkeypatch, operation, startup_warning
 ):
     worktree = tmp_path / "agent repository"
     worktree.mkdir()
     (worktree / "file.bin").write_bytes(b"\x00original")
     (worktree / "deleted.txt").write_text("original\n")
-    environment = ShellEnvironment()
+    environment = ShellEnvironment(startup_warning)
     monkeypatch.setattr(environments, "create_environment", lambda task: environment)
     task = {"cwd": str(worktree)}
     _, baseline = environments.setup(task)
@@ -123,5 +125,25 @@ def test_patch_survives_agent_commits_and_repository_deletion(
             else {"file.bin": b"\x00changed", "added.txt": b"submitted\n"}
         )
         assert actual == expected
+    finally:
+        shutil.rmtree(baseline["git_dir"])
+
+
+def test_shell_warning_does_not_become_an_empty_patch(tmp_path, monkeypatch):
+    environment = ShellEnvironment("/root/.bashrc: missing activate\n")
+    monkeypatch.setattr(environments, "create_environment", lambda task: environment)
+    task = {"cwd": str(tmp_path)}
+    _, baseline = environments.setup(task)
+    try:
+        assert environments.capture_patch(environment, task, baseline) == ""
+        environment.repo_path = str(tmp_path)
+        environment.instance_id = "noisy-image"
+        assert environments.capture_base_ref(environment) == baseline["commit"]
+        broken = environment.execute(
+            "git symbolic-ref HEAD refs/heads/missing", cwd=str(tmp_path), timeout=10
+        )
+        assert broken["returncode"] == 0
+        with pytest.raises(RuntimeError, match="could not resolve HEAD"):
+            environments.capture_base_ref(environment)
     finally:
         shutil.rmtree(baseline["git_dir"])
