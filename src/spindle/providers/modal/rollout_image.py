@@ -7,6 +7,7 @@ from .image_dependencies import (
     TINKER_PACKAGE,
     ignore_config_source,
 )
+from .nvfp4_staging_patch import PATCH as NVFP4_STAGING_PATCH
 from .sampling_support_patch import PATCH as SAMPLING_SUPPORT_PATCH
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.17"
@@ -234,6 +235,9 @@ image = (
         + "PATCH\n",
         "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
         + FP8_STAGING_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + NVFP4_STAGING_PATCH
         + "PATCH\n",
         "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
         + SGLANG_LORA_LIFETIME_PATCH

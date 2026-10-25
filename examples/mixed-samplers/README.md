@@ -72,7 +72,11 @@ Container tags are published dataset tags; historical image digests are not
 available, so this is not a bitwise reconstruction of the original environments.
 
 NVFP4 uses the pinned SGLang runtime's `nvfp4_online` routed-expert quantization;
-dense layers retain their source precision. FP8 quantizes BF16 weights into E4M3
+dense layers retain their source precision. Staging recreates NVFP4 loader
+callbacks against the isolated CPU layer, keeping its weights and scales
+together and preventing writes to live serving scales during compilation.
+Decode-scale arithmetic matches GPU startup during CPU staging as well.
+FP8 quantizes BF16 weights into E4M3
 with FP32 scales per 128 x 128 block, matching the granularity of
 [Qwen's official FP8 configuration](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/blob/main/config.json).
 Recurrent gates and routers retain their source precision. This is recomputed
