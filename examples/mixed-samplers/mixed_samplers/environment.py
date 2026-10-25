@@ -88,12 +88,11 @@ def capture_patch(environment, task, baseline):
         f"git --git-dir={shlex.quote(baseline['git_dir'])} --work-tree={worktree} "
         "-c core.hooksPath=/dev/null"
     )
-    marker = f"spindle-patch-{uuid.uuid4().hex}"
+    patch_path = f"{baseline['git_dir']}/submitted.patch"
     result = environment.execute(
         f"mkdir -p -- {worktree} && cd -- {worktree} && {git} add -A && "
-        f"printf '%s\\n' {marker}-begin && "
-        f"{git} diff --binary {shlex.quote(baseline['commit'])} -- . && "
-        f"printf '%s\\n' {marker}-end",
+        f"{git} diff --binary {shlex.quote(baseline['commit'])} -- . "
+        f"> {shlex.quote(patch_path)}",
         cwd="/",
         timeout=120,
     )
@@ -102,12 +101,9 @@ def capture_patch(environment, task, baseline):
             f"could not capture the submitted patch (exit {result['returncode']}): "
             f"{result['output'][-2000:]}"
         )
-    # Shell startup warnings are outside these markers, including when the
-    # transport appends stderr after stdout. Preserve patch bytes and an empty
-    # diff rather than treating a warning as a submitted patch.
-    return (
-        result["output"].split(f"{marker}-begin\n", 1)[1].split(f"{marker}-end\n", 1)[0]
-    )
+    # Command output keeps only its last 50 MiB and may include shell startup
+    # diagnostics. The filesystem API transfers the complete patch separately.
+    return environment.env.sandbox.filesystem.read_text(patch_path)
 
 
 def execute_command(environment, command, *, cwd, timeout):

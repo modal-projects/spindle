@@ -3,6 +3,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from mixed_samplers import environment as environments
@@ -10,10 +11,18 @@ from mixed_samplers.environment import execute_command
 
 
 class ShellEnvironment:
-    def __init__(self, startup_warning=""):
+    def __init__(self, startup_warning="", output_limit=None):
         self.paths = []
         self.commands = []
         self.startup_warning = startup_warning
+        self.output_limit = output_limit
+        self.env = SimpleNamespace(
+            sandbox=SimpleNamespace(
+                filesystem=SimpleNamespace(
+                    read_text=lambda path: Path(path).read_text()
+                )
+            )
+        )
 
     def copy_text_to(self, text, destination):
         path = Path(destination)
@@ -31,9 +40,12 @@ class ShellEnvironment:
             text=True,
             check=False,
         )
+        output = result.stdout + result.stderr + self.startup_warning
+        if self.output_limit is not None:
+            output = output[-self.output_limit :]
         return {
             "returncode": result.returncode,
-            "output": result.stdout + result.stderr + self.startup_warning,
+            "output": output,
         }
 
     def setup_environment(self):
@@ -145,5 +157,32 @@ def test_shell_warning_does_not_become_an_empty_patch(tmp_path, monkeypatch):
         assert broken["returncode"] == 0
         with pytest.raises(RuntimeError, match="could not resolve HEAD"):
             environments.capture_base_ref(environment)
+    finally:
+        shutil.rmtree(baseline["git_dir"])
+
+
+def test_patch_transfer_exceeds_command_output_limit(tmp_path, monkeypatch):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    environment = ShellEnvironment("shell startup warning\n", output_limit=1024)
+    monkeypatch.setattr(environments, "create_environment", lambda task: environment)
+    task = {"cwd": str(worktree)}
+    _, baseline = environments.setup(task)
+    try:
+        verifier = tmp_path / "verifier"
+        shutil.copytree(worktree, verifier)
+        payload = "new repository content\n" * 100_000
+        (worktree / "large.txt").write_text(payload)
+        patch = environments.capture_patch(environment, task, baseline)
+        assert len(patch) > environment.output_limit
+        patch_path = tmp_path / "patch"
+        patch_path.write_text(patch)
+        applied = environment.execute(
+            f"git apply --binary {shlex.quote(str(patch_path))}",
+            cwd=str(verifier),
+            timeout=30,
+        )
+        assert applied["returncode"] == 0, applied["output"]
+        assert (verifier / "large.txt").read_text() == payload
     finally:
         shutil.rmtree(baseline["git_dir"])
