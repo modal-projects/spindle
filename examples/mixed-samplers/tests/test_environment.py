@@ -19,7 +19,7 @@ class ShellEnvironment:
         self.env = SimpleNamespace(
             sandbox=SimpleNamespace(
                 filesystem=SimpleNamespace(
-                    read_text=lambda path: Path(path).read_text()
+                    read_bytes=lambda path: Path(path).read_bytes()
                 )
             )
         )
@@ -119,7 +119,7 @@ def test_patch_survives_agent_commits_and_repository_deletion(
                 (worktree / "added.txt").write_text("submitted\n")
         patch = environments.capture_patch(environment, task, baseline)
         patch_path = tmp_path / "submitted.patch"
-        patch_path.write_text(patch)
+        patch_path.write_bytes(patch)
         applied = environment.execute(
             f"git apply --binary {shlex.quote(str(patch_path))}",
             cwd=str(verifier),
@@ -147,7 +147,7 @@ def test_shell_warning_does_not_become_an_empty_patch(tmp_path, monkeypatch):
     task = {"cwd": str(tmp_path)}
     _, baseline = environments.setup(task)
     try:
-        assert environments.capture_patch(environment, task, baseline) == ""
+        assert environments.capture_patch(environment, task, baseline) == b""
         environment.repo_path = str(tmp_path)
         environment.instance_id = "noisy-image"
         assert environments.capture_base_ref(environment) == baseline["commit"]
@@ -176,7 +176,7 @@ def test_patch_transfer_exceeds_command_output_limit(tmp_path, monkeypatch):
         patch = environments.capture_patch(environment, task, baseline)
         assert len(patch) > environment.output_limit
         patch_path = tmp_path / "patch"
-        patch_path.write_text(patch)
+        patch_path.write_bytes(patch)
         applied = environment.execute(
             f"git apply --binary {shlex.quote(str(patch_path))}",
             cwd=str(verifier),
@@ -184,5 +184,20 @@ def test_patch_transfer_exceeds_command_output_limit(tmp_path, monkeypatch):
         )
         assert applied["returncode"] == 0, applied["output"]
         assert (verifier / "large.txt").read_text() == payload
+    finally:
+        shutil.rmtree(baseline["git_dir"])
+
+
+def test_patch_preserves_non_utf8_text_bytes(tmp_path, monkeypatch):
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    environment = ShellEnvironment()
+    monkeypatch.setattr(environments, "create_environment", lambda task: environment)
+    task = {"cwd": str(worktree)}
+    _, baseline = environments.setup(task)
+    try:
+        (worktree / "latin1.txt").write_bytes(b"caf\xe9\n")
+        patch = environments.capture_patch(environment, task, baseline)
+        assert b"caf\xe9\n" in patch
     finally:
         shutil.rmtree(baseline["git_dir"])

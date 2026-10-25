@@ -2,6 +2,7 @@
 
 import os
 import shlex
+import tempfile
 import uuid
 
 from mimoagent.environments.datasets.base import parse_git_head_output
@@ -103,7 +104,7 @@ def capture_patch(environment, task, baseline):
         )
     # Command output keeps only its last 50 MiB and may include shell startup
     # diagnostics. The filesystem API transfers the complete patch separately.
-    return environment.env.sandbox.filesystem.read_text(patch_path)
+    return environment.env.sandbox.filesystem.read_bytes(patch_path)
 
 
 def execute_command(environment, command, *, cwd, timeout):
@@ -129,7 +130,10 @@ def grade_patch(task, patch):
     try:
         environment.setup_environment()
         if patch:
-            environment.copy_text_to(patch, "/tmp/submitted.patch")
+            with tempfile.NamedTemporaryFile(mode="wb") as source:
+                source.write(patch)
+                source.flush()
+                environment.env.copy_to(source.name, "/tmp/submitted.patch")
             applied = environment.execute(
                 "git -c core.hooksPath=/dev/null apply --binary /tmp/submitted.patch",
                 cwd=task["cwd"],

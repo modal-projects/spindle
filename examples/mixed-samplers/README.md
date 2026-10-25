@@ -79,8 +79,9 @@ then replaces repository history with a single root commit. Grading applies the
 submitted diff in a fresh sandbox and runs the hidden test patch there. Verifier
 infrastructure errors fail the rollout rather than becoming zero rewards.
 Commit parsing tolerates shell startup diagnostics in dataset images; patch
-capture uses the sandbox filesystem API to preserve empty and large diffs,
-excluding shell diagnostics and bypassing the command output's 50 MiB tail limit.
+capture and grading transfer raw bytes through sandbox files, preserving empty,
+large, and non-UTF8 diffs while excluding shell diagnostics and bypassing the
+command output's 50 MiB tail limit.
 Patch capture preserves its baseline outside the editable working directory, so
 agent commits or deletion of the working directory's `.git` still yield a diff.
 Container tags are published dataset tags; historical image digests are not
