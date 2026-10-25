@@ -60,7 +60,7 @@ def main():
         ),
     ]
     for axis, (label, values) in zip(axes.flat, series, strict=True):
-        axis.plot(steps, values, linewidth=1.3)
+        axis.plot(steps, values, linewidth=1.3, marker="o", markersize=3)
         axis.set(xlabel="Optimizer update", title=label)
         axis.grid(alpha=0.2)
     figure.suptitle(
@@ -74,9 +74,19 @@ def main():
     for group in groups:
         selected = [e for e in updates if group in e["groups"]]
         xs = [e["step"] for e in selected]
-        axes[0].plot(xs, [e["groups"][group]["reward"] for e in selected], label=group)
+        axes[0].plot(
+            xs,
+            [e["groups"][group]["reward"] for e in selected],
+            label=group,
+            marker="o",
+            markersize=3,
+        )
         axes[1].plot(
-            xs, [e["groups"][group]["policy_age_mean"] for e in selected], label=group
+            xs,
+            [e["groups"][group]["policy_age_mean"] for e in selected],
+            label=group,
+            marker="o",
+            markersize=3,
         )
     axes[0].set(title="Test pass rate by sampler group", xlabel="Optimizer update")
     axes[1].set(
