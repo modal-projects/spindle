@@ -8,7 +8,7 @@ from .image_dependencies import (
     ignore_config_source,
 )
 
-BASE_IMAGE = "radixark/miles:v0.1.0"
+BASE_IMAGE = "radixark/miles:v0.1.0@sha256:cd40db923225c4146e90fdf4aa04bc000b71c1e980cc42df6f368de7545eaa09"
 MEGATRON_CORE_REPOSITORY = "https://github.com/NVIDIA/Megatron-LM.git"
 # This revision includes the Qwen3.5 output-gate slice required when
 # tensor parallelism exceeds the number of query groups.
