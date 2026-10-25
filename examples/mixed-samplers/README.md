@@ -18,6 +18,7 @@ training curves before a stability conclusion is justified.
   release removed 96. Images come from this revision's `image-mapping.jsonl`.
 - BF16 full-parameter trainer on eight B200s; 262,144-token context; batches of
   128 prompts with eight trajectories per prompt; no MoE route replay.
+- MIS ratio window [0.2, 5.0], matching the article's diagnostics.
 - Eight sampler groups, all with FP8 KV cache:
 
 | Group | GPUs per replica | Weight format |
@@ -47,8 +48,8 @@ does not specify learning rate, top-p threshold, optimizer details, exact agent
 prompt, or the full sanitization procedure. This recipe chooses:
 
 - top-p 0.9, temperature 1, top-k disabled;
-- MIS ratio window [0.2, 5.0]; per-prompt reward normalization with population
-  standard deviation plus 1e-6; token-mean loss over the full update;
+- per-prompt reward normalization with population standard deviation plus 1e-6;
+  token-mean loss over the full update;
 - Adam, LR 1e-6, betas (0.9, 0.95), epsilon 1e-8, no weight decay, clip norm 1;
 - up to 200 bash turns; each continuation may use the remaining 256K context budget;
 - a three-hour sampling request deadline, allowing long continuations to finish;
