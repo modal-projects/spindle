@@ -183,7 +183,20 @@ def wait_for_sampler_evidence(paths):
         )
 
 
-async def train(training, gateways, weights, args, tasks, *, cache=None):
+async def train(
+    training,
+    gateways,
+    weights,
+    args,
+    tasks,
+    *,
+    cache=None,
+    rollout_worker=None,
+    client_seed=SEED,
+    initial_version=1,
+    version_resolver=None,
+):
+    rollout_worker = sample_trajectory if rollout_worker is None else rollout_worker
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     events_file = (output / "events.jsonl").open("a", buffering=1)
@@ -193,9 +206,10 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
         events_file.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
 
-    version = 1
+    version = initial_version
+    version_steps = {version: args.start_step}
     completed = asyncio.Queue(maxsize=args.inflight_prompts)
-    rng = random.Random(SEED)
+    rng = random.Random(client_seed)
     order = list(range(len(tasks)))
     rng.shuffle(order)
     next_task = 0
@@ -266,13 +280,13 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                             version=requested_version,
                             attempt=attempt,
                         )
-                        compressed = await sample_trajectory.remote.aio(
+                        compressed = await rollout_worker.remote.aio(
                             task,
                             gateways[group],
                             group,
                             training.model_id,
                             requested_version,
-                            SEED + group_number * 10000 + index * 1000,
+                            client_seed + group_number * 10000 + index * 1000,
                         )
                         path.write_bytes(compressed)
                         row = pickle.loads(gzip.decompress(compressed))
@@ -307,6 +321,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
     producers = [asyncio.create_task(producer()) for _ in range(args.inflight_prompts)]
     try:
         for step in range(args.start_step + 1, args.start_step + args.steps + 1):
+            cycle_started = time.time()
             batch = []
             for _ in range(PROMPTS_PER_UPDATE):
                 item = await asyncio.wait_for(completed.get(), timeout=7200)
@@ -325,6 +340,8 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 version=version,
                 prompts=[i for i, _ in batch],
                 tokens=total_tokens,
+                cycle_started_at=cycle_started,
+                rollout_wait_seconds=started - cycle_started,
             )
             metrics = {}
             diagnostic_aggregation = set()
@@ -390,11 +407,18 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 raise RuntimeError(f"non-finite optimizer metrics: {optimizer.metrics}")
             if optimizer.metrics["update_successful:mean"] != 1:
                 raise RuntimeError(f"optimizer skipped an update: {optimizer.metrics}")
+            publication_started = time.time()
             publication = await asyncio.wait_for(
                 training.save_weights_for_sampler(f"step-{step:05d}").result_async(),
                 timeout=3600,
             )
-            version += 1
+            version = (
+                await version_resolver()
+                if version_resolver is not None
+                else version + 1
+            )
+            version_steps[version] = step
+            published_at = time.time()
             all_meta = [m for _, rows in batch for _, m in rows]
             group_metrics = {}
             for group in gateways:
@@ -402,7 +426,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 if not selected:
                     continue
                 ages = [
-                    version - 1 - min(v["start"] for v in m["versions"])
+                    step - 1 - min(version_steps[v["start"]] for v in m["versions"])
                     for m in selected
                 ]
                 group_metrics[group] = {
@@ -419,6 +443,12 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                 version=version,
                 publication=publication.path,
                 elapsed=time.time() - started,
+                cycle_elapsed=published_at - cycle_started,
+                rollout_wait_seconds=started - cycle_started,
+                training_seconds=publication_started - started,
+                publication_seconds=published_at - publication_started,
+                rollout_to_publication_seconds=published_at
+                - min(m["started_at"] for m in all_meta),
                 metrics=metrics,
                 diagnostic_aggregation=sorted(diagnostic_aggregation),
                 optimizer=optimizer.metrics,

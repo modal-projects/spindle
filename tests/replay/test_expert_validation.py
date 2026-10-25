@@ -98,7 +98,9 @@ def test_parallel_padding_rows_are_allowed(runtime):
 
 def test_bridge_installation_is_idempotent():
     bridge = SimpleNamespace(
-        _build_train_data=lambda rows: {"tokens": [row["tokens"] for _, row in rows]}
+        _build_train_data=lambda rows: {"tokens": [row["tokens"] for _, row in rows]},
+        ROLLOUT_DATA_VALUE_SPEC={"rollout_sampling_mask_ids": object()},
+        MilesBackend=SimpleNamespace(_execute_batch=lambda *args: None),
     )
     install_bridge_replay(bridge)
     build = bridge._build_train_data

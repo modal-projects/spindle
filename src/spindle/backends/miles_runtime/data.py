@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.backends.contract import ForwardBatch
+from spindle.backends.score_centering import (
+    REPLAY_LOSSES,
+    validate_loss_config,
+    validate_support,
+)
+
 from .replay_data import replay_row
 
 SUPPORTED_LOSSES = frozenset(
-    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"} | REPLAY_LOSSES
 )
 _RL_LOSSES = SUPPORTED_LOSSES - {"cross_entropy"}
 
@@ -50,6 +57,8 @@ def pad_slot_rows(
     if "sampling_mask_ids" in last:
         pad["sampling_mask_ids"] = []
         pad["sampling_mask_offsets"] = [0, 0]
+    if "sampling_mask_logprobs" in last:
+        pad["sampling_mask_logprobs"] = []
     n_pad = -len(slot_rows) % multiple
     return (*slot_rows, *((slot, dict(pad)) for _ in range(n_pad)))
 
@@ -61,6 +70,8 @@ def prepare_batch(
 ) -> PreparedBatch:
     if batch.loss_fn not in SUPPORTED_LOSSES:
         raise ValueError(f"Miles does not support loss {batch.loss_fn!r}")
+    if batch.loss_fn in REPLAY_LOSSES:
+        validate_loss_config(batch.loss_fn, batch.loss_fn_config)
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
@@ -133,6 +144,7 @@ def build_outputs(
         grouped[item_index][datum_index] = {
             "loss": float(output["loss"]),
             "logprobs": logprobs,
+            "metrics": output.get("metrics", {}),
         }
 
     results = []
@@ -142,6 +154,13 @@ def build_outputs(
         complete = [record for record in records if record is not None]
         loss = sum(record["loss"] for record in complete)
         tokens = sum(len(record["logprobs"]) for record in complete)
+        diagnostics = {}
+        if batch.loss_fn in REPLAY_LOSSES:
+            tokens = sum(record["metrics"]["tokens"] for record in complete)
+            for key in complete[0]["metrics"].keys() - {"tokens"}:
+                total = sum(record["metrics"][key] for record in complete)
+                diagnostics[f"{key}:sum"] = total
+                diagnostics[f"{key}:mean"] = total / max(tokens, 1)
         results.append(
             ForwardBackwardOutput(
                 loss_fn_output_type="ArrayRecord",
@@ -166,6 +185,7 @@ def build_outputs(
                     "tokens:sum": float(tokens),
                     "n_sequences:sum": float(len(complete)),
                     "response_length:mean": tokens / max(len(complete), 1),
+                    **diagnostics,
                 },
             )
         )
@@ -204,6 +224,8 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
         if loss_fn == "cross_entropy"
         else (("advantages", "advantages"), ("logprobs", "sampling_logprobs"))
     )
+    if loss_fn in REPLAY_LOSSES:
+        fields = (*fields, ("weights", "weights"))
     for source, destination in fields:
         value = inputs.get(source)
         if value is not None:
@@ -225,7 +247,27 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
             raise ValueError(
                 f"datum {datum_index}: {', '.join(missing)} required for {loss_fn}"
             )
-    row.update(replay_row(inputs, targets))
+    if loss_fn in REPLAY_LOSSES:
+        row.setdefault("weights", [1.0] * len(targets))
+        if any(
+            not math.isfinite(v)
+            for key in ("weights", "advantages", "sampling_logprobs")
+            for v in row[key]
+        ):
+            raise ValueError(
+                "loss weights, advantages and sampling logprobs must be finite"
+            )
+        support = validate_support(
+            inputs, targets, row["weights"], centered=loss_fn != "mis"
+        )
+        row.update({key: value.tolist() for key, value in support.items()})
+        row.update(
+            replay_row(
+                {k: v for k, v in inputs.items() if k == "routed_experts"}, targets
+            )
+        )
+    else:
+        row.update(replay_row(inputs, targets))
     return row
 
 

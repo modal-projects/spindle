@@ -26,10 +26,13 @@ from miles.backends.training_utils.loss_hub import (
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.replay_data import fill_replay_data
 from miles.backends.training_utils.weight_update import snapshot_publisher
+from miles.ray.rollout import train_data_conversion
 from miles.utils.replay_base import routing_replay_manager
 
 from .profiling import RankProfiler, TorchProfileConfig
 from .replay import install_replay_hooks
+from .replay_data import install_distribution_sharding
+from .score_centering import install_losses
 
 
 def _pad_local_shard(
@@ -172,6 +175,8 @@ def _gather_tinker_logprobs_across_cp() -> None:
 
 
 _gather_tinker_logprobs_across_cp()
+install_distribution_sharding(train_data_conversion)
+install_losses(tinker_losses, logit_processors)
 
 install_replay_hooks(
     megatron_model=megatron_model,

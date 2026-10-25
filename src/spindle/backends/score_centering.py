@@ -11,6 +11,24 @@ from itertools import pairwise
 import torch
 import torch.distributed as dist
 
+REPLAY_LOSSES = frozenset({"mis", "score_centered", "score_centered_mis"})
+
+
+def validate_loss_config(name, config):
+    allowed = {"sampling_temperature"}
+    if name != "score_centered":
+        allowed |= {"mis_low", "mis_high"}
+    if set(config) - allowed:
+        raise ValueError(
+            f"unsupported {name} loss_fn_config: {sorted(set(config) - allowed)}"
+        )
+    if any(not math.isfinite(value) for value in config.values()):
+        raise ValueError("loss_fn_config values must be finite")
+    if not 0 < config.get("mis_low", 0.2) <= config.get("mis_high", 5.0):
+        raise ValueError("MIS thresholds must satisfy 0 < mis_low <= mis_high")
+    if config.get("sampling_temperature", 1.0) <= 0:
+        raise ValueError("sampling_temperature must be positive")
+
 
 def validate_support(inputs, labels, weights, *, centered):
     required = {"sampling_mask_ids", "sampling_mask_offsets"}
@@ -20,6 +38,17 @@ def validate_support(inputs, labels, weights, *, centered):
         raise ValueError(f"loss requires replay tensors: {sorted(required)}")
     ids = list(inputs["sampling_mask_ids"].data)
     offsets = list(inputs["sampling_mask_offsets"].data)
+    for name in required:
+        tensor = inputs[name]
+        expected_dtype = "float32" if name == "sampling_mask_logprobs" else "int64"
+        if (
+            tensor.dtype != expected_dtype
+            or tensor.sparse_crow_indices is not None
+            or list(tensor.shape or ()) != [len(tensor.data)]
+        ):
+            raise ValueError(
+                f"{name} must be a dense one-dimensional {expected_dtype} tensor"
+            )
     if (
         len(offsets) != len(labels) + 1
         or offsets[0] != 0
@@ -61,6 +90,19 @@ def mis_weights(log_ratio, low, high):
     # Mask before exponentiation: an excluded extreme ratio must not yield inf*0.
     keep = (log_ratio >= math.log(low)) & (log_ratio <= math.log(high))
     return log_ratio.masked_fill(~keep, 0).exp().masked_fill(~keep, 0).detach()
+
+
+def policy_objective(logprobs, correction, sampling_logprobs, name, config):
+    ratio = (
+        torch.ones_like(logprobs)
+        if name == "score_centered"
+        else mis_weights(
+            logprobs.detach() - sampling_logprobs,
+            config.get("mis_low", 0.2),
+            config.get("mis_high", 5.0),
+        )
+    )
+    return ratio * logprobs - correction
 
 
 class _SumVocabShards(torch.autograd.Function):

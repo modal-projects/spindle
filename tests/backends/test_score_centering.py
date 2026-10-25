@@ -17,7 +17,7 @@ from spindle.backends.megatron_runtime.common.forward_backward import (
     pack_microbatches,
     shard_microbatches,
 )
-from spindle.backends.megatron_runtime.common.score_centering import replay_logprobs
+from spindle.backends.score_centering import replay_logprobs
 
 
 def test_diagnostic_totals_survive_sdk_chunks_with_unequal_token_counts():

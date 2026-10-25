@@ -122,6 +122,9 @@ def _load_actor(monkeypatch):
     ).routing_replay_manager = types.SimpleNamespace()
     lora_actor = _module(monkeypatch, "miles.backends.megatron_utils.lora.actor")
     lora_actor.MultiLoRATrainRayActor = type("MultiLoRATrainRayActor", (), {})
+    _module(monkeypatch, "miles.ray.rollout.train_data_conversion")._package_shards = (
+        lambda *args: []
+    )
     training_cp_utils = _module(monkeypatch, "miles.backends.training_utils.cp_utils")
     training_cp_utils.get_logits_and_tokens_offset_with_cp = lambda *args: None
     training_cp_utils.slice_log_prob_with_cp = lambda *args: None
@@ -171,9 +174,12 @@ def _load_actor(monkeypatch):
     sys.modules["miles.backends.megatron_utils"].model = megatron_model
 
     # Replay hook behavior is covered separately with its Miles interfaces.
-    _module(monkeypatch, "spindle.backends.miles_runtime.replay").install_replay_hooks = (
-        lambda **kwargs: None
-    )
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.replay"
+    ).install_replay_hooks = lambda **kwargs: None
+    _module(
+        monkeypatch, "spindle.backends.miles_runtime.score_centering"
+    ).install_losses = lambda *args: None
 
     path = Path(__file__).parents[2] / "src/spindle/backends/miles_runtime/actor.py"
     spec = importlib.util.spec_from_file_location(

@@ -9,11 +9,17 @@ from typing import Any
 import torch
 from tinker import ForwardBackwardOutput, TensorData
 
+from spindle.backends.score_centering import (
+    REPLAY_LOSSES,
+    policy_objective,
+    replay_logprobs,
+    validate_loss_config,
+    validate_support,
+)
 from spindle.replay import REPLAY_FIELDS
 from spindle.telemetry import backend as telemetry
 
 from ...contract import ForwardBatch
-from .score_centering import mis_weights, replay_logprobs, validate_support
 
 
 def log_packing(
@@ -82,6 +88,10 @@ def _packed_seq_idx(
 
 
 def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
+    if loss_name in REPLAY_LOSSES:
+        values = {key: float(value) for key, value in config.items()}
+        validate_loss_config(loss_name, values)
+        return values
     allowed = {
         "cross_entropy": frozenset(),
         "importance_sampling": frozenset(),
@@ -89,11 +99,6 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
         "cispo": frozenset({"clip_low_threshold", "clip_high_threshold"}),
         "dro": frozenset({"beta"}),
         "dppo": frozenset({"tv_threshold"}),
-        "mis": frozenset({"mis_low", "mis_high", "sampling_temperature"}),
-        "score_centered": frozenset({"sampling_temperature"}),
-        "score_centered_mis": frozenset(
-            {"mis_low", "mis_high", "sampling_temperature"}
-        ),
     }
     if loss_name not in allowed:
         raise ValueError(f"unsupported loss_fn: {loss_name}")
@@ -105,12 +110,6 @@ def _loss_config(loss_name: str, config: dict[str, float]) -> dict[str, float]:
     values = {key: float(value) for key, value in config.items()}
     if any(not math.isfinite(value) for value in values.values()):
         raise ValueError("loss_fn_config values must be finite")
-    if "mis" in loss_name and not 0 < values.get("mis_low", 0.2) <= values.get(
-        "mis_high", 5.0
-    ):
-        raise ValueError("MIS thresholds must satisfy 0 < mis_low <= mis_high")
-    if values.get("sampling_temperature", 1.0) <= 0:
-        raise ValueError("sampling_temperature must be positive")
     if loss_name in {"ppo", "cispo"}:
         low = values.get(
             "clip_low_threshold",
@@ -462,20 +461,17 @@ def _loss(
         sampling_logprobs = batch["sampling_logprobs"].to(logprobs.device).reshape(-1)
         advantages = batch["advantages"].to(logprobs.device).reshape(-1)
         probability_ratio = torch.exp(logprobs - sampling_logprobs)
-        if loss_name in {"mis", "score_centered_mis", "score_centered"}:
-            ratio = (
-                torch.ones_like(logprobs)
-                if loss_name == "score_centered"
-                else mis_weights(
-                    logprobs.detach() - sampling_logprobs,
-                    batch["loss_config"].get("mis_low", 0.2),
-                    batch["loss_config"].get("mis_high", 5.0),
+        if loss_name in REPLAY_LOSSES:
+            objective = (
+                policy_objective(
+                    logprobs,
+                    batch.get("score_correction", 0),
+                    sampling_logprobs,
+                    loss_name,
+                    batch["loss_config"],
                 )
+                * advantages
             )
-            objective = ratio * logprobs
-            if loss_name.startswith("score_centered"):
-                objective = objective - batch["score_correction"]
-            objective = objective * advantages
         elif loss_name == "importance_sampling":
             objective = probability_ratio * advantages
         elif loss_name == "dppo":

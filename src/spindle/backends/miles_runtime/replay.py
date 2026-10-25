@@ -78,7 +78,11 @@ def install_replay_hooks(
 
     @wraps(original_batch)
     def get_batch(iterator, keys, *args, **kwargs):
-        for key in ("rollout_sampling_mask_ids", "rollout_sampling_mask_offsets"):
+        for key in (
+            "rollout_sampling_mask_ids",
+            "rollout_sampling_mask_offsets",
+            "rollout_sampling_mask_logprobs",
+        ):
             if key in iterator.rollout_data and key not in keys:
                 keys = [*keys, key]
         return original_batch(iterator, keys, *args, **kwargs)

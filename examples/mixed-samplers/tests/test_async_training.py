@@ -68,6 +68,7 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("published_versions", [None, (7, 19)])
 @pytest.mark.parametrize(
     ("cached_version", "cached_event", "start_step"),
     [
@@ -82,15 +83,17 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
     ],
 )
 def test_producers_continue_during_native_training_and_use_old_rollouts(
-    tmp_path, monkeypatch, cached_version, cached_event, start_step
+    tmp_path, monkeypatch, cached_version, cached_event, start_step, published_versions
 ):
     monkeypatch.setattr(training_module, "PROMPTS_PER_UPDATE", 2)
     monkeypatch.setattr(training_module, "TRAJECTORIES_PER_PROMPT", 2)
 
     sampled_seeds = []
+    requested_versions = []
 
     async def sample(task, gateway, group, model_id, version, seed):
         sampled_seeds.append(seed)
+        requested_versions.append(version)
         await asyncio.sleep(0.01)
         row = {
             "instance_id": task["instance_id"],
@@ -236,6 +239,11 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
                 )
             )
         return
+    publications = iter(published_versions or ())
+
+    async def version_resolver():
+        return next(publications)
+
     asyncio.run(
         training_module.train(
             Training(),
@@ -244,6 +252,7 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
             args,
             [{"instance_id": "one"}],
             cache=cache,
+            version_resolver=version_resolver if published_versions else None,
         )
     )
     if cache is not None:
@@ -261,7 +270,12 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
         for e in events
         if e["event"] == "prompt_started"
     )
-    assert finishes[1]["version"] == 3
+    assert finishes[1]["version"] == (
+        published_versions[-1] if published_versions else 3
+    )
+    assert finishes[1]["groups"]["b200-nvfp4"]["policy_age_mean"] == 1
+    if published_versions:
+        assert published_versions[0] in requested_versions
     # The second update consumed the still-valid version-1 samples.
     assert all(
         e["versions"][0]["start"] == 1

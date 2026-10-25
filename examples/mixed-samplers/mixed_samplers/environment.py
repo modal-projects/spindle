@@ -1,5 +1,6 @@
 """Run the public task setup; grade the submitted diff in a fresh sandbox."""
 
+import os
 import shlex
 import uuid
 
@@ -11,7 +12,9 @@ def create_environment(task):
         task,
         environment_class="modal",
         environment_name="kailash-dev",
-        app_name="spindle-mimo-mixed-sandboxes",
+        app_name=os.environ.get(
+            "SPINDLE_MIMO_SANDBOX_APP", "spindle-mimo-mixed-sandboxes"
+        ),
         anti_hack_cleanup=True,
         git_leak_prevention="strip",
         reward_mode="programmatic",

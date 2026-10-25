@@ -56,6 +56,22 @@ results = await asyncio.gather(*(
 ))
 ```
 
+Miles also accepts native `mis`, `score_centered`, and `score_centered_mis`
+losses. Supply the sampler's exact CSR support as `sampling_mask_ids` and
+`sampling_mask_offsets`; centered losses additionally require
+`sampling_mask_logprobs`, the normalized log probability of every support token.
+Set `sampling_temperature` in `loss_fn_config`, and set `mis_low` / `mis_high`
+for the MIS window (defaults 0.2 / 5.0). Replay uses the recorded support instead
+of recomputing top-p from the current trainer policy.
+
+These losses accept `weights` separately from `advantages`. Put zero weights on
+prompt/tool tokens and normalize active weights over the client's entire update
+when a token mean is intended. Packed clients retain their individual weights.
+The exact centering correction remains present when MIS masks the chosen token.
+Additive `entropy:sum`, `sampler_trainer_kl:sum`, `mis_masked_fraction:sum`, and
+`tokens:sum` preserve diagnostic token means through SDK request chunking.
+See [the asynchronous mixed-sampler recipe](../examples/mixed-samplers/README.md).
+
 ## Adapter publication via the Bulletin
 
 Unlike the FFT case, sampler publication is done with full-weights adapters, such that using the same rollout pool for both monotonic min-weight versioning and exact versioning is cheap. The entire rollout pool supports arbitrary weight-version sampling, using SGLang's LRU-based eviction mechanism per container. The amount of concurrent LoRAs cached in-container CPU and on GPU can be tuned via `ROLLOUT_MAX_LOADED_LORAS` (which corresponds to sglang's `--max-loaded-loras`) and `ROLLOUT_MAX_LORAS_PER_BATCH` (which corresponds to sglang's `--max-loras-per-batch`) respectively. 
@@ -126,4 +142,3 @@ results tabluated:
 The deterministic path aims to give each client the same training results regardless of which other clients share its batches (think of it as batch-invariance for training). It uses deterministic attention kernels, fixed reduction layouts, and ordered per-client gradient accumulation, alongside batch-invariant inference.
 
 To enable it, build the patched FA3 artifacts, set SPINDLE_MILES_FA3_ARTIFACTS to their directory before deployment, and use the qwen3_5_9b_base_miles_lora_deterministic definition. The Tinker training code stays the same. We've validated on small math experiments (see  [LoRA validation](lora_validation.md) deterministic training section) but still need to do larger validation. Our changes to fa3 to make it deterministic also come at a throughput cost, and so this path remains experimental for now. 
-

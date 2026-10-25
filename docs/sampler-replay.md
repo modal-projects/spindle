@@ -14,13 +14,14 @@ LoRA backend also supports expert-route replay. Capture is opt-in per request:
 
 Ordinary Tinker sampling discards additional response fields. Use
 `spindle.sample_with_replay()` to receive them, then pass its replay tensors through
-`Datum.loss_fn_inputs`. Megatron supports token replay with the native `mis`,
+`Datum.loss_fn_inputs`. Both Miles multi-LoRA and Megatron full training support
+token replay with the native `mis`,
 `score_centered`, and `score_centered_mis` losses. Router replay remains specific
 to the Miles LoRA backend.
 
 ## Native MIS and score centering
 
-For full-parameter Megatron training, request `return_sampling_probabilities=True`
+For Miles multi-LoRA or full-parameter Megatron training, request `return_sampling_probabilities=True`
 and call `training.forward_backward(data, "score_centered_mis", loss_fn_config)`.
 Include `**sequence.replay.loss_fn_config()` in the config, plus `mis_low` and
 `mis_high` (defaults 0.2 and 5.0). No custom-forward/backward callback is needed.

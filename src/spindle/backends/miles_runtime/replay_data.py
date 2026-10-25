@@ -2,19 +2,40 @@
 
 from __future__ import annotations
 
-from math import prod
+from functools import wraps
+from itertools import pairwise
+from math import isfinite, prod
 
 import numpy as np
 
+from spindle.backends.score_centering import REPLAY_LOSSES
 from spindle.replay import REPLAY_FIELDS
 
 _replay_builder = None
 
 
+def install_distribution_sharding(conversion):
+    original = conversion._package_shards
+    if getattr(original, "__spindle_sampling_probabilities__", False):
+        return
+
+    @wraps(original)
+    def package(args, data, partitions):
+        shards = original(args, data, partitions)
+        key = "rollout_sampling_mask_logprobs"
+        if key in data:
+            for shard, partition in zip(shards, partitions, strict=True):
+                shard[key] = [data[key][index] for index in partition]
+        return shards
+
+    package.__spindle_sampling_probabilities__ = True
+    conversion._package_shards = package
+
+
 def replay_row(inputs, targets: list[int]) -> dict:
     row = {}
     n = len(targets)
-    for name in REPLAY_FIELDS & inputs.keys():
+    for name in (REPLAY_FIELDS - {"sampling_mask_logprobs"}) & inputs.keys():
         tensor = inputs[name]
         values = list(tensor.data)
         shape = list(tensor.shape or ())
@@ -51,7 +72,7 @@ def replay_row(inputs, targets: list[int]) -> dict:
             len(offsets) != n + 1
             or offsets[0] != 0
             or offsets[-1] != len(ids)
-            or any(b < a for a, b in zip(offsets, offsets[1:]))
+            or any(b < a for a, b in pairwise(offsets))
         ):
             raise ValueError(
                 "sampling mask offsets must have input_tokens + 1 entries, start at zero, and end at the id count"
@@ -61,6 +82,21 @@ def replay_row(inputs, targets: list[int]) -> dict:
                 raise ValueError(
                     "each sampling support must contain its target and have no duplicate ids"
                 )
+    if "sampling_mask_logprobs" in inputs:
+        tensor = inputs["sampling_mask_logprobs"]
+        values = list(tensor.data)
+        if (
+            ids is None
+            or tensor.dtype != "float32"
+            or tensor.sparse_crow_indices is not None
+            or list(tensor.shape or ()) != [len(ids)]
+            or len(values) != len(ids)
+            or any(not isfinite(v) or v > 0 for v in values)
+        ):
+            raise ValueError(
+                "sampling_mask_logprobs must be dense float32 values aligned with support IDs"
+            )
+        row["sampling_mask_logprobs"] = values
     return row
 
 
@@ -122,6 +158,11 @@ def add_replay_to_train_data(train_data: dict, datums: list[dict]) -> None:
             )
             for d in datums
         ]
+    if any("sampling_mask_logprobs" in d for d in datums):
+        train_data["rollout_sampling_mask_logprobs"] = [
+            np.asarray(d.get("sampling_mask_logprobs", []), dtype=np.float32)
+            for d in datums
+        ]
 
 
 def install_bridge_replay(runtime) -> None:
@@ -137,3 +178,34 @@ def install_bridge_replay(runtime) -> None:
 
     _replay_builder = build
     runtime._build_train_data = build
+    runtime.ROLLOUT_DATA_VALUE_SPEC["rollout_sampling_mask_logprobs"] = (
+        runtime.ROLLOUT_DATA_VALUE_SPEC["rollout_sampling_mask_ids"]
+    )
+    original_execute = runtime.MilesBackend._execute_batch
+
+    @wraps(original_execute)
+    async def execute(self, method, batch_id, slot_datums, loss_fn, loss_fn_config):
+        if loss_fn not in REPLAY_LOSSES:
+            return await original_execute(
+                self, method, batch_id, slot_datums, loss_fn, loss_fn_config
+            )
+        train_data = runtime._build_train_data(
+            runtime._pad_to_dp_multiple(slot_datums, self.dp_size)
+        )
+        train_data.update(loss_fn=loss_fn, loss_fn_config=loss_fn_config)
+        results = await self._call_trainer(method, batch_id, train_data)
+        by_index = {}
+        for result in results:
+            if "error" in result:
+                return result
+            for row in result["per_datum"]:
+                index = int(row["sample_index"])
+                if index not in by_index:
+                    by_index[index] = {
+                        "loss": float(row["loss"]),
+                        "logprobs": row["logprobs"].tolist(),
+                        "metrics": row["metrics"],
+                    }
+        return [by_index[index] for index in range(len(slot_datums))]
+
+    runtime.MilesBackend._execute_batch = execute

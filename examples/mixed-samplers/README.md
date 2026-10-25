@@ -6,6 +6,12 @@ using native Spindle `score_centered_mis`. The implementation follows the
 [score-centering estimator](https://arxiv.org/html/2609.20807), including its
 correction when MIS masks the sampled token.
 
+The multi-LoRA entry point is `mixed_samplers.train_miles`, configured by
+`miles_config.py`. It runs two rank-32, alpha-32 adapters on one Miles trainer,
+with independent asynchronous client loops and 60-second start staggering.
+`mixed_samplers.train` remains the separate native Megatron full-training
+experiment. Neither uses `forward_backward_custom`.
+
 **Training stability has not yet been established.** Unit tests and short GPU
 checks validate implementation paths; the asynchronous experiment must produce
 training curves before a stability conclusion is justified.
@@ -16,8 +22,10 @@ training curves before a stability conclusion is justified.
 - `XiaomiMiMo/MiMo-V2.6-RL-oss`, code subset, pinned to the article-era revision
   `639865fd3374018d6cb29b9fb82dd531406fcf5f` containing **2,698 tasks**. The later
   release removed 96. Images come from this revision's `image-mapping.jsonl`.
-- BF16 full-parameter trainer on eight B200s; 262,144-token context; batches of
+- BF16 trainer on eight B200s; 262,144-token context; batches of
   128 prompts with eight trajectories per prompt; no MoE route replay.
+  Miles uses these batch dimensions **per client**. LoRA parameterization is the
+  requested adaptation of the article's full-parameter experiment.
 - MIS ratio window [0.2, 5.0], matching the article's diagnostics.
 - Eight sampler groups, all with FP8 KV cache:
 
@@ -82,9 +90,16 @@ Decode-scale arithmetic matches GPU startup during CPU staging as well.
 FP8 quantizes BF16 weights into E4M3
 with FP32 scales per 128 x 128 block, matching the granularity of
 [Qwen's official FP8 configuration](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/blob/main/config.json).
-Recurrent gates and routers retain their source precision. This is recomputed
-for every BF16 publication; there is no separately trained FP8 base model.
-The serving weight cache recompiles BF16 publications into each group's format.
+Recurrent gates and routers retain their source precision. For full training,
+this is recomputed for every BF16 publication; there is no separately trained
+FP8 base model. The serving weight cache recompiles BF16 publications into each
+group's format. For Miles LoRA, the base is frozen and quantized at startup;
+each client publishes its BF16 adapter. NVFP4 uses the LoRA-capable
+`experimental_sgl_trtllm` MoE runner; the other groups use Triton with EP=1.
+The NVFP4 image patch enables that runner for online quantization. Both the
+base-only and LoRA paths use the existing gated weight layout; the LoRA kernel
+adds the BF16 adapter output before SwiGLU. Quantized adapter export is unnecessary
+for this frozen-base LoRA configuration.
 `validate --weights` first checks compiled runtime weights byte for byte against
 startup weights, then tests a changed expert tensor followed by restoration using
 the same XOR-delta format as Spindle publications. Exact sampled text equality is
@@ -97,6 +112,39 @@ From this directory, using Python 3.12:
 ```bash
 uv sync --frozen
 export MODAL_ENVIRONMENT=kailash-dev
+uv run --frozen spindle deploy mixed_samplers/miles_config.py --refresh-trainer qwen36-mimo-miles-256k
+uv run --frozen python -m mixed_samplers.validate_miles --api-key-file /path/to/deployment-key --output results/miles-validation
+uv run --frozen python -m mixed_samplers.train_miles --api-key-file /path/to/deployment-key --output results/miles-run-001 --clients 2 --steps 20 --validation-adapters results/miles-validation/result.json
+```
+
+The NVFP4 kernel reference check can also run independently:
+
+```bash
+uv run modal run -e kailash-dev -m mixed_samplers.validate_nvfp4_lora \
+  --output results/nvfp4-lora-validation.json
+```
+
+It checks decode and prefill shapes against dequantized reference weights, with
+zero and nonzero pre-SwiGLU adapter deltas. It preserves the existing TRTLLM
+`[up, gate]` weight layout and `[gate, up]` adapter layout. The acceptance bounds
+are normalized RMS errors of 0.2 for the activation, 0.25 for the output, and
+0.25 for the adapter-induced output change; these include activation quantization.
+The full sampler check must still exercise exported adapters on every group.
+
+The Miles frontend is `spindle-mimo-miles-mixed`. It shares the pinned model asset
+volume with the full-training deployment, and has separate trainer, bulletin,
+checkpoint, worker and sandbox ownership. Each client writes its own
+`client-N/events.jsonl`, trajectories and checkpoint. It may start its next update
+while the other client is still sampling, training or publishing. Sampler groups
+are shared across clients. `validate_miles` checks adapter isolation, native
+losses, optimizer updates and publication; its synthetic updates are discarded.
+`--validation-adapters` checks both trained validation adapters on all eight
+sampler groups before creating fresh RL clients.
+The 20-update default is an early stability check, shorter than the article's run.
+
+For the existing full-training experiment:
+
+```bash
 uv run --frozen spindle deploy mixed_samplers/config.py --refresh-trainer qwen36-mimo-mixed-256k
 uv run --frozen python -m mixed_samplers.validate --group all --weights --output sampler-validation.json
 uv run --frozen python -m mixed_samplers.validate_trainer --api-key-file /path/to/deployment-key
@@ -123,10 +171,13 @@ step, or two hours without a completed prompt stops the run.
 Backward and optimizer waits are bounded at two hours, publication and checkpoint
 waits at one hour. The controller requests trainer unloading when it exits.
 
-Resume with `--checkpoint <path> --start-step <saved-step> --steps <remaining>`
+The full-training entry point can resume with
+`--checkpoint <path> --start-step <saved-step> --steps <remaining>`
 using `checkpoint.json`. Optimizer state is restored. Queued rollouts and producer
 RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
 Use a new output directory for each resumed attempt.
+The Miles entry point saves each adapter's optimizer checkpoint, but does not yet
+provide automatic checkpoint or queued-rollout recovery.
 
 If an attempt stops before completing any new optimizer update, restart with
 `--initial-rollout-cache <previous-run-directory>` and a new output directory.
@@ -156,6 +207,9 @@ request into chunks. The recipe reconstructs entropy, KL and MIS-mask means from
 those totals. Older deployed backends expose only means; reports explicitly label
 that fallback `sdk_chunk_means`. This affects diagnostic weighting, not the loss
 gradient, whose active-token weights are normalized across the full update.
+Miles publication IDs are command sequence IDs. The controller resolves the
+actual serving snapshot after each publication and maps it to the optimizer
+update, so policy-age diagnostics remain meaningful when IDs are nonconsecutive.
 
 `manifest.json` records revisions, allocations, capacity measurements and chosen
 settings. `events.jsonl` records per-trajectory rewards, formatting failures,
@@ -172,3 +226,6 @@ evaluations from the article have not been reproduced by this script.
 Local tests: `uv run --frozen pytest tests`. Native gradient and SDK tests live
 in the repository's `tests/backends/test_score_centering.py` and `tests/replay`.
 Generate measured curves with `uv run --frozen python -m mixed_samplers.report results/run-001`.
+For Miles, run the same report separately on `results/miles-run-001/client-0`
+and `client-1`. Each client's events include queue wait, training, publication,
+and time from the earliest rollout in its batch to publication.
