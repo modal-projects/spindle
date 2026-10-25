@@ -30,11 +30,13 @@ class BaseConfig:
 
     name = ""
     model = ""
+    model_revision = None
     max_context_length = 16384
     parameterization = "lora"
     backend = "miles"
 
     trainer_gpu = "H100"
+    trainer_region = None
     trainer_gpus_per_node = 1
     trainer_nodes = 1
     trainer_cpu = 8

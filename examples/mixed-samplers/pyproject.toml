@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spindle-mixed-samplers"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "modal-spindle",
+    "mimoagent[modal] @ git+https://github.com/XiaomiMiMo/mimoagent.git@c3df8469f250b15e7906487a6d52be4c1827a509",
+    "matplotlib>=3.10",
+]
+
+[tool.uv.sources]
+modal-spindle = { path = "../..", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=9.1.1"]

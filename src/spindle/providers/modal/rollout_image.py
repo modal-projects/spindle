@@ -1,11 +1,13 @@
 import modal
 
+from .fp8_staging_patch import PATCH as FP8_STAGING_PATCH
 from .image_dependencies import (
     CORE_PACKAGES,
     STITCH_PACKAGE,
     TINKER_PACKAGE,
     ignore_config_source,
 )
+from .sampling_support_patch import PATCH as SAMPLING_SUPPORT_PATCH
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.17"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
@@ -226,6 +228,12 @@ image = (
         f" && git -C /tmp/stitch-sglang-overlay checkout --detach {SGLANG_REVISION}",
         "cd /tmp/stitch-sglang-overlay && git apply --check - <<'PATCH'\n"
         + SGLANG_LORA_LIFETIME_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + SAMPLING_SUPPORT_PATCH
+        + "PATCH\n",
+        "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
+        + FP8_STAGING_PATCH
         + "PATCH\n",
         "cd /tmp/stitch-sglang-overlay && git apply - <<'PATCH'\n"
         + SGLANG_LORA_LIFETIME_PATCH

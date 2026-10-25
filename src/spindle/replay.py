@@ -1,4 +1,4 @@
-"""Opt-in sampler replay for the Miles LoRA backend."""
+"""Opt-in sampler replay and recorded sampling distributions."""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
 from tinker.lib.public_interfaces.api_future import AwaitableConcurrentFuture
 
 REPLAY_FIELDS = frozenset(
-    {"routed_experts", "sampling_mask_ids", "sampling_mask_offsets"}
+    {
+        "routed_experts",
+        "sampling_mask_ids",
+        "sampling_mask_offsets",
+        "sampling_mask_logprobs",
+    }
 )
 
 
@@ -25,6 +30,7 @@ class SamplingReplay(BaseModel):
     sampling_mask_ids: list[int] | None = None
     sampling_mask_offsets: list[int] | None = None
     sampling_logprobs: list[float] | None = None
+    sampling_mask_logprobs: list[float] | None = None
 
     def loss_fn_config(self) -> dict[str, float]:
         # Greedy capture has singleton supports, whose normalized logprob is zero.
@@ -89,6 +95,12 @@ class SamplingReplay(BaseModel):
                 dtype="float32",
                 shape=[n],
             )
+            if self.sampling_mask_logprobs is not None:
+                result["sampling_mask_logprobs"] = types.TensorData(
+                    data=self.sampling_mask_logprobs,
+                    dtype="float32",
+                    shape=[len(self.sampling_mask_ids)],
+                )
         return result
 
 
@@ -116,12 +128,14 @@ def sample_with_replay(
     num_samples: int = 1,
     return_routed_experts: bool = False,
     return_sampling_mask: bool = False,
+    return_sampling_probabilities: bool = False,
 ) -> AwaitableConcurrentFuture[ReplaySampleResponse]:
     """Like SamplingClient.sample(), with a .replay object on every sequence.
 
     Returns a future supporting result() and result_async(). Ordinary Tinker
     sampling decoders do not preserve these additional response fields.
     """
+    return_sampling_mask = return_sampling_mask or return_sampling_probabilities
     if not (return_routed_experts or return_sampling_mask):
         raise ValueError("request at least one replay type")
 
@@ -144,6 +158,7 @@ def sample_with_replay(
                     extra_body={
                         "return_routed_experts": return_routed_experts,
                         "return_sampling_mask": return_sampling_mask,
+                        "return_sampling_probabilities": return_sampling_probabilities,
                     },
                 )
         return await _APIFuture(
@@ -166,6 +181,7 @@ def capture_replay(
     temperature: float,
     routes: bool,
     mask: bool,
+    probabilities: bool = False,
 ) -> dict:
     """Validate requested capture instead of silently training without replay."""
     replay = SamplingReplay(prompt_tokens=prompt_tokens, temperature=temperature)
@@ -204,6 +220,28 @@ def capture_replay(
                 )
             ids.extend(support)
             offsets.append(len(ids))
+        if probabilities:
+            candidate_logprobs = []
+            sampled_logprobs = []
+            for token, support, row in zip(tokens, supports, logprobs, strict=True):
+                if (
+                    not isinstance(row, list)
+                    or len(row) != len(support)
+                    or any(
+                        not isinstance(v, (int, float)) or not math.isfinite(v) or v > 0
+                        for v in row
+                    )
+                    or not math.isclose(
+                        sum(math.exp(v) for v in row), 1.0, abs_tol=1e-4
+                    )
+                ):
+                    raise ValueError(
+                        "sampler did not return normalized support probabilities"
+                    )
+                candidate_logprobs.extend(row)
+                sampled_logprobs.append(row[support.index(token)])
+            replay.sampling_mask_logprobs = candidate_logprobs
+            logprobs = sampled_logprobs
         if any(
             not isinstance(v, (int, float)) or not math.isfinite(v) or v > 0
             for v in logprobs
