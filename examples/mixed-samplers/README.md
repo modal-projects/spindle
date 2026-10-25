@@ -65,7 +65,8 @@ prompt, or the full sanitization procedure. This recipe chooses:
   ends the agent session; binary test reward;
 - 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to
   two serving replicas per group, keeping one warm through fleet startup;
-  target of 200 updates, checkpoint after every optimizer update.
+  200 updates for full training or 20 per client for the initial Miles check,
+  with a checkpoint after every optimizer update.
 
 All groups use PyTorch top-p selection so recorded supports and probabilities
 describe the actual categorical distribution. Their model execution still uses
