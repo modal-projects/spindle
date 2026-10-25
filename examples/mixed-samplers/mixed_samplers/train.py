@@ -73,6 +73,57 @@ def read_row(path):
         return pickle.load(source)
 
 
+def trajectory_metadata(row):
+    return {
+        key: row[key]
+        for key in (
+            "reward",
+            "format_error",
+            "generated_tokens",
+            "versions",
+            "group",
+            "started_at",
+            "finished_at",
+            "stop_reason",
+            "turns",
+        )
+    }
+
+
+def initial_rollout_cache(path, tasks):
+    manifest = json.loads((path / "manifest.json").read_text())
+    expected = {
+        "model": config.model,
+        "model_revision": config.model_revision,
+        "dataset": DATASET,
+        "dataset_revision": DATASET_REVISION,
+        "top_p": TOP_P,
+        "temperature": TEMPERATURE,
+        "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise ValueError("initial rollout cache uses a different recipe")
+    if manifest["arguments"]["checkpoint"] or manifest["arguments"]["start_step"]:
+        raise ValueError("initial rollout cache must start from the pretrained model")
+    events = [
+        json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()
+    ]
+    if any(event["event"] == "training_completed" for event in events):
+        raise ValueError("initial rollout cache must precede any completed update")
+    order = list(range(len(tasks)))
+    random.Random(SEED).shuffle(order)
+    prompts = {e["prompt"]: e for e in events if e["event"] == "prompt_started"}
+    for number, prompt in prompts.items():
+        if prompt["instance_id"] != tasks[order[number % len(order)]]["instance_id"]:
+            raise ValueError("initial rollout cache has a different task order")
+    completed = {
+        (e["prompt"], e["index"])
+        for e in events
+        if e["event"] == "trajectory_completed"
+    }
+    return {"path": path, "prompts": prompts, "completed": completed}
+
+
 def wait_for_sampler_evidence(paths):
     deadline = time.monotonic() + 1800
     for path in paths:
@@ -99,7 +150,7 @@ def wait_for_sampler_evidence(paths):
         )
 
 
-async def train(training, gateways, weights, args, tasks):
+async def train(training, gateways, weights, args, tasks, *, cache=None):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     events_file = (output / "events.jsonl").open("a", buffering=1)
@@ -129,6 +180,8 @@ async def train(training, gateways, weights, args, tasks):
             assignments = rng.choices(
                 groups, weights=weights, k=TRAJECTORIES_PER_PROMPT
             )
+            if cache is not None and group_number in cache["prompts"]:
+                assignments = cache["prompts"][group_number]["groups"]
             event(
                 "prompt_started",
                 prompt=group_number,
@@ -146,8 +199,40 @@ async def train(training, gateways, weights, args, tasks):
             ):
                 path = output / "trajectories" / f"{group_number:08d}-{index}.pkl.gz"
                 path.parent.mkdir(parents=True, exist_ok=True)
+                if cache is not None and (group_number, index) in cache["completed"]:
+                    source = cache["path"] / "trajectories" / path.name
+                    row = await asyncio.to_thread(read_row, source)
+                    if (
+                        row["instance_id"] != task["instance_id"]
+                        or row["group"] != group
+                        or not row["versions"]
+                        or any(
+                            v["start"] != 1 or v["end"] != 1 for v in row["versions"]
+                        )
+                    ):
+                        raise ValueError(
+                            "cached trajectory is not from the initial policy"
+                        )
+                    path.write_bytes(source.read_bytes())
+                    metadata = trajectory_metadata(row)
+                    event(
+                        "trajectory_restored",
+                        prompt=group_number,
+                        index=index,
+                        source=str(source),
+                        **metadata,
+                    )
+                    return str(path), metadata
                 for attempt in range(2):
                     try:
+                        event(
+                            "trajectory_started",
+                            prompt=group_number,
+                            index=index,
+                            group=group,
+                            version=requested_version,
+                            attempt=attempt,
+                        )
                         compressed = await sample_trajectory.remote.aio(
                             task,
                             gateways[group],
@@ -158,20 +243,7 @@ async def train(training, gateways, weights, args, tasks):
                         )
                         path.write_bytes(compressed)
                         row = pickle.loads(gzip.decompress(compressed))
-                        metadata = {
-                            k: row[k]
-                            for k in (
-                                "reward",
-                                "format_error",
-                                "generated_tokens",
-                                "versions",
-                                "group",
-                                "started_at",
-                                "finished_at",
-                                "stop_reason",
-                                "turns",
-                            )
-                        }
+                        metadata = trajectory_metadata(row)
                         event(
                             "trajectory_completed",
                             prompt=group_number,
@@ -320,7 +392,11 @@ async def train(training, gateways, weights, args, tasks):
                 zero_variance_prompts=zero_variance_prompts,
                 groups=group_metrics,
             )
-            if step % CHECKPOINT_INTERVAL == 0 or step == args.start_step + args.steps:
+            if (
+                step == args.start_step + 1
+                or step % CHECKPOINT_INTERVAL == 0
+                or step == args.start_step + args.steps
+            ):
                 checkpoint = await asyncio.wait_for(
                     training.save_state(f"step-{step:05d}").result_async(),
                     timeout=3600,
@@ -345,8 +421,16 @@ def main():
     parser.add_argument("--start-step", type=int, default=0)
     parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--sampler-evidence", type=Path, nargs="+", default=[])
+    parser.add_argument("--initial-rollout-cache", type=Path)
     args = parser.parse_args()
     tasks = load_tasks()
+    if args.initial_rollout_cache and (args.checkpoint or args.start_step):
+        parser.error("initial rollout reuse requires a fresh pretrained trainer")
+    cache = (
+        initial_rollout_cache(args.initial_rollout_cache, tasks)
+        if args.initial_rollout_cache
+        else None
+    )
     url = modal.Function.from_name(
         config.platform["frontend"], "server", environment_name="kailash-dev"
     ).get_web_url()
@@ -417,7 +501,7 @@ def main():
             (Path(args.output) / "manifest.json").write_text(
                 json.dumps(manifest, indent=2)
             )
-            asyncio.run(train(training, gateways, weights, args, tasks))
+            asyncio.run(train(training, gateways, weights, args, tasks, cache=cache))
     finally:
         try:
             response = httpx.post(

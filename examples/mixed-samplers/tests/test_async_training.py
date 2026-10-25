@@ -6,18 +6,25 @@ import pickle
 import time
 from types import SimpleNamespace
 
+import pytest
+
 training_module = importlib.import_module("mixed_samplers.train")
 
 
+@pytest.mark.parametrize("cached_version", [None, 1, 2])
 def test_producers_continue_during_native_training_and_use_old_rollouts(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, cached_version
 ):
     monkeypatch.setattr(training_module, "PROMPTS_PER_UPDATE", 2)
     monkeypatch.setattr(training_module, "TRAJECTORIES_PER_PROMPT", 2)
 
+    sampled_seeds = []
+
     async def sample(task, gateway, group, model_id, version, seed):
+        sampled_seeds.append(seed)
         await asyncio.sleep(0.01)
         row = {
+            "instance_id": task["instance_id"],
             "tokens": [1, 2],
             "active": [0, 1],
             "logq": [0.0, 0.0],
@@ -70,11 +77,85 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
     args = SimpleNamespace(
         output=str(tmp_path), inflight_prompts=3, start_step=0, steps=2
     )
+    cache = None
+    if cached_version is not None:
+        previous = tmp_path / "previous"
+        (previous / "trajectories").mkdir(parents=True)
+        row = pickle.loads(
+            gzip.decompress(
+                asyncio.run(
+                    sample(
+                        {"instance_id": "one"},
+                        "unused",
+                        "b200-nvfp4",
+                        "old-model",
+                        1,
+                        42,
+                    )
+                )
+            )
+        )
+        row["versions"] = [{"start": cached_version, "end": cached_version}]
+        (previous / "trajectories" / "00000000-0.pkl.gz").write_bytes(
+            gzip.compress(pickle.dumps(row))
+        )
+        (previous / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "model": training_module.config.model,
+                    "model_revision": training_module.config.model_revision,
+                    "dataset": training_module.DATASET,
+                    "dataset_revision": training_module.DATASET_REVISION,
+                    "top_p": training_module.TOP_P,
+                    "temperature": training_module.TEMPERATURE,
+                    "batch": [2, 2],
+                    "arguments": {"checkpoint": None, "start_step": 0},
+                }
+            )
+        )
+        (previous / "events.jsonl").write_text(
+            json.dumps(
+                {
+                    "event": "prompt_started",
+                    "prompt": 0,
+                    "instance_id": "one",
+                    "groups": ["b200-nvfp4"] * 2,
+                }
+            )
+            + "\n"
+            + json.dumps({"event": "trajectory_completed", "prompt": 0, "index": 0})
+            + "\n"
+        )
+        cache = training_module.initial_rollout_cache(
+            previous, [{"instance_id": "one"}]
+        )
+        sampled_seeds.clear()
+    if cached_version == 2:
+        with pytest.raises(ValueError, match="not from the initial policy"):
+            asyncio.run(
+                training_module.train(
+                    Training(),
+                    {"b200-nvfp4": "unused"},
+                    [1.0],
+                    args,
+                    [{"instance_id": "one"}],
+                    cache=cache,
+                )
+            )
+        return
     asyncio.run(
         training_module.train(
-            Training(), {"b200-nvfp4": "unused"}, [1.0], args, [{"instance_id": "one"}]
+            Training(),
+            {"b200-nvfp4": "unused"},
+            [1.0],
+            args,
+            [{"instance_id": "one"}],
+            cache=cache,
         )
     )
+    if cache is not None:
+        assert 42 not in sampled_seeds
+        assert 1042 in sampled_seeds
     events = [
         json.loads(line)
         for line in (tmp_path / "events.jsonl").read_text().splitlines()

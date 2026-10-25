@@ -56,7 +56,7 @@ prompt, or the full sanitization procedure. This recipe chooses:
   ends the agent session; binary test reward;
 - 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to
   two serving replicas per group, keeping one warm through fleet startup;
-  target of 200 updates, checkpoint every 10.
+  target of 200 updates, checkpoint after the first update and every 10 thereafter.
 
 All groups use PyTorch top-p selection so recorded supports and probabilities
 describe the actual categorical distribution. Their model execution still uses
@@ -117,6 +117,14 @@ Resume with `--checkpoint <path> --start-step <saved-step> --steps <remaining>`
 using `checkpoint.json`. Optimizer state is restored. Queued rollouts and producer
 RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
 Use a new output directory for each resumed attempt.
+
+If a trainer is lost before its first optimizer update, restart with
+`--initial-rollout-cache <previous-run-directory>` and a new output directory.
+This checks recipe pins, sampling settings, task order and served versions before
+reusing completed pretrained-policy trajectories. Missing trajectories are sampled
+by the independent producers. Restored trajectories have distinct events, so they
+do not count as newly completed rollouts in the overlap report. This option cannot
+be combined with checkpoint restoration or a nonzero starting step.
 
 ## Evidence to inspect
 

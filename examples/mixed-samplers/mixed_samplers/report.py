@@ -89,6 +89,9 @@ def main():
                 "prompts_started_during_training": sum(
                     e["event"] == "prompt_started" for e in during
                 ),
+                "trajectories_started_during_training": sum(
+                    e["event"] == "trajectory_started" for e in during
+                ),
                 "trajectories_completed_during_training": sum(
                     e["event"] == "trajectory_completed" for e in during
                 ),
