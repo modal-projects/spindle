@@ -125,13 +125,15 @@ using `checkpoint.json`. Optimizer state is restored. Queued rollouts and produc
 RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
 Use a new output directory for each resumed attempt.
 
-If a trainer is lost before its first optimizer update, restart with
+If an attempt stops before completing any new optimizer update, restart with
 `--initial-rollout-cache <previous-run-directory>` and a new output directory.
-This checks recipe pins, sampling settings, task order and served versions before
-reusing completed pretrained-policy trajectories. Missing trajectories are sampled
+This checks recipe pins, sampling settings, task order, served versions, and the
+initial checkpoint and step before reusing completed initial-policy trajectories.
+For a checkpoint-based attempt, pass the exact same `--checkpoint` and
+`--start-step` as that attempt. Missing trajectories are sampled
 by the independent producers. Restored trajectories have distinct events, so they
-do not count as newly completed rollouts in the overlap report. This option cannot
-be combined with checkpoint restoration or a nonzero starting step.
+do not count as newly completed rollouts in the overlap report. A cache from a
+different checkpoint or an attempt with a completed update is rejected.
 Repeated recovery also retains trajectories restored by earlier attempts. Pending
 gradients are not checkpointed, so an interrupted update must be recomputed.
 Recovery retains the original validated capacity weights and runs fresh sampler
@@ -139,6 +141,10 @@ checks alongside training, recording them in `startup-validation.json`. This let
 the trainer consume saved trajectories while new serving replicas initialize.
 A sampler check failure cancels training. A100 compute can use any US region to
 avoid a capacity bottleneck; its request endpoint remains in `us-west`.
+
+Long generated shell commands are transferred as script files to avoid Modal's
+64 KiB exec-argument limit. Their contents, working directory, timeout and exit
+status are preserved.
 
 ## Evidence to inspect
 

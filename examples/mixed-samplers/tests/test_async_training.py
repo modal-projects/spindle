@@ -69,17 +69,20 @@ def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fail
 
 
 @pytest.mark.parametrize(
-    ("cached_version", "cached_event"),
+    ("cached_version", "cached_event", "start_step"),
     [
-        (None, None),
-        (1, "trajectory_completed"),
-        (1, "trajectory_restored"),
-        (2, "trajectory_completed"),
-        (2, "trajectory_restored"),
+        (None, None, 0),
+        (1, "trajectory_completed", 0),
+        (1, "trajectory_restored", 0),
+        (2, "trajectory_completed", 0),
+        (2, "trajectory_restored", 0),
+        (1, "trajectory_completed", 1),
+        (1, "trajectory_restored", 1),
+        (2, "trajectory_completed", 1),
     ],
 )
 def test_producers_continue_during_native_training_and_use_old_rollouts(
-    tmp_path, monkeypatch, cached_version, cached_event
+    tmp_path, monkeypatch, cached_version, cached_event, start_step
 ):
     monkeypatch.setattr(training_module, "PROMPTS_PER_UPDATE", 2)
     monkeypatch.setattr(training_module, "TRAJECTORIES_PER_PROMPT", 2)
@@ -141,8 +144,9 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
             return Future(SimpleNamespace(path=name))
 
     args = SimpleNamespace(
-        output=str(tmp_path), inflight_prompts=3, start_step=0, steps=2
+        output=str(tmp_path), inflight_prompts=3, start_step=start_step, steps=2
     )
+    checkpoint = "tinker://prior/weights/step-00001" if start_step else None
     cache = None
     if cached_version is not None:
         previous = tmp_path / "previous"
@@ -180,7 +184,7 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
                     "top_p": training_module.TOP_P,
                     "temperature": training_module.TEMPERATURE,
                     "batch": [2, 2],
-                    "arguments": {"checkpoint": None, "start_step": 0},
+                    "arguments": {"checkpoint": checkpoint, "start_step": start_step},
                 }
             )
         )
@@ -198,8 +202,26 @@ def test_producers_continue_during_native_training_and_use_old_rollouts(
             + "\n"
         )
         cache = training_module.initial_rollout_cache(
-            previous, [{"instance_id": "one"}]
+            previous,
+            [{"instance_id": "one"}],
+            checkpoint=checkpoint,
+            start_step=start_step,
         )
+        if checkpoint:
+            for target, step in (
+                (None, 0),
+                ("tinker://other/weights/step-00001", 1),
+                (checkpoint, 2),
+            ):
+                with pytest.raises(
+                    ValueError, match="different initial training state"
+                ):
+                    training_module.initial_rollout_cache(
+                        previous,
+                        [{"instance_id": "one"}],
+                        checkpoint=target,
+                        start_step=step,
+                    )
         sampled_seeds.clear()
     if cached_version == 2:
         with pytest.raises(ValueError, match="not from the initial policy"):

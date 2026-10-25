@@ -1,6 +1,7 @@
 """Run the public task setup; grade the submitted diff in a fresh sandbox."""
 
 import shlex
+import uuid
 
 from mimoagent.environments.utils import make_dataset_env
 
@@ -58,6 +59,22 @@ def capture_patch(environment, task, baseline):
             f"{result['output'][-2000:]}"
         )
     return result["output"]
+
+
+def execute_command(environment, command, *, cwd, timeout):
+    # Modal limits the complete exec argument vector to 64 KiB. Large generated
+    # heredocs are valid shell programs; transfer their bytes outside argv.
+    if len(command.encode("utf-8")) < 60_000:
+        return environment.execute(command, cwd=cwd, timeout=timeout)
+    path = f"/tmp/spindle-shell-{uuid.uuid4().hex}.sh"
+    environment.copy_text_to(command, path)
+    quoted = shlex.quote(path)
+    return environment.execute(
+        f"bash {quoted}; spindle_command_status=$?; "
+        f"rm -f -- {quoted}; exit $spindle_command_status",
+        cwd=cwd,
+        timeout=timeout,
+    )
 
 
 def grade_patch(task, patch):

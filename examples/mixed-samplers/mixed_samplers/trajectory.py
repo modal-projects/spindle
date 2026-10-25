@@ -17,7 +17,7 @@ from .config import (
     TOP_P,
     config,
 )
-from .environment import capture_patch, grade_patch, setup
+from .environment import capture_patch, execute_command, grade_patch, setup
 
 TOOLS = [
     {
@@ -203,7 +203,8 @@ async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
                     submitted = True
                     break
                 output = await asyncio.to_thread(
-                    environment.execute,
+                    execute_command,
+                    environment,
                     call["command"],
                     cwd=task["cwd"],
                     timeout=min(300, max(1, int(call.get("timeout", 120)))),

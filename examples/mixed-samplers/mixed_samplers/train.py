@@ -106,7 +106,7 @@ def diagnostic_means(metrics):
     return result, "token_mean" if exact else "sdk_chunk_means"
 
 
-def initial_rollout_cache(path, tasks):
+def initial_rollout_cache(path, tasks, *, checkpoint=None, start_step=0):
     manifest = json.loads((path / "manifest.json").read_text())
     expected = {
         "model": config.model,
@@ -120,8 +120,13 @@ def initial_rollout_cache(path, tasks):
     }
     if any(manifest.get(key) != value for key, value in expected.items()):
         raise ValueError("initial rollout cache uses a different recipe")
-    if manifest["arguments"]["checkpoint"] or manifest["arguments"]["start_step"]:
-        raise ValueError("initial rollout cache must start from the pretrained model")
+    if (
+        manifest["arguments"]["checkpoint"] != checkpoint
+        or manifest["arguments"]["start_step"] != start_step
+    ):
+        raise ValueError(
+            "initial rollout cache uses a different initial training state"
+        )
     events = [
         json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()
     ]
@@ -464,10 +469,13 @@ def main():
     parser.add_argument("--initial-rollout-cache", type=Path)
     args = parser.parse_args()
     tasks = load_tasks()
-    if args.initial_rollout_cache and (args.checkpoint or args.start_step):
-        parser.error("initial rollout reuse requires a fresh pretrained trainer")
     cache = (
-        initial_rollout_cache(args.initial_rollout_cache, tasks)
+        initial_rollout_cache(
+            args.initial_rollout_cache,
+            tasks,
+            checkpoint=args.checkpoint,
+            start_step=args.start_step,
+        )
         if args.initial_rollout_cache
         else None
     )
