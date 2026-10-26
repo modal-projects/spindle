@@ -673,6 +673,29 @@ mod tests {
     }
 
     #[test]
+    fn long_partial_prefix_outranks_load() {
+        for (hit, expected) in [(1024, "cached"), (128, "spare")] {
+            let mut r = router("cache_wait", 8);
+            let q = Request::new("m/v1".into(), "problem".into(), vec![42; 4096], 100).unwrap();
+            let a = replica(
+                "cached",
+                2,
+                vec![],
+                vec![format!("{:032x}", q.hashes[hit / 64 - 1])],
+            );
+            let b = replica("spare", 0, vec![], vec![]);
+            r.update_snapshot(&json!([a, b]).to_string()).unwrap();
+            assert_eq!(
+                r.select_destination(&q, "1".into(), 0.)
+                    .unwrap()
+                    .replica
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn stale_or_full_spare_cannot_force_migration() {
         for restriction in ["stale", "full"] {
             let mut r =
