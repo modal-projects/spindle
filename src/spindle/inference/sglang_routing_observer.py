@@ -1,6 +1,7 @@
 """CPU-only snapshots for the pinned SGLang scheduler.
 
-Installed by the rollout image. The scheduler captures immutable CPU metadata
+The scheduler calls the copy in the pinned SGLang tree. This module is that
+same publisher, imported by the unit tests. It captures immutable CPU metadata
 and changed token bytes. A separate process hashes and publishes observations;
 one acknowledged capture may be in flight. No tensors or cache access state
 are modified.
