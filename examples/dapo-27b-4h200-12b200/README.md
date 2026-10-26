@@ -6,10 +6,10 @@ Each client runs its own rollout, train, and publish loop. The second client
 starts 150 seconds after the first logs `ready`. There is no step barrier
 between clients.
 
-`config.json` is the 30-update client. `config-sweep.json` is the five-update
-client used for the 1/2/4/8 client utilization sweep. That sweep deployed the
-same GPUs with `--lora-slots 16` and started rollouts from one shared gate
-(`launch_clients.py --mode gate --stagger-seconds 10`).
+`config.json` is the 30-update client the launcher loads by default. The
+1/2/4/8 client utilization sweep used the same settings with `"updates": 5`,
+deployed the same GPUs with `--lora-slots 16`, and started rollouts from one
+shared gate (`launch_clients.py --mode gate --stagger-seconds 10`).
 
 Secrets and the Modal environment come from the normal Spindle setup
 (`spindle-api`, `spindle-proxy`, and `MODAL_ENVIRONMENT`). The original run
