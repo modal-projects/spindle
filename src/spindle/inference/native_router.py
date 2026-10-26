@@ -46,15 +46,7 @@ class NativeRouter:
                     headers=headers,
                     policy=policy,
                     capacity=capacity,
-                    rates=[
-                        rates[k]
-                        for k in (
-                            "prefill_tokens_per_second",
-                            "decode_tokens_per_second",
-                            "gpu_lora_seconds",
-                            "registration_seconds",
-                        )
-                    ],
+                    rates=rates,
                     balance_absolute=balance_absolute,
                     balance_relative=balance_relative,
                     cache_threshold=cache_threshold,

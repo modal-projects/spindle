@@ -17,6 +17,21 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+const DELIVERIES_PER_ATTEMPT: u32 = 2;
+const MAX_TRANSPORT_FAILURES: u32 = 8;
+const ROUTER_OWNED_HEADERS: &[&str] = &[
+    "modal-session-id",
+    "modal-routing-affinity-key",
+    "modal-flash-upstream",
+];
+
+#[derive(Deserialize)]
+struct ServiceRates {
+    prefill_tokens_per_second: f64,
+    decode_tokens_per_second: f64,
+    gpu_lora_seconds: f64,
+    registration_seconds: f64,
+}
 #[derive(Deserialize)]
 struct Config {
     gateway: String,
@@ -24,7 +39,7 @@ struct Config {
     headers: HashMap<String, String>,
     policy: String,
     capacity: usize,
-    rates: [f64; 4],
+    rates: ServiceRates,
     balance_absolute: usize,
     balance_relative: f64,
     cache_threshold: f64,
@@ -204,12 +219,13 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             .post(format!("{}/generate", s.gateway))
             .json(&g.body);
         for (k, v) in s.headers.iter().chain(g.headers.iter()) {
-            if !k.eq_ignore_ascii_case("modal-session-id")
-                && !k.eq_ignore_ascii_case("modal-routing-affinity-key")
-                && !k.eq_ignore_ascii_case("modal-flash-upstream")
+            if ROUTER_OWNED_HEADERS
+                .iter()
+                .any(|owned| k.eq_ignore_ascii_case(owned))
             {
-                http = http.header(k, v);
+                continue;
             }
+            http = http.header(k, v);
         }
         http = http.header(
             "Modal-Flash-Upstream",
@@ -222,7 +238,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         // A lost connection may leave the generation running. Reconnect once
         // immediately with the same RID, payload and worker so its replay cache
         // can retain that work. Keep this reservation and the original deadline.
-        for delivery in 0..2 {
+        for delivery in 0..DELIVERIES_PER_ATTEMPT {
             match s
                 .client
                 .execute(http.try_clone().expect("buffered JSON request"))
@@ -302,7 +318,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         // deadline. It must not consume the budget for transport/server failures.
         if !busy {
             failures += 1;
-            if failures >= 8 {
+            if failures >= MAX_TRANSPORT_FAILURES {
                 return Err(error(
                     StatusCode::BAD_GATEWAY,
                     "Worker retry budget exhausted",
@@ -386,10 +402,10 @@ impl NativeRuntime {
         let scheduler = Router::new(
             &c.policy,
             c.capacity,
-            c.rates[0],
-            c.rates[1],
-            c.rates[2],
-            c.rates[3],
+            c.rates.prefill_tokens_per_second,
+            c.rates.decode_tokens_per_second,
+            c.rates.gpu_lora_seconds,
+            c.rates.registration_seconds,
             c.balance_absolute,
             c.balance_relative,
             c.cache_threshold,
