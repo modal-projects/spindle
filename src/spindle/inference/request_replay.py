@@ -2,12 +2,14 @@
 
 import asyncio
 import hashlib
-import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
 
 from fastapi.responses import JSONResponse
+
+
+DISCONNECT_POLL_INTERVAL_SECONDS = 0.25
 
 
 @dataclass
@@ -84,11 +86,11 @@ class RequestReplay:
             generation.task.cancel()
             await asyncio.gather(generation.task, return_exceptions=True)
 
-    async def run(self, rid, payload, generate, is_disconnected):
+    async def run(self, rid, body: bytes, generate, is_disconnected):
         self._prune()
-        fingerprint = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        ).digest()
+        # Retries must resend identical bytes, including JSON formatting.
+        # Hash the original body without serializing long token lists again.
+        fingerprint = hashlib.sha256(body).digest()
         completed = self.completed.get(rid)
         generation = self.pending.get(rid)
         previous = (
@@ -119,7 +121,9 @@ class RequestReplay:
         disconnected = False
         try:
             while not generation.task.done():
-                done, _ = await asyncio.wait((generation.task,), timeout=0.25)
+                done, _ = await asyncio.wait(
+                    (generation.task,), timeout=DISCONNECT_POLL_INTERVAL_SECONDS
+                )
                 if done:
                     break
                 if await is_disconnected():

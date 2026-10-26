@@ -20,6 +20,9 @@ from .bulletin import SnapshotBulletin, SnapshotNotFound
 from .request_replay import RequestReplay
 
 
+ABORT_TIMEOUT_SECONDS = 2.0
+
+
 def create_app(
     bulletin: SnapshotBulletin,
     upstream_url: str,
@@ -71,7 +74,7 @@ def create_app(
         replay_id = rid if isinstance(rid, str) else object()
         response = await app.state.request_replay.run(
             replay_id,
-            payload,
+            await request.body(),
             lambda: generate_once(payload),
             request.is_disconnected,
         )
@@ -207,18 +210,17 @@ async def _post_generate(
     client: httpx.AsyncClient,
     payload: dict,
 ) -> httpx.Response:
-    rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
     try:
         return await client.post("/generate", json=payload)
     except asyncio.CancelledError:
-        await _abort(client, rid)
+        await _abort(client, payload["rid"])
         raise
 
 
 async def _abort(client: httpx.AsyncClient, rid) -> None:
     rids = rid if isinstance(rid, list) else [rid]
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(ABORT_TIMEOUT_SECONDS):
             await asyncio.gather(
                 *(
                     client.post("/abort_request", json={"rid": str(item)})

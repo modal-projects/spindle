@@ -5,6 +5,7 @@ import json
 import os
 
 import httpx
+import pytest
 from fastapi.responses import Response
 
 from spindle.inference.bulletin import SnapshotBulletin
@@ -18,7 +19,17 @@ async def wait_for_waiters(app, rid, count):
             await asyncio.sleep(0)
 
 
-def test_replayed_generation_shares_work_and_preserves_active_count(tmp_path):
+@pytest.mark.parametrize(
+    "conflicting_body",
+    [
+        b'{ "rid": "same-attempt:0", "input_ids": [1, 2, 4] }',
+        b'{"rid":"same-attempt:0","input_ids":[1,2,3]}',
+    ],
+    ids=["changed-tokens", "changed-json-formatting"],
+)
+def test_replayed_generation_shares_work_and_preserves_active_count(
+    tmp_path, conflicting_body
+):
     async def scenario():
         entered = asyncio.Event()
         release = asyncio.Event()
@@ -52,11 +63,23 @@ def test_replayed_generation_shares_work_and_preserves_active_count(tmp_path):
                 transport=httpx.ASGITransport(app=app), base_url="http://sidecar"
             ) as client,
         ):
-            payload = {"rid": "same-attempt:0", "input_ids": [1, 2, 3]}
-            first = asyncio.create_task(client.post("/generate", json=payload))
+            body = b'{ "rid": "same-attempt:0", "input_ids": [1, 2, 3] }'
+            headers = {"content-type": "application/json"}
+            first = asyncio.create_task(
+                client.post("/generate", content=body, headers=headers)
+            )
             await asyncio.wait_for(entered.wait(), 1)
-            second = asyncio.create_task(client.post("/generate", json=payload))
-            await wait_for_waiters(app, payload["rid"], 2)
+            second = asyncio.create_task(
+                client.post("/generate", content=body, headers=headers)
+            )
+            await wait_for_waiters(app, "same-attempt:0", 2)
+            conflict = await client.post(
+                "/generate", content=conflicting_body, headers=headers
+            )
+            assert conflict.status_code == 409
+            assert conflict.json() == {
+                "error": "Request ID reused with a different payload"
+            }
             await asyncio.sleep(0.02)
             state = {"active": len(app.state.request_replay.pending)}
             release.set()
@@ -65,8 +88,12 @@ def test_replayed_generation_shares_work_and_preserves_active_count(tmp_path):
             assert [r.status_code for r in replies] == [200, 200]
             assert calls == 1
             # A reply lost after completion must not generate a second sample.
-            replay = await client.post("/generate", json=payload)
+            replay = await client.post("/generate", content=body, headers=headers)
             assert replay.json() == replies[0].json()
+            conflict = await client.post(
+                "/generate", content=conflicting_body, headers=headers
+            )
+            assert conflict.status_code == 409
             assert calls == 1
 
     asyncio.run(scenario())
@@ -100,13 +127,13 @@ def test_disconnect_reconnect_preserves_generation_then_aborts_unclaimed_work():
 
         try:
             first = asyncio.create_task(
-                replay.run("recover", {"input_ids": [1]}, generate, connection_lost)
+                replay.run("recover", b'{"input_ids":[1]}', generate, connection_lost)
             )
             await entered.wait()
             disconnected.set()
             assert await asyncio.wait_for(first, 1) is None
             second = asyncio.create_task(
-                replay.run("recover", {"input_ids": [1]}, generate, connected)
+                replay.run("recover", b'{"input_ids":[1]}', generate, connected)
             )
             await asyncio.sleep(0.15)
             assert not aborted.is_set()
@@ -118,14 +145,14 @@ def test_disconnect_reconnect_preserves_generation_then_aborts_unclaimed_work():
             release.clear()
             assert (
                 await replay.run(
-                    "abandoned", {"input_ids": [2]}, generate, connection_lost
+                    "abandoned", b'{"input_ids":[2]}', generate, connection_lost
                 )
                 is None
             )
             await asyncio.wait_for(aborted.wait(), 1)
             await asyncio.sleep(0)
             result = await replay.run(
-                "abandoned", {"input_ids": [2]}, generate, connected
+                "abandoned", b'{"input_ids":[2]}', generate, connected
             )
             assert result.status_code == 409
             assert result.headers["x-spindle-replay-state"] == "cancelled"
@@ -150,17 +177,17 @@ def test_replay_rejects_changed_payload_and_bounds_completed_results():
             return False
 
         try:
-            await replay.run("a", {"input_ids": [1]}, generate, connected)
-            conflict = await replay.run("a", {"input_ids": [2]}, generate, connected)
+            await replay.run("a", b'{"input_ids":[1]}', generate, connected)
+            conflict = await replay.run("a", b'{"input_ids":[2]}', generate, connected)
             assert conflict.status_code == 409
             assert "x-spindle-replay-state" not in conflict.headers
             assert calls == 1
-            await replay.run("b", {"input_ids": [1]}, generate, connected)
-            await replay.run("a", {"input_ids": [1]}, generate, connected)
+            await replay.run("b", b'{"input_ids":[1]}', generate, connected)
+            await replay.run("a", b'{"input_ids":[1]}', generate, connected)
             assert calls == 3
             replay.ttl = 0
-            await replay.run("c", {"input_ids": [1]}, generate, connected)
-            await replay.run("c", {"input_ids": [1]}, generate, connected)
+            await replay.run("c", b'{"input_ids":[1]}', generate, connected)
+            await replay.run("c", b'{"input_ids":[1]}', generate, connected)
             assert calls == 5
         finally:
             await replay.aclose()
