@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +17,10 @@ from stitch.types import VersionConstraint, VersionRef
 from spindle.startup_timing import timeline
 
 from .bulletin import SnapshotBulletin, SnapshotNotFound
+from .request_replay import RequestReplay
+
+
+ABORT_TIMEOUT_SECONDS = 2.0
 
 FETCH_METRICS_TIMEOUT_SECONDS = 2.0
 
@@ -41,9 +45,11 @@ def create_app(
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
+        app.state.request_replay = RequestReplay()
         try:
             yield
         finally:
+            await app.state.request_replay.aclose()
             pending = list(app.state.adapter_resolutions.values())
             for task in pending:
                 task.cancel()
@@ -78,6 +84,22 @@ def create_app(
     @app.post("/generate")
     async def generate(request: Request) -> Response:
         payload = await request.json()
+        rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
+        # Deduplicate scalar attempts. Preserve the existing batch-ID path;
+        # its separate engine request IDs do not identify one shared attempt.
+        replay_id = rid if isinstance(rid, str) else object()
+        response = await app.state.request_replay.run(
+            replay_id,
+            await request.body(),
+            lambda: generate_once(payload),
+            request.is_disconnected,
+        )
+        if response is None:
+            response = Response(status_code=499)
+        response.headers["x-spindle-replica"] = os.environ.get("MODAL_TASK_ID", "local")
+        return response
+
+    async def generate_once(payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -101,9 +123,7 @@ def create_app(
                     status_code=409,
                 )
 
-        response = await _post_generate(app.state.client, request, payload)
-        if response is None:
-            return Response(status_code=499)
+        response = await _post_generate(app.state.client, payload)
         try:
             body = response.json()
         except ValueError:
@@ -204,37 +224,28 @@ async def _prepare_adapter(
 
 async def _post_generate(
     client: httpx.AsyncClient,
-    request: Request,
     payload: dict,
-) -> httpx.Response | None:
-    rid = payload.setdefault("rid", f"spindle-{uuid.uuid4().hex}")
-    task = asyncio.create_task(client.post("/generate", json=payload))
+) -> httpx.Response:
     try:
-        while not task.done():
-            done, _ = await asyncio.wait((task,), timeout=0.25)
-            if done:
-                break
-            if await request.is_disconnected():
-                await _abort(client, rid)
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                return None
-        return await task
+        return await client.post("/generate", json=payload)
     except asyncio.CancelledError:
-        await _abort(client, rid)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        await _abort(client, payload["rid"])
         raise
 
 
 async def _abort(client: httpx.AsyncClient, rid) -> None:
     rids = rid if isinstance(rid, list) else [rid]
-    await asyncio.gather(
-        *(client.post("/abort_request", json={"rid": str(item)}) for item in rids),
-        return_exceptions=True,
-    )
+    try:
+        async with asyncio.timeout(ABORT_TIMEOUT_SECONDS):
+            await asyncio.gather(
+                *(
+                    client.post("/abort_request", json={"rid": str(item)})
+                    for item in rids
+                ),
+                return_exceptions=True,
+            )
+    except TimeoutError:
+        pass
 
 
 def main() -> None:
