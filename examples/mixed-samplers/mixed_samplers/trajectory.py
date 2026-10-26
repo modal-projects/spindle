@@ -101,6 +101,9 @@ def append_generation(row, sequence):
 async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
     started = time.time()
     session = str(uuid.uuid4())
+    # Pinned SGLang sets max_req_input_len = (context_len - 1) - 5
+    # and rejects inputs at or above that bound.
+    input_limit = config.max_context_length - 6
     prompt = tokenizer.apply_chat_template(
         [
             {"role": "system", "content": SYSTEM},
@@ -123,6 +126,7 @@ async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
         "group": group,
         "started_at": started,
         "requested_version": version,
+        "input_token_limit_exclusive": input_limit,
         "format_error": False,
         "stop_reason": "max_turns",
     }
@@ -131,10 +135,9 @@ async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
     consecutive_non_tool = 0
     try:
         for turn in range(MAX_TURNS):
-            # Pinned SGLang sets max_req_input_len = (context_len - 1) - 5
-            # and rejects inputs at or above that bound. Keep sampled tokens
-            # intact and grade the existing patch when no further turn fits.
-            if len(row["tokens"]) >= config.max_context_length - 6:
+            # Keep sampled tokens intact and grade the existing patch when no
+            # further turn fits.
+            if len(row["tokens"]) >= input_limit:
                 row["stop_reason"] = "context_limit"
                 break
             stats = {}
