@@ -5,9 +5,9 @@ import signal
 import time
 
 import pytest
-
-from spindle.inference import sglang_routing_observer as optimized
 import xxhash
+
+optimized = pytest.importorskip("sglang.srt.spindle_routing_observer")
 
 
 def expected(rows, names, hybrid, root=0):
