@@ -7,9 +7,12 @@ its native replay queues and sampling-mask primitive with Tinker datum metadata.
 from __future__ import annotations
 
 from argparse import Namespace
+from contextlib import nullcontext
 from functools import wraps
 
 import torch
+
+from .gradients import accumulate_gradients
 
 _replayed_run = None
 
@@ -171,7 +174,13 @@ def install_replay_hooks(
             # Miles switches to replay_forward around each forward; recompute
             # consumes the separate backward cursor after that stage restores.
             manager.stage = "replay_backward"
-            return original_run(args, batch_id, model, rollout_data, **kwargs)
+            accumulation = (
+                nullcontext()
+                if kwargs.get("forward_only", False)
+                else accumulate_gradients(model)
+            )
+            with accumulation:
+                return original_run(args, batch_id, model, rollout_data, **kwargs)
         finally:
             manager.clear_all()
             manager.enabled, manager.stage = enabled, stage
