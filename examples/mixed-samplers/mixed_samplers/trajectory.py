@@ -131,7 +131,10 @@ async def rollout(task, gateway, group, model_id, version, seed, tokenizer):
     consecutive_non_tool = 0
     try:
         for turn in range(MAX_TURNS):
-            if len(row["tokens"]) >= config.max_context_length - 1:
+            # Pinned SGLang sets max_req_input_len = (context_len - 1) - 5
+            # and rejects inputs at or above that bound. Keep sampled tokens
+            # intact and grade the existing patch when no further turn fits.
+            if len(row["tokens"]) >= config.max_context_length - 6:
                 row["stop_reason"] = "context_limit"
                 break
             stats = {}
