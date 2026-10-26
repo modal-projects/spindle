@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import tinker
+from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from swe_gym_env import Environments
@@ -25,7 +26,28 @@ from swe_gym_lora_benchmark import (
 
 ROOT = Path(__file__).resolve().parent
 RUN = ROOT / "run"
+DATASET = "SWE-Gym/SWE-Gym"
 os.environ.setdefault("SWE_SANDBOX_APP", "swe-gym-9b-256k-sandboxes")
+
+
+def load_tasks():
+    ids = json.loads((ROOT / "data" / "validated_workload_ids.json").read_text())
+    wanted = set(ids)
+    rows = {}
+    for row in load_dataset(DATASET, split="train"):
+        instance_id = row["instance_id"]
+        if instance_id not in wanted:
+            continue
+        task = dict(row)
+        task["FAIL_TO_PASS"] = list(task["FAIL_TO_PASS"])
+        task["PASS_TO_PASS"] = list(task["PASS_TO_PASS"])
+        rows[instance_id] = task
+    missing = [instance_id for instance_id in ids if instance_id not in rows]
+    if missing:
+        raise SystemExit(
+            f"{DATASET} is missing {len(missing)} validated tasks, including {missing[0]}"
+        )
+    return [rows[instance_id] for instance_id in ids]
 
 
 def main():
@@ -37,11 +59,7 @@ def main():
     os.environ["SWE_SANDBOX_APP"] = manifest.get(
         "sandbox_app", "swe-gym-9b-256k-sandboxes"
     )
-    tasks = json.loads((ROOT / "data" / "train.json").read_text())
-    allowed = set(
-        json.loads((ROOT / "data" / "validated_workload_ids.json").read_text())
-    )
-    tasks = [task for task in tasks if task["instance_id"] in allowed]
+    tasks = load_tasks()
     cfg = config(
         SimpleNamespace(
             rollout_workers=64,

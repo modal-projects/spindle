@@ -195,23 +195,3 @@ PY""",
             report["reward"] = float(report["resolved"])
             (directory / "report.json").write_text(json.dumps(report, indent=2))
             return report
-
-    def calibrate(self, inst):
-        path = self.root / "calibration" / inst["instance_id"]
-        done = path / "validated.json"
-        if done.exists():
-            return json.loads(done.read_text())
-        empty = self.grade(inst, "", path / "empty")
-        gold = self.grade(inst, inst["patch"], path / "gold")
-        if empty["reward"] != 0 or gold["reward"] != 1:
-            raise InfrastructureError(
-                f"Grader control failed: {inst['instance_id']}: empty={empty['reward']}, gold={gold['reward']}"
-            )
-        result = {
-            "instance_id": inst["instance_id"],
-            "empty": 0,
-            "gold": 1,
-            "modal_image_id": self.image(inst).object_id,
-        }
-        done.write_text(json.dumps(result, indent=2))
-        return result

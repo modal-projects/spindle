@@ -38,14 +38,16 @@ pool at 8 replicas and the sample proxy at 4–32 containers, and writes
 `run/launch.json`. It does not return until the apps are deployed. A second
 `--init-run` refuses to overwrite an existing manifest.
 
-The worker also needs `tinker`, `transformers`, `numpy`, `orjson`, and the
-[SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) harness (`swegym`) on
+The worker also needs `tinker`, `transformers`, `numpy`, `orjson`, `datasets`,
+and the [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) harness (`swegym`) on
 `PYTHONPATH`. `psutil` is optional; without it the supervisor skips host
 memory and CPU lines.
 
-`data/train.json` is the 115 validated SWE-Gym tasks this run trained on.
-`data/validated_workload_ids.json` is that same id list. Grading runs in a
-fresh Modal sandbox (`swe-gym-9b-256k-sandboxes`, 16 GiB, network blocked).
+`data/validated_workload_ids.json` lists the 115 tasks this run trained on. The
+worker loads those rows from the public
+[SWE-Gym/SWE-Gym](https://huggingface.co/datasets/SWE-Gym/SWE-Gym) dataset, in
+that order. Grading runs in a fresh Modal sandbox
+(`swe-gym-9b-256k-sandboxes`, 16 GiB, network blocked).
 
 The tokenizer is `Qwen/Qwen3.5-9B` at revision
 `c202236235762e1c871ad0ccb60c8ee5ba337b9a`.
