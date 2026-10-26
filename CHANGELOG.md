@@ -16,7 +16,6 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Fixed
 
 - DeepSeek-V4.1-Flash trainers on B200 no longer hang in their first step.
-
 - Miles' gloo process group waits as long as `distributed_timeout_minutes`, so trainers on slow-loading hosts no longer time out after 30 minutes.
 - The Miles v0.1.2 trainer image and the SGLang image are pinned to fork commits, so a cached build cannot serve an older fork branch.
 
