@@ -145,12 +145,22 @@ def test_deepseek_v41_lora_recipe():
         "ffn.shared_experts.w3",
     ]
     assert serving["disable_shared_experts_fusion"] is True
-    assert row.recipe.inference_env["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert row.recipe.inference_env["SGLANG_DSV4_FP4_DEQUANT"] == "1"
     assert serving["weight_loader_disable_mmap"] is False
     assert row.recipe.trainer_image == "miles-v0.1.2"
     assert row.model == "deepseek-ai/DeepSeek-V4.1-Flash"
-    assert row.asset_path == "/assets/PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
+    assert row.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash"
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
+
+
+def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
+    row = resolved(recipe("deepseek-v41-flash-lora-32k"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (
+        8,
+        16,
+    )
+    assert row.inference_settings["context_length"] == 32768
 
 
 def test_asset_paths_follow_the_model():

@@ -6,13 +6,12 @@ class Config(BaseConfig):
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
-    # The release is FP8/FP4; training and serving both use exact BF16 weights.
-    model_weights = "PrimeIntellect/DeepSeek-V4.1-Flash-bf16"
-    weights_revision = "60a77a60c81e63f197c33e0b427c67f26ab27147"
+    # The FP8/FP4 release. The trainer dequantizes it to BF16 as it loads.
+    weights_revision = "2cba9e42aa026125f3ed06c6d98c1db82f7ca027"
     max_context_length = 8192
     backend = "miles"
     trainer_image = "miles-v0.1.2"
-    trainer_gpu = "B300"
+    trainer_gpu = ["B300", "B200", "H200"]
     trainer_gpus_per_node = 8
     trainer_nodes = 2
     trainer_cpu = 64
@@ -60,6 +59,9 @@ class Config(BaseConfig):
     trainer_env = {
         # Lazily loaded kernels can deadlock against in-flight cross-node expert all-to-alls.
         "CUDA_MODULE_LOADING": "EAGER",
+        # cuBLASLt still loads kernels while an expert all-to-all is in flight,
+        # which can hang trainers.
+        "TORCH_NCCL_BLOCKING_WAIT": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
@@ -67,7 +69,7 @@ class Config(BaseConfig):
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     }
-    inference_gpu = "B300"
+    inference_gpu = ["B300", "B200", "H200"]
     inference_gpus_per_node = 8
     inference_cpu = 32
     inference_memory_mib = 700_000
@@ -77,8 +79,9 @@ class Config(BaseConfig):
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
         "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
-        # A BF16 checkpoint must not be routed to the FP4 expert kernels.
-        "SGLANG_DSV4_FP4_EXPERTS": "0",
+        # Routed experts load as FP8 on every GPU; the FP4 expert kernels need Blackwell.
+        "SGLANG_DSV4_FP4_EXPERTS": "1",
+        "SGLANG_DSV4_FP4_DEQUANT": "1",
     }
     sglang_cfg = {
         "tp_size": 8,
@@ -86,7 +89,7 @@ class Config(BaseConfig):
         "attention_backend": "dsv4",
         "dtype": "bfloat16",
         "trust_remote_code": True,
-        "mem_fraction_static": 0.7,
+        "mem_fraction_static": 0.9,
         "model_loader_extra_config": {"enable_multithread_load": False},
         "weight_loader_drop_cache_after_load": True,
         "weight_loader_disable_mmap": False,
