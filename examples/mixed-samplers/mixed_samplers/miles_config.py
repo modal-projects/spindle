@@ -55,7 +55,9 @@ def sampler_config(group):
     return Config(
         name=f"{config.name}-{group['name']}",
         inference_gpu=group["gpu"],
-        inference_region=() if group["name"] == "a100-bf16" else None,
+        inference_region=()
+        if group["name"] in ("a100-bf16", "b300-nvfp4")
+        else None,
         inference_gpus_per_node=group["gpus"],
         inference_env={
             "SGLANG_EXPERIMENTAL_LORA_OPTI": "1"
