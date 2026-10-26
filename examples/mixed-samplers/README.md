@@ -108,6 +108,12 @@ The NVFP4 image patch enables that runner for online quantization. Both the
 base-only and LoRA paths use the existing gated weight layout; the LoRA kernel
 adds the BF16 adapter output before SwiGLU. Quantized adapter export is unnecessary
 for this frozen-base LoRA configuration.
+The Miles NVFP4 groups use serial LoRA kernels by setting
+`SGLANG_TWO_STREAM_MAX_TOKENS=0`. This bypasses the experimental cross-stream
+path implicated in a B300 illegal-memory-access failure under mixed
+prefill/decode traffic. It is a mitigation, not an isolated root-cause fix;
+the underlying expand kernel passed standalone checks. Kernel scheduling does
+not introduce a barrier between RL clients or change the precision recipe.
 `validate --weights` first checks compiled runtime weights byte for byte against
 startup weights, then tests a changed expert tensor followed by restoration using
 the same XOR-delta format as Spindle publications. Exact sampled text equality is

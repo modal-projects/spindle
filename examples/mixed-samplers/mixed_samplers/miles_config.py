@@ -63,6 +63,14 @@ def sampler_config(group):
             "SGLANG_EXPERIMENTAL_LORA_OPTI": "1"
             if group["quantization"] == "nvfp4_online"
             else "0",
+            # Avoid the experimental cross-stream LoRA path that faulted on
+            # B300 under mixed prefill/decode load. This changes kernel
+            # scheduling only; adapters and asynchronous RL are unchanged.
+            **(
+                {"SGLANG_TWO_STREAM_MAX_TOKENS": "0"}
+                if group["quantization"] == "nvfp4_online"
+                else {}
+            ),
             "SGLANG_FP8_BLOCK_ONLINE": "1",
             "SGLANG_JIT_DEEPGEMM_PRECOMPILE": "0",
             "SGLANG_FP8_IGNORED_LAYERS": "in_proj_a,in_proj_b,in_proj_ba,mlp.gate,shared_expert_gate,visual,lm_head",
