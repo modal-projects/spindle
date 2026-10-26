@@ -72,6 +72,9 @@ All groups use PyTorch top-p selection so recorded supports and probabilities
 describe the actual categorical distribution. Their model execution still uses
 their accelerator-specific and quantization-specific kernels. Exact support
 capture is bounded by the full model vocabulary, not an approximate top-k tail.
+New turns start only below the pinned SGLang scheduler's input limit of
+`context_length - 6` tokens. At context exhaustion, the existing patch is graded
+normally and all previously sampled token IDs and replay probabilities are kept.
 
 The public `XiaomiMiMo/mimoagent` environment is pinned to
 `c3df8469f250b15e7906487a6d52be4c1827a509`. Setup runs its anti-leak cleanup,
