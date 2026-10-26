@@ -125,10 +125,21 @@ def main():
             **({"environment_name": environment} if environment else {}),
         )
         (ROOT / "endpoint.json").write_text(
-            json.dumps({"base_url": endpoint.get_web_url(), "pool": pool.app_name}, indent=2)
+            json.dumps(
+                {"base_url": endpoint.get_web_url(), "pool": pool.app_name}, indent=2
+            )
             + "\n"
         )
-    print(json.dumps({"apps": owned, "trainer_gpus": 4, "inference_gpus": 12, "launched": args.launch}))
+    print(
+        json.dumps(
+            {
+                "apps": owned,
+                "trainer_gpus": 4,
+                "inference_gpus": 12,
+                "launched": args.launch,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

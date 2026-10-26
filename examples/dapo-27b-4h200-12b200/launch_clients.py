@@ -45,7 +45,9 @@ def spawn(index, config, base_url, start_gate):
     if start_gate is not None:
         command.extend(["--start-gate", str(start_gate)])
     log = (ROOT / f"client-{index:02d}.log").open("ab")
-    return subprocess.Popen(command, cwd=ROOT, env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT)
+    return subprocess.Popen(
+        command, cwd=ROOT, env=os.environ.copy(), stdout=log, stderr=subprocess.STDOUT
+    )
 
 
 def main():
@@ -64,15 +66,25 @@ def main():
     if args.mode == "gate":
         gate = ROOT / "start.json"
         if gate.exists():
-            raise SystemExit(f"{gate} already exists; remove it before a new sweep stage")
+            raise SystemExit(
+                f"{gate} already exists; remove it before a new sweep stage"
+            )
         for index in range(args.clients):
             processes.append(spawn(index, args.config, args.base_url, gate))
-        while not all(ready(ROOT / f"client-{i:02d}" / "events.jsonl") for i in range(args.clients)):
+        while not all(
+            ready(ROOT / f"client-{i:02d}" / "events.jsonl")
+            for i in range(args.clients)
+        ):
             if any(process.poll() not in (None, 0) for process in processes):
                 raise SystemExit("A client exited before warmup finished")
             time.sleep(2)
         gate.write_text(
-            json.dumps({"time": time.time() + args.stagger_seconds, "stagger_seconds": args.stagger_seconds})
+            json.dumps(
+                {
+                    "time": time.time() + args.stagger_seconds,
+                    "stagger_seconds": args.stagger_seconds,
+                }
+            )
             + "\n"
         )
     else:
