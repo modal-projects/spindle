@@ -3,6 +3,7 @@ import json
 import random
 import signal
 import time
+from types import SimpleNamespace
 
 import pytest
 import xxhash
@@ -129,6 +130,73 @@ def test_missing_delta_is_rejected():
         optimized.IncrementalPrefixes().export(
             0, [(1, 0, "a", None, True, 1, 64)], {"a": "adapter"}, True
         )
+
+
+def native_cache(binding):
+    cache = type("UnifiedRadixCache", (), {})()
+    cache.tree_core = type("RustUnifiedTreeCore", (), {})()
+    cache.tree_core._binding = binding
+    cache.is_swa_enabled = False
+    cache.is_mamba_enabled = False
+    return cache
+
+
+def fake_scheduler(cache):
+    manager = SimpleNamespace(
+        lora_refs={"a": SimpleNamespace(lora_name="adapter-a-v1")},
+        loras={"a": None},
+        memory_pool=SimpleNamespace(uid_to_buffer_id={"a": 0}),
+    )
+    return SimpleNamespace(
+        enable_lora=True,
+        tp_worker=SimpleNamespace(model_runner=SimpleNamespace(lora_manager=manager)),
+        tree_cache=cache,
+        waiting_queue=[],
+        chunked_req=None,
+        pool_stats_observer=SimpleNamespace(
+            get_pool_stats=lambda: SimpleNamespace(
+                full_num_used=256, full_available_size=1000, full_evictable_size=256
+            )
+        ),
+    )
+
+
+@pytest.fixture
+def observer(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        optimized,
+        "get_parallel",
+        lambda: SimpleNamespace(tp_rank=0, dp_size=1, pp_size=1),
+    )
+    monkeypatch.setattr(optimized, "ENABLED", True)
+    monkeypatch.setattr(optimized, "last_snapshot", 0.0)
+    publisher = optimized.BackgroundPublisher(tmp_path / "state.json")
+    monkeypatch.setattr(optimized, "publisher", publisher)
+    yield publisher
+    publisher.close()
+    publisher.thread.join(timeout=3)
+
+
+def test_binding_without_delta_publishes_load_only(observer, tmp_path):
+    cache = native_cache(object())
+    await_ready(observer, cache)
+    optimized.snapshot(fake_scheduler(cache), None, None)
+    await_ready(observer, cache)
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["prefixes"] == []
+    assert state["kv_capacity_tokens"] == 1512
+    assert optimized.ENABLED
+
+
+def test_capture_failure_disables_observations(observer):
+    cache = native_cache(object())
+    scheduler = fake_scheduler(cache)
+    scheduler.pool_stats_observer = None
+    await_ready(observer, cache)
+    optimized.snapshot(scheduler, None, None)
+    assert not optimized.ENABLED
+    optimized.last_snapshot = 0.0
+    optimized.snapshot(scheduler, None, None)
 
 
 def await_ready(publisher, tree):

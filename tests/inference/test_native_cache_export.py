@@ -1,10 +1,17 @@
 from array import array
-from types import SimpleNamespace
+import json
 
 import pytest
 import torch
 
-from test_routing_observer import optimized, expected, await_ready
+from test_routing_observer import (
+    await_ready,
+    expected,
+    fake_scheduler,
+    native_cache,
+    observer,  # noqa: F401 (pytest fixture)
+    optimized,
+)
 
 native = pytest.importorskip("sglang.srt.mem_cache.rust_tree_core.extension").bindings
 
@@ -98,53 +105,22 @@ def test_salted_bigram_host_only_excluded():
     assert bigram.routing_snapshot_delta({})[1] == []
 
 
+@pytest.mark.usefixtures("observer")
 def test_scheduler_integration(tmp_path):
     tree = core(hybrid=True)
     insert(tree, list(range(256)), hybrid=True)
     # Use actual native state behind the scheduler-facing cache interface.
-    adapter = type("RustUnifiedTreeCore", (), {})()
-    adapter._binding = tree
-    cache = type("UnifiedRadixCache", (), {})()
-    cache.tree_core = adapter
-    cache.is_swa_enabled = False
+    cache = native_cache(tree)
     cache.is_mamba_enabled = True
-    manager = SimpleNamespace(
-        lora_refs={"a": SimpleNamespace(lora_name="adapter-a-v1")},
-        loras={"a": None},
-        memory_pool=SimpleNamespace(uid_to_buffer_id={"a": 0}),
-    )
-    scheduler = SimpleNamespace(
-        ps=SimpleNamespace(tp_rank=0, dp_size=1, pp_size=1),
-        enable_lora=True,
-        tp_worker=SimpleNamespace(model_runner=SimpleNamespace(lora_manager=manager)),
-        tree_cache=cache,
-        waiting_queue=[],
-        chunked_req=None,
-        pool_stats_observer=SimpleNamespace(
-            get_pool_stats=lambda: SimpleNamespace(
-                full_num_used=256, full_available_size=1000, full_evictable_size=256
-            )
-        ),
-    )
-    import json
-
-    publisher = optimized.BackgroundPublisher(tmp_path / "state.json")
-    optimized.publisher = publisher
-    optimized.ENABLED = True
-    try:
-        await_ready(publisher, cache)
-        optimized.last_snapshot = 0
-        optimized.snapshot(scheduler, None, None)
-        await_ready(publisher, cache)
-        state = json.loads((tmp_path / "state.json").read_text())
-        assert state["prefixes"] == full_export(tree, {"a": "adapter-a-v1"}, True)
-        assert state["kv_capacity_tokens"] == 1512
-        assert state["export_token_bytes"] == 256 * 8
-        optimized.last_snapshot = 0
-        optimized.snapshot(scheduler, None, None)
-        await_ready(publisher, cache)
-        assert (
-            json.loads((tmp_path / "state.json").read_text())["export_token_bytes"] == 0
-        )
-    finally:
-        publisher.close()
+    scheduler = fake_scheduler(cache)
+    await_ready(optimized.publisher, cache)
+    optimized.snapshot(scheduler, None, None)
+    await_ready(optimized.publisher, cache)
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["prefixes"] == full_export(tree, {"a": "adapter-a-v1"}, True)
+    assert state["kv_capacity_tokens"] == 1512
+    assert state["export_token_bytes"] == 256 * 8
+    optimized.last_snapshot = 0
+    optimized.snapshot(scheduler, None, None)
+    await_ready(optimized.publisher, cache)
+    assert json.loads((tmp_path / "state.json").read_text())["export_token_bytes"] == 0
