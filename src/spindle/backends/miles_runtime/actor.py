@@ -73,8 +73,6 @@ def _sync_checkpoint_volume(action: str) -> None:
 
 
 def _use_distributed_timeout_for_gloo(minutes: int) -> None:
-    # Miles' gloo group otherwise gets torch's 30-minute default. Ranks that load
-    # weights first wait in it while ranks on cold hosts are still reading them.
     timeout = max(timedelta(minutes=minutes), default_pg_timeout)
 
     def init_gloo_group():
