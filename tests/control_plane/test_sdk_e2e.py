@@ -438,20 +438,22 @@ def test_real_sdk_lists_and_deletes_checkpoints(tmp_path, monkeypatch) -> None:
         training.load_state(newest.tinker_path).result(timeout=30)
         assert loaded[-1] == str(second)
 
-        with pytest.raises(tinker.APIStatusError) as archive:
-            rest.get_checkpoint_archive_url_from_tinker_path(newest.tinker_path).result(
-                timeout=30
+        # Tinker 0.36 removed checkpoint archive URLs from the SDK.
+        if hasattr(rest, "get_checkpoint_archive_url_from_tinker_path"):
+            with pytest.raises(tinker.APIStatusError) as archive:
+                rest.get_checkpoint_archive_url_from_tinker_path(
+                    newest.tinker_path
+                ).result(timeout=30)
+            assert archive.value.status_code == 405
+            assert archive.value.body["error"] == "unsupported"
+            assert (
+                f"modal volume get spindle-checkpoints /{second.relative_to(root)}"
+                in archive.value.body["message"]
             )
-        assert archive.value.status_code == 405
-        assert archive.value.body["error"] == "unsupported"
-        assert (
-            f"modal volume get spindle-checkpoints /{second.relative_to(root)}"
-            in archive.value.body["message"]
-        )
-        with pytest.raises(tinker.NotFoundError):
-            rest.get_checkpoint_archive_url_from_tinker_path(
-                f"tinker://{training.model_id}/weights/missing"
-            ).result(timeout=30)
+            with pytest.raises(tinker.NotFoundError):
+                rest.get_checkpoint_archive_url_from_tinker_path(
+                    f"tinker://{training.model_id}/weights/missing"
+                ).result(timeout=30)
 
         rest.delete_checkpoint_from_tinker_path(newest.tinker_path).result(timeout=30)
         remaining = rest.list_checkpoints(training.model_id).result(timeout=30)
