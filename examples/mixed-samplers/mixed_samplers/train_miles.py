@@ -36,6 +36,28 @@ from .publication import latest_ref
 from .train import read_initial_rollouts, train
 
 
+def sampler_groups():
+    groups = []
+    for group in GROUPS:
+        settings = sampler_config(group).sglang_cfg
+        groups.append(
+            {
+                **group,
+                **{
+                    key: settings[key]
+                    for key in (
+                        "moe_runner_backend",
+                        "lora_backend",
+                        "kv_cache_dtype",
+                        "tp_size",
+                        "ep_size",
+                    )
+                },
+            }
+        )
+    return groups
+
+
 def previous_manifest(path, client_count):
     manifest = json.loads((path / "manifest.json").read_text())
     expected = {
@@ -47,14 +69,17 @@ def previous_manifest(path, client_count):
         "alpha": 32,
         "dataset": DATASET,
         "dataset_revision": DATASET_REVISION,
-        "groups": GROUPS,
         "top_p": TOP_P,
         "temperature": TEMPERATURE,
         "batch_per_client": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
         "clients": client_count,
         "client_seeds": [SEED + index * 1_000_000 for index in range(client_count)],
     }
-    if any(manifest.get(key) != value for key, value in expected.items()):
+    # Older manifests recorded the shared group definitions before Miles'
+    # LoRA runner overrides. Their executed sampler settings were the same.
+    if manifest.get("groups") not in (GROUPS, sampler_groups()) or any(
+        manifest.get(key) != value for key, value in expected.items()
+    ):
         raise ValueError("previous Miles run uses a different recipe or client seed")
     capacity = manifest["capacity"]
     if set(capacity) != {g["name"] for g in GROUPS} or any(
@@ -225,7 +250,7 @@ async def run_clients(
             "model_revision": config.model_revision,
             "dataset": DATASET,
             "dataset_revision": DATASET_REVISION,
-            "groups": GROUPS,
+            "groups": sampler_groups(),
             "capacity": dict(zip(gateways, capacity, strict=True)),
             "startup_capacity": dict(zip(gateways, measured, strict=True)),
             "initial_rollout_cache": str(args.initial_rollout_cache)
