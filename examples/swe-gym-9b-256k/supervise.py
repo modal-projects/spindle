@@ -1,8 +1,8 @@
-"""Keep the eight SWE-Gym clients running until each finishes its batches.
+"""Keep the public SWE-Gym worker running until each client finishes its batches.
 
 On a later attempt this stops the owned apps, redeploys them, clears the
-deployment failure, and starts the worker again. Each client resumes from
-``eight-job{n}-checkpoint.json``.
+deployment failure, and starts the worker again. Each client resumes from the
+``train-job{n}-checkpoint.json`` file that worker writes.
 """
 
 import json
@@ -14,16 +14,13 @@ import sys
 import time
 from pathlib import Path
 
-from swe_gym_lora_benchmark import atomic_json
-
-try:
-    import psutil
-except ImportError:
-    psutil = None
-
 ROOT = Path(__file__).resolve().parent
 RUN = ROOT / "run"
 SRC = ROOT.parents[1] / "src"
+EXAMPLE = (
+    "https://github.com/modal-labs/modal-examples/tree/"
+    "29c7c4929286d00903339ef863041592a99a2348/06_gpu_and_ml/swe_gym"
+)
 
 stop = False
 
@@ -37,15 +34,20 @@ signal.signal(signal.SIGTERM, on_stop)
 signal.signal(signal.SIGINT, on_stop)
 
 
-def progress(target_jobs=8):
+def atomic_json(path, value):
+    path = Path(path)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False))
+    temporary.replace(path)
+
+
+def progress(clients):
     counts = {}
-    latest = {}
-    for job in range(target_jobs):
-        path = RUN / f"eight-job{job}-checkpoint.json"
+    for job in range(clients):
+        path = RUN / f"train-job{job}-checkpoint.json"
         record = json.loads(path.read_text()) if path.exists() else {}
         counts[job] = record.get("step", -1) + 1
-        latest[job] = record.get("time", 0)
-    return counts, latest
+    return counts
 
 
 def modal_command(*args, environment=None):
@@ -60,6 +62,33 @@ def spindle_env():
     current = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(SRC) if not current else str(SRC) + os.pathsep + current
     return env
+
+
+def worker_command(manifest):
+    worker = os.environ.get("SWE_GYM_WORKER")
+    if not worker:
+        raise SystemExit(f"Set SWE_GYM_WORKER to swe_gym.py from {EXAMPLE}")
+    if shutil.which("uv") is None:
+        raise SystemExit("uv is required to run the SWE-Gym example script")
+    return [
+        "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.12",
+        "--script",
+        worker,
+        "--",
+        "--clients",
+        str(manifest["clients"]),
+        "--steps",
+        str(manifest["steps_per_job"]),
+        "--hours",
+        str(manifest["hours"]),
+        "--output",
+        str(RUN),
+        "--resume",
+    ]
 
 
 def cleanup(manifest):
@@ -89,6 +118,7 @@ def finished(counts, steps):
 def main():
     manifest = json.loads((RUN / "launch.json").read_text())
     steps = manifest["steps_per_job"]
+    clients = manifest["clients"]
     state = {"state": "starting", "pid": os.getpid(), "started": time.time()}
     failures = 0
     attempt = 0
@@ -97,7 +127,7 @@ def main():
         and not stop
         and not (RUN / "STOP_NOW").exists()
     ):
-        before, _latest = progress()
+        before = progress(clients)
         if finished(before, steps):
             state["state"] = "completed"
             break
@@ -129,9 +159,12 @@ def main():
                 retry.extend(["--env", manifest["environment"]])
             retry.append(manifest["definition_id"])
             subprocess.run(retry, env=env, check=True, timeout=120)
+        worker_env = os.environ.copy()
+        worker_env["TINKER_BASE_URL"] = manifest["base_url"]
         with (RUN / f"worker-{attempt}.log").open("w") as log:
             child = subprocess.Popen(
-                [sys.executable, "-u", str(ROOT / "train.py")],
+                worker_command(manifest),
+                env=worker_env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -150,7 +183,7 @@ def main():
         try:
             while child.poll() is None:
                 now = time.time()
-                counts, _latest = progress()
+                counts = progress(clients)
                 state.update(heartbeat=now, completed_batches=counts)
                 if stop or (RUN / "STOP_NOW").exists():
                     raise RuntimeError("stop requested")
@@ -164,7 +197,7 @@ def main():
                         for token in ("out of memory", "outofmemory", "nonfinite")
                     )
                     raise RuntimeError("worker requested recovery: " + failure)
-                if shutil_free() < 20 * 1024**3:
+                if shutil.disk_usage(ROOT).free < 20 * 1024**3:
                     raise RuntimeError("less than 20 GiB local disk remains")
                 if events.exists():
                     with events.open() as stream:
@@ -179,31 +212,30 @@ def main():
                                 break
                             offset = stream.tell()
                             job = row.get("job")
-                            if row.get("phase") == "eight" and job is not None:
-                                activity[job] = row["time"]
-                                if row["event"] == "client_ready":
-                                    starts[job] = row["time"]
-                                    updates[job] = row["time"]
-                                if row["event"] in ("optimizer_step", "step_done"):
-                                    updates[job] = row["time"]
+                            if not isinstance(job, int):
+                                continue
+                            activity[job] = row["time"]
+                            starts.setdefault(job, row["time"])
+                            updates.setdefault(job, row["time"])
+                            if row["event"] == "step_done":
+                                updates[job] = row["time"]
                 if not starts and now - started > 3600:
                     raise TimeoutError("No client started within one hour")
-                counts, _latest = progress()
+                counts = progress(clients)
                 if finished(counts, steps):
                     state["state"] = "completed"
                     break
                 for job, started_at in starts.items():
-                    if counts[job] >= steps:
+                    if counts.get(job, 0) >= steps:
                         continue
                     if now - activity.get(job, started_at) > 1200:
                         raise TimeoutError(f"Client {job}: no events for 20 minutes")
                     if now - updates.get(job, started_at) > 10800:
                         raise TimeoutError(
-                            f"Client {job}: no optimizer/checkpoint progress for three hours"
+                            f"Client {job}: no checkpoint progress for three hours"
                         )
                 if now - last_watch > 60:
                     last_watch = now
-                    record_host(now, child.pid)
                     for app in manifest["monitored_apps"]:
                         since = time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_logs)
@@ -263,7 +295,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
-        after, _latest = progress()
+        after = progress(clients)
         state["completed_batches"] = after
         if finished(after, steps):
             state["state"] = "completed"
@@ -279,24 +311,11 @@ def main():
     atomic_json(RUN / "supervisor.json", state)
 
 
-def shutil_free():
-    return shutil.disk_usage(ROOT).free
-
-
-def record_host(now, pid):
-    if psutil is None:
-        return
-    host = {
-        "time": now,
-        "cpu_percent": psutil.cpu_percent(),
-        "available_memory": psutil.virtual_memory().available,
-        "worker_rss": psutil.Process(pid).memory_info().rss,
-    }
-    with (RUN / "host-resources.jsonl").open("a") as handle:
-        handle.write(json.dumps(host) + "\n")
-
-
 if __name__ == "__main__":
+    if not os.environ.get("SWE_GYM_WORKER"):
+        raise SystemExit(f"Set SWE_GYM_WORKER to swe_gym.py from {EXAMPLE}")
+    if shutil.which("uv") is None:
+        raise SystemExit("uv is required to run the SWE-Gym example script")
     try:
         main()
     except BaseException as exc:

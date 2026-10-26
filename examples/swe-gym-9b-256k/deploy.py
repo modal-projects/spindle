@@ -18,9 +18,8 @@ from spindle.providers.modal.lora_pool import LoraPoolSpec
 
 ROOT = Path(__file__).resolve().parent
 RUN = ROOT / "run"
-SANDBOX_APP = "swe-gym-9b-256k-sandboxes"
+SANDBOX_APP = "example-swe-gym-sandboxes"
 MODEL_REVISION = "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-STAGGER_SECONDS = 450
 HOURS = 168
 STEPS = 100
 
@@ -105,7 +104,6 @@ def main():
         "steps_per_job": STEPS,
         "hours": HOURS,
         "clients": 8,
-        "client_stagger_seconds": STAGGER_SECONDS,
         "base_url": base_url,
         "trainer_app": definition.trainer_app_name,
         "sampler_app": pool.app_name,
@@ -114,9 +112,6 @@ def main():
         "frontend": recipe.platform["frontend"],
         "definition_id": definition.definition_id,
         "sandbox_app": SANDBOX_APP,
-        "validated_tasks": len(
-            json.loads((ROOT / "data" / "validated_workload_ids.json").read_text())
-        ),
         "absolute_deadline": now + HOURS * 3600,
         "launched_at": now,
     }
