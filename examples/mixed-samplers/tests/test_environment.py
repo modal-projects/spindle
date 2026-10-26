@@ -81,6 +81,46 @@ def test_short_commands_keep_the_existing_execution_path(tmp_path):
     assert environment.paths == []
 
 
+def test_baseline_copy_waits_for_automatic_git_gc(tmp_path, monkeypatch):
+    # Force Git's loose-object heuristic to run real automatic GC on commit.
+    # It samples objects/17; select blobs in that bucket deterministically.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "gc.auto")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "1")
+    selected = 0
+    for index in range(100_000):
+        data = f"baseline file {index}\n".encode()
+        header = f"blob {len(data)}\0".encode()
+        if hashlib.sha1(header + data).hexdigest().startswith("17"):
+            (tmp_path / f"file-{index}.txt").write_bytes(data)
+            selected += 1
+            if selected == 8:
+                break
+    assert selected == 8
+
+    class CheckingEnvironment(ShellEnvironment):
+        def execute(self, command, *, cwd, timeout=10):
+            if command.startswith("cp -a -- .git"):
+                git_dir = Path(cwd) / ".git"
+                assert list((git_dir / "objects/pack").glob("*.pack"))
+                assert not list(git_dir.glob("gc.pid*"))
+            return super().execute(command, cwd=cwd, timeout=timeout)
+
+    environment = CheckingEnvironment()
+    monkeypatch.setattr(environments, "create_environment", lambda task: environment)
+    task = {"cwd": str(tmp_path)}
+    _, baseline = environments.setup(task)
+    try:
+        checked = environment.execute(
+            f"git --git-dir={shlex.quote(baseline['git_dir'])} fsck --full",
+            cwd=str(tmp_path),
+        )
+        assert checked["returncode"] == 0, checked["output"]
+        assert environments.capture_patch(environment, task, baseline) == b""
+    finally:
+        shutil.rmtree(baseline["git_dir"])
+
+
 @pytest.mark.parametrize(
     "operation", ["metadata_removed", "worktree_replaced", "worktree_deleted"]
 )

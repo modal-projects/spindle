@@ -52,8 +52,12 @@ def setup(task):
         git_dir = f"/tmp/spindle-baseline-{uuid.uuid4().hex}.git"
         # Start from one root commit. This removes all pre-task history, refs,
         # reflogs, unreachable objects, hooks, remotes and repository config.
+        # Finish automatic Git maintenance before copying the new baseline;
+        # detached GC can otherwise remove lock files or objects during cp.
         result = environment.execute(
-            "find . -name .git -prune -exec rm -rf -- {} + && git init -q && git add -A && "
+            "find . -name .git -prune -exec rm -rf -- {} + && git init -q && "
+            "git config gc.autoDetach false && git config maintenance.autoDetach false && "
+            "git add -A && "
             "git -c user.name=Spindle -c user.email=spindle@example.invalid "
             "commit -qm baseline --allow-empty && git rev-parse HEAD",
             cwd=task["cwd"],
