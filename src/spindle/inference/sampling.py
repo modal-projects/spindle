@@ -350,15 +350,13 @@ async def _sample_one(
                         stats.get("wait_s", 0.0) + dispatched.routing["wait_s"]
                     )
             else:
-                request = client.build_request(
-                    "POST",
+                response = await client.post(
                     f"{gateway_url}/generate",
                     json=body,
                     headers=headers,
                     timeout=request_timeout,
                     extensions={"trace": HTTPTrace(attempt_result).record},
                 )
-                response = await client.send(request)
         except httpx.TransportError as exc:
             attempt_result["error_type"] = type(exc).__name__
             cause = exc
