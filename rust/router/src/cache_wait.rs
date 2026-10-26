@@ -125,8 +125,11 @@ impl CacheWait {
                 }
             }
         }
+        // A small fraction of a long prompt can still save seconds of prefill.
         let use_cache = available.iter().any(|c| {
-            balanced(c) && c.cached_tokens as f64 > request.prompt_tokens as f64 * self.threshold
+            balanced(c)
+                && (c.cached_tokens as f64 > request.prompt_tokens as f64 * self.threshold
+                    || c.cached_tokens as f64 / prefill_rate >= SUBSTANTIAL_PREFILL_SECONDS)
         });
         let rank = |c: &Candidate| {
             (
