@@ -9,22 +9,27 @@ from .image_dependencies import (
 
 SGLANG_IMAGE = "lmsysorg/sglang:v0.5.21"
 SGLANG_REPOSITORY = "https://github.com/modal-projects/sglang.git"
-# Modal caches this layer by command, so fetching a branch by name would keep
-# serving an older head.
-SGLANG_COMMIT = "a3e0e1725406b9330bd062520d4f99d0aa73ee4f"
+SGLANG_BRANCH = "spindle-sglang-v0.5.21"
+SGLANG_REVISION = "a3e0e1725406b9330bd062520d4f99d0aa73ee4f"
 
 image = (
     modal.Image.from_registry(SGLANG_IMAGE)
     .entrypoint([])
     .apt_install("git")
+    # The base image sets `never`, which loads its bundled binding and ignores
+    # the Rust sources copied below.
+    .env({"SGLANG_RUST_BUILD_MODE": "auto"})
     .run_commands(
         "rm -rf /tmp/spindle-sglang-overlay"
-        " && git init -q /tmp/spindle-sglang-overlay"
-        f" && git -C /tmp/spindle-sglang-overlay fetch --depth=1 {SGLANG_REPOSITORY} {SGLANG_COMMIT}"
-        " && git -C /tmp/spindle-sglang-overlay checkout -q FETCH_HEAD",
+        f" && git clone --filter=blob:none --single-branch --branch {SGLANG_BRANCH}"
+        f" {SGLANG_REPOSITORY} /tmp/spindle-sglang-overlay"
+        f" && git -C /tmp/spindle-sglang-overlay checkout {SGLANG_REVISION}",
         "cp -a /tmp/spindle-sglang-overlay/python/. /sgl-workspace/sglang/python/"
+        " && rm -rf /sgl-workspace/sglang/rust"
+        " && cp -a /tmp/spindle-sglang-overlay/rust /sgl-workspace/sglang/rust"
         " && rm -rf /tmp/spindle-sglang-overlay",
-        'python -c "import sglang.srt.mem_cache.rust_tree_core.mem_cache"',
+        "python -c 'from sglang.srt.mem_cache.rust_tree_core.extension import bindings; "
+        'assert hasattr(bindings.RustUnifiedTreeCoreBinding, "routing_snapshot_delta")\'',
     )
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")
