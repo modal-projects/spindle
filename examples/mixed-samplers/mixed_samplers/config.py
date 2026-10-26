@@ -110,6 +110,13 @@ def sampler_config(group):
         if group["quantization"] == "fp8"
         else {},
         overrides={
+            # RTX placements may span GPUs without CUDA peer access. The model's
+            # multimodal startup check must transfer features through the CPU.
+            **(
+                {"sglang_cfg.mm_feature_transport": "cpu"}
+                if group["name"] == "rtx6000-bf16"
+                else {}
+            ),
             "sglang_cfg.tp_size": group["gpus"],
             "sglang_cfg.ep_size": group["gpus"],
             "sglang_cfg.quantization": group["quantization"],
