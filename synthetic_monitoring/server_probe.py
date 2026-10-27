@@ -279,12 +279,12 @@ def _row(
     }
 
 
-def _post_report(rows: list[dict]) -> None:
+def _post_report(rows: list[dict], channel: str | None = None) -> None:
     from slack_sdk import WebClient
     from slack_sdk.errors import SlackApiError
 
     client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
-    channel = os.environ["SLACK_CHANNEL_ID"]
+    channel = channel or os.environ["SLACK_CHANNEL_ID"]
     try:
         client.conversations_join(channel=channel)
     except SlackApiError:
