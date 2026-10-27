@@ -842,10 +842,15 @@ class ControlPlane:
         model_id, seq_id = parse_request_id(request_id)
         if model_id.startswith("sample-"):
             return await self._retrieve_sample(request_id, model_id, seq_id, timeout)
-        model = await self.get_model(model_id)
         if seq_id == 0:
-            return await self._retrieve_creation(request_id, model)
-        export = await self._sampler_export_submission(model_id, seq_id)
+            return await self._retrieve_creation(
+                request_id, await self.get_model(model_id)
+            )
+        model, export, placement = await asyncio.gather(
+            self.get_model(model_id),
+            self._sampler_export_submission(model_id, seq_id),
+            self._placement(model_id),
+        )
         if export is not None:
             completed = await self._completed_sampler_export(export)
             if completed is not None:
@@ -854,7 +859,7 @@ class ControlPlane:
                     FutureResolutionStatus.COMPLETE,
                     result=completed,
                 )
-        placement = await self._placement(model_id)
+            placement = await self._placement(model_id)
         if placement is None:
             if await self.kv.get(session_closed_key(model.session_id)) is not None:
                 return FutureResolution(
