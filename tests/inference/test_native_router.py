@@ -12,13 +12,6 @@ import pytest
 
 from spindle.inference.native_router import NativeRouter
 
-RATES = dict(
-    prefill_tokens_per_second=1000.0,
-    decode_tokens_per_second=100.0,
-    gpu_lora_seconds=0.1,
-    registration_seconds=1.0,
-)
-
 
 @pytest.fixture
 def worker():
@@ -69,8 +62,6 @@ def worker():
                         gpu_adapters=["adapter/v1"],
                         pending_adapters=[],
                         request_ids=[],
-                        prefill_tokens=0,
-                        decode_tokens=0,
                     ),
                 ),
                 replica=replica,
@@ -148,7 +139,7 @@ def make_router(worker, policy="cache_wait"):
         headers={},
         policy=policy,
         capacity=24,
-        rates=RATES,
+        prefill_tokens_per_second=1000.0,
         balance_absolute=worker.get("balance_absolute", 4),
         balance_relative=worker.get("balance_relative", 1.25),
     )
