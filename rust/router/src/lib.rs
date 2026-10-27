@@ -147,8 +147,15 @@ struct Reservation {
     replica: String,
     adapter: String,
 }
+/// How a reservation ended: completed or cancelled, rejected as busy, or failed.
+#[derive(Clone, Copy)]
+pub enum Outcome {
+    Released,
+    Busy,
+    Failed,
+}
 
-/// Built away from the asyncio thread; installation only swaps immutable state.
+/// Built away from the request path so installation holds the lock only to merge.
 pub struct Snapshot {
     replicas: Vec<Replica>,
     observed: Instant,
@@ -187,16 +194,12 @@ pub struct Router {
 }
 impl Router {
     fn new(
-        policy: &str,
         capacity: usize,
         prefill_rate: f64,
         balance_absolute: usize,
         balance_relative: f64,
         cache_threshold: f64,
     ) -> Result<Self, String> {
-        if policy != "cache_wait" {
-            return Err(String::from("unknown routing policy"));
-        }
         if !balance_relative.is_finite() || balance_relative < 1.0 {
             return Err(String::from("balance_relative must be finite and >= 1"));
         }
@@ -403,8 +406,6 @@ impl Router {
                     let mut d = Decision::wait("wait");
                     d.reason = why;
                     d.retry_after = seconds;
-                    d.available_replicas = available;
-                    d.best_cached_tokens = best_cached;
                     return Ok(d);
                 }
                 cache_wait::Selection::Route(index, why) => {
@@ -453,20 +454,20 @@ impl Router {
         })
     }
 
-    /// Completion/cancellation always releases. Only real failures affect health.
-    fn complete(&mut self, request_id: &str, outcome: &str) -> Result<(), String> {
-        if !["ok", "busy", "failed", "cancelled"].contains(&outcome) {
-            return Err(String::from("unknown routing outcome"));
-        }
+    /// Every outcome releases the reservation. Only real failures affect health.
+    fn complete(&mut self, request_id: &str, outcome: Outcome) {
         if let Some(r) = self.reservations.remove(request_id) {
             let now = self.clock.elapsed().as_secs_f64();
-            if outcome == "busy" {
-                self.busy_until.insert(r.replica, now + 0.5);
-            } else if outcome == "failed" {
-                self.failed_until.insert(r.replica, now + 2.0);
+            match outcome {
+                Outcome::Released => {}
+                Outcome::Busy => {
+                    self.busy_until.insert(r.replica, now + 0.5);
+                }
+                Outcome::Failed => {
+                    self.failed_until.insert(r.replica, now + 2.0);
+                }
             }
         }
-        Ok(())
     }
 
     #[cfg(test)]
@@ -480,11 +481,11 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
-    fn router(policy: &str, capacity: usize) -> Router {
-        Router::new(policy, capacity, 1000., 4, 1.25, 0.5).unwrap()
+    fn router(capacity: usize) -> Router {
+        Router::new(capacity, 1000., 4, 1.25, 0.5).unwrap()
     }
     fn swe_router() -> Router {
-        Router::new("cache_wait", 136, 10463.96, 64, 2., 0.5).unwrap()
+        Router::new(136, 10463.96, 64, 2., 0.5).unwrap()
     }
     fn request(adapter: &str) -> Request {
         Request::new(adapter.into(), "problem".into(), vec![42; 1024], 100).unwrap()
@@ -510,7 +511,7 @@ mod tests {
     }
     #[test]
     fn reservations_bound_admission_and_busy_is_not_health_failure() {
-        let mut r = router("cache_wait", 1);
+        let mut r = router(1);
         let q = request("m/v1");
         r.update_snapshot(&json!([replica("a", 0, vec![], vec![])]).to_string())
             .unwrap();
@@ -526,7 +527,7 @@ mod tests {
                 .status,
             "wait"
         );
-        r.complete("1", "busy").unwrap();
+        r.complete("1", Outcome::Busy);
         assert_eq!(r.pending(), 0);
         assert!(r.failed_until.is_empty());
         assert_eq!(
@@ -542,12 +543,12 @@ mod tests {
                 .status,
             "route"
         );
-        r.complete("2", "cancelled").unwrap();
+        r.complete("2", Outcome::Released);
         assert_eq!(r.pending(), 0);
     }
     #[test]
     fn snapshot_does_not_double_count_our_request() {
-        let mut r = router("cache_wait", 2);
+        let mut r = router(2);
         let q = request("m/v1");
         let mut a = replica("a", 0, vec![], vec![]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
@@ -564,7 +565,7 @@ mod tests {
     }
     #[test]
     fn stale_or_missing_observations_never_route() {
-        let mut r = router("cache_wait", 1);
+        let mut r = router(1);
         let q = request("m/v1");
         assert_eq!(
             r.select_destination(&q, "1".into(), &mut fresh())
@@ -584,7 +585,7 @@ mod tests {
     }
     #[test]
     fn a_missed_poll_keeps_the_last_observation_until_it_ages_out() {
-        let mut r = router("cache_wait", 8);
+        let mut r = router(8);
         let q = request("m/v1");
         let mut a = replica("a", 0, vec![], vec![]);
         a["work"]["age_seconds"] = json!(2.5);
@@ -602,7 +603,7 @@ mod tests {
     }
     #[test]
     fn invalid_rows_are_dropped_without_discarding_the_snapshot() {
-        let mut r = router("cache_wait", 8);
+        let mut r = router(8);
         let q = request("m/v1");
         let mut negative = replica("negative", 0, vec![], vec![]);
         negative["work"]["age_seconds"] = json!(-1.);
@@ -632,7 +633,7 @@ mod tests {
     }
     #[test]
     fn group_hints_are_scoped_and_released() {
-        let mut r = router("cache_wait", 8);
+        let mut r = router(8);
         r.update_snapshot(
             &json!([
                 replica("a", 0, vec![], vec![]),
@@ -661,8 +662,8 @@ mod tests {
                 .status,
             "route"
         );
-        r.complete("leader", "cancelled").unwrap();
-        r.complete("sibling", "ok").unwrap();
+        r.complete("leader", Outcome::Released);
+        r.complete("sibling", Outcome::Released);
         drop(leader);
         drop(sibling);
         drop(separate);
@@ -719,7 +720,7 @@ mod tests {
     #[test]
     fn long_partial_prefix_outranks_load() {
         for (hit, expected) in [(1024, "cached"), (128, "spare")] {
-            let mut r = router("cache_wait", 8);
+            let mut r = router(8);
             let q = Request::new("m/v1".into(), "problem".into(), vec![42; 4096], 100).unwrap();
             let a = replica(
                 "cached",
@@ -750,7 +751,7 @@ mod tests {
             row["work"]["waiting_requests"] = json!(1);
         }
         for (target, reason) in [(cached, "cached_saturated"), (grouped, "adapter_saturated")] {
-            let mut r = router("cache_wait", 2);
+            let mut r = router(2);
             r.update_snapshot(&json!([target, spare]).to_string())
                 .unwrap();
             let mut admission = fresh();
@@ -769,7 +770,7 @@ mod tests {
 
     #[test]
     fn capacity_waits_do_not_start_the_affinity_budget() {
-        let mut r = router("cache_wait", 1);
+        let mut r = router(1);
         let q = request("m/v1");
         r.update_snapshot(&json!([replica("a", 1, vec![], vec![])]).to_string())
             .unwrap();
