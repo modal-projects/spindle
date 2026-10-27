@@ -33,7 +33,7 @@ uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.2
 
 This pins a release tag. Releases and their changes are listed in [CHANGELOG.md](CHANGELOG.md), and `uv run spindle --version` prints the installed version and commit.
 
-**If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients don't need Modal credentials or proxy tokens.
+**If someone has already deployed Spindle for you, skip to [Run a Tinker script](#run-a-tinker-script)** with the server URL and Spindle API key they provide. API clients also need a Modal proxy token allowed in the deployment environment; they do not need a Modal API token.
 
 ## Set up the server
 
@@ -56,7 +56,7 @@ Spindle uses four separate credentials:
 | --- | --- | --- |
 | Modal API token / local profile | Manage Modal resources | Deployer |
 | `TINKER_API_KEY` in the `spindle-api` secret | Authenticate calls to the Spindle API | Deployer and API clients |
-| Proxy token in the `spindle-proxy` secret | Let Spindle reach protected sampler pools | Deployed control plane and trainers |
+| Proxy token in the `spindle-proxy` secret | Authenticate HTTP requests to the API and sampler pools | API clients, deployed control plane, and trainers |
 | `HF_TOKEN` in the `huggingface-secret` secret | Download base model weights from Hugging Face | Deployed trainers |
 
 Generate an API key for your Spindle server and store it as a [Modal Secret](https://modal.com/docs/guide/secrets):
@@ -135,6 +135,14 @@ Without a terminal and without arguments, `spindle deploy` exits with this guida
 configs live in [`src/spindle/configs`](src/spindle/configs). Each deploy sets the complete list of configs the
 server serves, so include every config you want to keep serving.
 
+When upgrading from Web Functions, use the new Server URL and update all clients
+to send proxy headers before resuming traffic. Confirm the old Web Function URL
+is no longer reachable after deployment. Servers return HTTP 503 while starting
+from zero containers; clients must retry these transient responses. All Servers
+require proxy authentication; the control plane also requires the Spindle API key.
+The CI step `Require authenticated Modal Servers and forbid Web Functions` audits
+every tracked Python file, including examples, on pull requests and pushes to main.
+
 A single deployment can serve multiple concurrent independent training jobs across different base models, training parameterizations, and experiment scales.
 GPUs are allocated on demand upon the first training/inference requests, so the first step may incur longer cold start and model compilation times. See
 [cold starts and capacity configuration](docs/full-fine-tunes.md#performance-and-behavior-considerations)
@@ -195,19 +203,25 @@ for row in rows:
 
 ## Run a Tinker script
 
-Any Tinker-compatible script can be run out of the box against a Spindle server just by changing the base URL and API key.
+Any Tinker-compatible script can be run out of the box against a Spindle server by setting the base URL, API key, and Modal proxy authentication headers.
 
 Supported Tinker SDK versions: `>=0.24.1`. CI tests the minimum version, the version
 the server images pin, and the latest release. Deploy the current Spindle server before
 upgrading clients: SDK 0.25 requires protobuf training and sampling responses, and SDK
 0.26 requires per-sequence ids on sampling submissions.
 
-First, set these two variables from above:
+Set the URL and API key, plus a proxy token allowed in the server’s environment:
 
 ```bash
-export TINKER_BASE_URL='https://your-server-url.modal.run'
+export TINKER_BASE_URL='https://your-server-url'
 export TINKER_API_KEY='your-spindle-api-key'
+export MODAL_PROXY_TOKEN_ID='<Modal-Key>'
+export MODAL_PROXY_TOKEN_SECRET='<Modal-Secret>'
 ```
+
+`proxy_client_kwargs()` selects the custom-header option for Tinker 0.24 or 0.25.
+For direct HTTP requests, include both `Modal-Key` / `Modal-Secret` and `X-API-Key`.
+External scripts that construct their own Tinker clients must pass these headers too.
 
 As an example, the following script implements a single step RL update, which exercises the full generation/training/sampler publication path.
 
@@ -215,9 +229,11 @@ As an example, the following script implements a single step RL update, which ex
 import os
 
 import tinker
+from spindle import proxy_client_kwargs
 from tinker import types
 
 service = tinker.ServiceClient(
+    **proxy_client_kwargs(),
     base_url=os.environ["TINKER_BASE_URL"],
     api_key=os.environ["TINKER_API_KEY"],
 )
@@ -292,7 +308,9 @@ from spindle.engines import qwen3_5_4b_full_64k
 
 engine = qwen3_5_4b_full_64k()
 with spindle.run(engine=engine) as (url, api_key):
-    service = tinker.ServiceClient(base_url=url, api_key=api_key)
+    service = tinker.ServiceClient(
+        base_url=url, api_key=api_key, **spindle.proxy_client_kwargs()
+    )
     training = spindle.create_full_training_client(service, engine.model)
     # Train and sample through the Tinker SDK here.
 ```

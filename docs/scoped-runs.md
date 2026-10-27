@@ -1,7 +1,8 @@
 # Scoped runs
 
 Start an engine and connect with Tinker. Other processes can use the same URL and
-API key while the context is open.
+API key while the context is open, along with a Modal proxy token allowed in the
+run’s environment.
 
 ```python
 import spindle
@@ -14,7 +15,9 @@ with spindle.run(
     warm=True,
     latest=spindle.Pool(min_containers=1, max_containers=2),
 ) as (url, api_key):
-    service = tinker.ServiceClient(base_url=url, api_key=api_key)
+    service = tinker.ServiceClient(
+        base_url=url, api_key=api_key, **spindle.proxy_client_kwargs()
+    )
     trainer = spindle.create_full_training_client(service, engine.model)
     # Use Tinker's training and sampling methods.
 ```
@@ -26,7 +29,9 @@ when a model is created. Base and pinned samplers have a zero minimum.
 
 Use your Modal profile and the `spindle-proxy` secret, or pass
 `proxy_secret=modal.Secret.from_name(...)`. An API key is generated for each run
-unless you supply `api_key`. App names default to `spindle-<hash>`.
+unless you supply `api_key`. The calling process must also export
+`MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`; a remote controller must
+mount the proxy secret to use the API. App names default to `spindle-<hash>`.
 
 ## Recovering a lost trainer
 

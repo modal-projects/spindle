@@ -289,6 +289,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
 
     @app.server(
         name="Server",
+        unauthenticated=False,
         serialized=True,
         image=image if image is not None else image_for("sglang"),
         gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),

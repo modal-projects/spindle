@@ -24,6 +24,7 @@ from spindle.telemetry.otlp import sample_trace
 from spindle.version import COMMIT_ENV, source_commit
 
 from .app_tags import app_tags
+from .asgi import ASGIServer
 from .checkpoint_storage import (
     CHECKPOINT_ROOT,
     ModalCheckpointStorage,
@@ -707,23 +708,34 @@ def _plane():
     )
 
 
-@app.function(
+@app.server(
     image=image,
     name="server",
-    routing_region=ROUTING_REGION,
-    timeout=20 * 60,
+    unauthenticated=False,
+    routing_region=ROUTING_REGION or "us-east",
+    port=8000,
+    target_concurrency=16,
+    startup_timeout=60,
+    exit_grace_period=20 * 60,
     volumes={CHECKPOINT_ROOT: checkpoint_volume},
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],
 )
-@modal.concurrent(max_inputs=128, target_inputs=16)
-@modal.asgi_app(requires_proxy_auth=False)
-def server():
-    return create_control_plane_app(
-        _plane(),
-        DEFINITIONS,
-        api_key=os.environ["TINKER_API_KEY"],
-        checkpoint_volume=CHECKPOINT_VOLUME_NAME,
-    )
+class server:
+    @modal.enter()
+    def start(self):
+        self.http = ASGIServer(
+            create_control_plane_app(
+                _plane(),
+                DEFINITIONS,
+                api_key=os.environ["TINKER_API_KEY"],
+                checkpoint_volume=CHECKPOINT_VOLUME_NAME,
+            )
+        )
+        self.http.start()
+
+    @modal.exit()
+    def stop(self):
+        self.http.stop()
 
 
 async def _lose_undefined_models() -> tuple[str, ...]:

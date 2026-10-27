@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import os
 import time
 
 from tinker import ServiceClient, TrainingClient, types
@@ -7,6 +9,24 @@ from tinker.lib.api_future_impl import _APIFuture
 from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
 from tinker.lib.public_interfaces.api_future import AwaitableConcurrentFuture
 from tinker.lib.queue_state_logger import QueueStateLogger
+
+
+def proxy_auth_headers() -> dict[str, str]:
+    """Modal proxy credentials for requests to Spindle Servers."""
+    return {
+        "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
+        "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
+    }
+
+
+def proxy_client_kwargs() -> dict[str, dict[str, str]]:
+    """Header options for an unmodified Tinker 0.24 or 0.25 ServiceClient."""
+    option = (
+        "default_headers_overrides"
+        if "default_headers_overrides" in inspect.signature(ServiceClient).parameters
+        else "default_headers"
+    )
+    return {option: proxy_auth_headers()}
 
 
 def _create_full_training_client_submit(

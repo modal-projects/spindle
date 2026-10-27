@@ -15,6 +15,8 @@ import modal
 from stitch.pools.modal_flash import ModalFlashPool, list_flash_containers
 from stitch.types import VersionRef
 
+from spindle.client import proxy_auth_headers
+
 from .deployment_configs import (
     PLATFORM_ENV,
     POOL_CONFIG_ENV,
@@ -24,13 +26,6 @@ from .deployment_configs import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def proxy_auth_headers() -> dict[str, str]:
-    return {
-        "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
-        "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
-    }
 
 
 @dataclass(frozen=True)

@@ -30,7 +30,10 @@ image = control_image(
 @app.function(
     image=image,
     volumes={"/runs": volume},
-    secrets=[modal.Secret.from_name("spindle-api")],
+    secrets=[
+        modal.Secret.from_name("spindle-api"),
+        modal.Secret.from_name("spindle-proxy"),
+    ],
     timeout=24 * 3600,
     memory=8192,
     env={"MODAL_ENVIRONMENT": os.environ.get("MODAL_ENVIRONMENT", "")},
