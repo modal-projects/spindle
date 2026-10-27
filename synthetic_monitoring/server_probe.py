@@ -9,6 +9,8 @@ Test it out with:
 
 from __future__ import annotations
 
+import io
+import math
 import os
 import time
 import traceback
@@ -26,6 +28,7 @@ SHARED_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SAMPLE_PROMPT = "What is 2 + 2? Answer with only the number."
 CALL_TIMEOUT_S = 60 * 60
 CLEANUP_GRACE_S = 5 * 60
+LOOKBACK_S = 90 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ probe_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .uv_sync(uv_project_dir=str(REPO_ROOT), extra_options="--no-dev")
-    .uv_pip_install("slack-sdk==3.27.1")
+    .uv_pip_install("slack-sdk==3.27.1", "matplotlib==3.10.1")
     .env({"MODAL_ENVIRONMENT": MODAL_ENV})
     .add_local_python_source("spindle", "synthetic_monitoring")
 )
@@ -153,6 +156,90 @@ def slack_report_blocks(
     ]
 
 
+_CHART_BG = "#181818"
+_CHART_PANEL = "#232323"
+_CHART_GRID = "#2f2f2f"
+_CHART_SPINE = "#464646"
+_CHART_TEXT = "#a3a3a3"
+_CHART_TITLE = "#d1d1d1"
+_CHART_BAR = "#85aef8"
+
+
+def _style_history_axes(ax) -> None:
+    ax.set_facecolor(_CHART_PANEL)
+    ax.set_axisbelow(True)
+    ax.yaxis.grid(True, color=_CHART_GRID, linewidth=0.8)
+    ax.xaxis.grid(False)
+    ax.tick_params(colors=_CHART_TEXT, length=3, width=0.8)
+    ax.xaxis.label.set_color(_CHART_TEXT)
+    ax.yaxis.label.set_color(_CHART_TEXT)
+    ax.title.set_color(_CHART_TITLE)
+    for spine in ax.spines.values():
+        spine.set_color(_CHART_SPINE)
+        spine.set_linewidth(0.9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def render_timing_history_chart(history: list[RunPoint], *, probe_name: str) -> bytes:
+    from matplotlib import pyplot
+
+    cutoff = time.time() - LOOKBACK_S
+    points = [p for p in history if p.status == "success" and p.ts >= cutoff]
+    phases: list[str] = []
+    for point in points:
+        for phase in point.timings:
+            if phase not in phases:
+                phases.append(phase)
+    if not phases:
+        return b""
+
+    series = {phase: [p.timings.get(phase) for p in points] for phase in phases}
+    tick_labels = [
+        datetime.fromtimestamp(p.ts, tz=timezone.utc).strftime("%m-%d\n%H:%M")
+        for p in points
+    ]
+    xs = list(range(len(points)))
+    n_cols = max(1, math.ceil(math.sqrt(len(phases))))
+    n_rows = math.ceil(len(phases) / n_cols)
+    fig, axes = pyplot.subplots(
+        n_rows,
+        n_cols,
+        figsize=(2 + 4 * n_cols, 2 + 4.2 * n_rows),
+        squeeze=False,
+        sharey=False,
+        layout="constrained",
+    )
+    fig.patch.set_facecolor(_CHART_BG)
+    fig.suptitle(
+        f"{probe_name} (n={len(points)} runs)",
+        color=_CHART_TITLE,
+        fontsize=13,
+        fontweight="medium",
+    )
+    for i, phase in enumerate(phases):
+        ax = axes[i // n_cols][i % n_cols]
+        for x, y in zip(xs, series[phase], strict=True):
+            if y is not None:
+                ax.bar(x, y, color=_CHART_BAR, width=0.72, zorder=2)
+        ax.set_title(phase.replace("_", " "), fontsize=10, pad=10)
+        ax.set_ylabel("seconds")
+        ax.set_xticks(xs)
+        ax.set_xticklabels(tick_labels, fontsize=7)
+        ax.ticklabel_format(axis="y", style="plain", useOffset=False)
+        _style_history_axes(ax)
+        if i // n_cols == n_rows - 1:
+            ax.set_xlabel("time (UTC)")
+    for j in range(len(phases), n_rows * n_cols):
+        axes[j // n_cols][j % n_cols].set_visible(False)
+    fig.get_layout_engine().set(h_pad=0.18, hspace=0.18)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=_CHART_BG)
+    pyplot.close(fig)
+    return buf.getvalue()
+
+
 def _format_error(exc: BaseException, subject: str, timeout_s: int) -> str:
     message = str(exc)
     if not message and isinstance(exc, TimeoutError):
@@ -214,6 +301,25 @@ def _post_report(rows: list[dict]) -> None:
     for row in rows:
         try:
             if row["status"] == "success":
+                png = render_timing_history_chart(
+                    [
+                        RunPoint(**item)
+                        for item in _history_dict().get(row["probe"], [])
+                    ],
+                    probe_name=row["probe"],
+                )
+                if png:
+                    try:
+                        client.files_upload_v2(
+                            channel=channel,
+                            thread_ts=thread_ts,
+                            content=png,
+                            filename=f"timing_history_{row['probe']}.png",
+                            title=row["probe"],
+                        )
+                        continue
+                    except SlackApiError as exc:
+                        print(f"error: chart upload failed for {row['probe']}: {exc}")
                 lines = [f"`{row['probe']}` phase timings:"]
                 for phase, duration_s in row["timings"].items():
                     lines.append(f"  {phase}: {_format_duration(duration_s)}")
