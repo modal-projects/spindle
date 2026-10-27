@@ -452,7 +452,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
                             or 0
                         )
                     ),
-                    rates=definition.recipe.inference_routing_work_rates,
+                    prefill_tokens_per_second=definition.recipe.inference_routing_prefill_tokens_per_second,
                     balance_absolute=definition.recipe.inference_routing_balance_absolute,
                     balance_relative=definition.recipe.inference_routing_balance_relative,
                     cache_threshold=definition.recipe.inference_routing_cache_threshold,

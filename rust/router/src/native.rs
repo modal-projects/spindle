@@ -1,6 +1,6 @@
 //! PyO3 hands each request to this runtime as one awaitable. Admission,
 //! observations, retries and worker HTTP live in Rust.
-use crate::{Replica, Request, Router, Snapshot};
+use crate::{Admission, Replica, Request, Router, Snapshot};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use serde::Deserialize;
@@ -22,19 +22,12 @@ const ROUTER_OWNED_HEADERS: &[&str] = &[
 ];
 
 #[derive(Deserialize)]
-struct ServiceRates {
-    prefill_tokens_per_second: f64,
-    decode_tokens_per_second: f64,
-    gpu_lora_seconds: f64,
-    registration_seconds: f64,
-}
-#[derive(Deserialize)]
 struct Config {
     gateway: String,
     headers: HashMap<String, String>,
     policy: String,
     capacity: usize,
-    rates: ServiceRates,
+    prefill_tokens_per_second: f64,
     balance_absolute: usize,
     balance_relative: f64,
     cache_threshold: f64,
@@ -138,8 +131,8 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         .unwrap()
         .prepare_group(g.group.unwrap_or_else(|| g.request_id.clone()), request)
         .map_err(|message| error(400, &message))?;
+    let mut admission = Admission::default();
     let mut admission_seconds = 0.0;
-    let mut affinity_started: Option<Instant> = None;
     let mut attempt = 0;
     let mut failures: u32 = 0;
     loop {
@@ -147,22 +140,14 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         attempt += 1;
         let admission_started = Instant::now();
         let decision = loop {
-            let elapsed = affinity_started.map_or(0.0, |t| t.elapsed().as_secs_f64());
             let d = s
                 .scheduler
                 .lock()
                 .unwrap()
-                .select_destination(&request, id.clone(), elapsed)
+                .select_destination(&request, id.clone(), &mut admission)
                 .map_err(|_| error(500, "Scheduler failed"))?;
             if d.status == "route" {
                 break d;
-            }
-            if matches!(
-                d.reason,
-                "pending_prefix" | "cached_capacity" | "cached_saturated" | "adapter_saturated"
-            ) && affinity_started.is_none()
-            {
-                affinity_started = Some(Instant::now());
             }
             tokio::time::sleep(Duration::from_secs_f64(d.retry_after.clamp(0.01, 0.1))).await;
         };
@@ -174,8 +159,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         };
         let route = json!({"policy":s.policy,"reason":decision.reason,"available_replicas":decision.available_replicas,
             "cached_tokens":decision.cached_tokens,"best_cached_tokens":decision.best_cached_tokens,
-            "backlog_seconds":decision.backlog_seconds,"prefill_seconds":decision.prefill_seconds,
-            "adapter_seconds":decision.adapter_seconds,"wait_s":admission_seconds});
+            "wait_s":admission_seconds});
         g.body["rid"] = json!(id);
         let mut http = s
             .client
@@ -341,9 +325,8 @@ async fn observe(s: Service) {
                 row
             })
             .collect();
-        if let Ok(snapshot) = Snapshot::new(rows, observed) {
-            s.scheduler.lock().unwrap().install_snapshot(snapshot);
-        }
+        let snapshot = Snapshot::new(rows, observed);
+        s.scheduler.lock().unwrap().install_snapshot(snapshot);
         tokio::select! { _=s.stop.cancelled()=>break, _=s.notify.notified()=>{}, _=tokio::time::sleep(Duration::from_millis(500))=>{} }
     }
 }
@@ -360,10 +343,7 @@ impl NativeRuntime {
         let scheduler = Router::new(
             &c.policy,
             c.capacity,
-            c.rates.prefill_tokens_per_second,
-            c.rates.decode_tokens_per_second,
-            c.rates.gpu_lora_seconds,
-            c.rates.registration_seconds,
+            c.prefill_tokens_per_second,
             c.balance_absolute,
             c.balance_relative,
             c.cache_threshold,

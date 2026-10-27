@@ -187,9 +187,6 @@ def record_attempt(event):
                     "available_replicas",
                     "best_cached_tokens",
                     "cached_tokens",
-                    "backlog_seconds",
-                    "prefill_seconds",
-                    "adapter_seconds",
                 }
             },
             "sglang.request_id": attrs.get("sglang_request_id"),
