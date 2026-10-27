@@ -1,11 +1,10 @@
-"""Lifecycle/control-plane wrapper; no per-request PyO3 calls or cache snapshots."""
+"""Lifecycle/control-plane wrapper; Rust owns admission, retries and worker HTTP."""
 
 import asyncio
 import json
 import secrets
 from contextlib import suppress
 from dataclasses import dataclass
-from urllib.parse import quote
 
 import httpx
 from spindle_router import NativeRuntime
@@ -37,12 +36,10 @@ class NativeRouter:
         self.policy = policy
         self.discover = discover
         self.gateway = gateway.rstrip("/")
-        self.token = secrets.token_urlsafe(32)
         self.runtime = NativeRuntime(
             json.dumps(
                 dict(
                     gateway=self.gateway,
-                    token=self.token,
                     headers=headers,
                     policy=policy,
                     capacity=capacity,
@@ -53,12 +50,6 @@ class NativeRouter:
                 )
             )
         )
-        self.client = httpx.AsyncClient(
-            base_url=self.runtime.address,
-            headers={"Authorization": f"Bearer {self.token}"},
-            trust_env=False,
-            limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
-        )
         self.poller = None
 
     def prepare_request(self, adapter, affinity, prompt, output_tokens):
@@ -68,9 +59,8 @@ class NativeRouter:
         while True:
             try:
                 workers = await asyncio.wait_for(self.discover(), timeout=5)
-                response = await self.client.put("/workers", json=workers, timeout=5)
-                response.raise_for_status()
-            except (httpx.HTTPError, TimeoutError):
+                self.runtime.set_workers(json.dumps(workers))
+            except TimeoutError:
                 # Failed discovery must not permanently kill address refresh.
                 # Rust independently enforces fresh observations and deadlines.
                 pass
@@ -95,10 +85,15 @@ class NativeRouter:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
             raise TimeoutError("Routing deadline expired")
-        try:
-            response = await self.client.post(
-                "/generate",
-                json=dict(
+        (
+            status,
+            response_headers,
+            content,
+            replica,
+            routing,
+        ) = await self.runtime.generate(
+            json.dumps(
+                dict(
                     request_id=request_id,
                     group=prepared.group,
                     adapter=prepared.adapter,
@@ -106,38 +101,27 @@ class NativeRouter:
                     body=body,
                     headers=headers,
                     timeout_seconds=remaining,
-                ),
-                timeout=remaining + 1,
-            )
-            if response.is_error:
-                # Sampling already handles retryable statuses within its deadline.
-                # Preserve that path rather than leaking HTTPStatusError through RPC.
-                return RoutedResponse(
-                    response,
-                    None,
-                    dict(policy=self.policy, reason="router_error", wait_s=0.0),
                 )
-            row = response.json()
-            upstream_response = httpx.Response(
-                row["status"],
-                headers=row["headers"],
-                content=row["body"].encode(),
-                request=httpx.Request("POST", gateway + "/generate"),
             )
-            return RoutedResponse(upstream_response, row["replica"], row["routing"])
-        except asyncio.CancelledError:
-            with suppress(httpx.HTTPError):
-                await asyncio.shield(
-                    self.client.delete(
-                        "/requests/" + quote(request_id, safe=""), timeout=2
-                    )
-                )
-            raise
+        )
+        response = httpx.Response(
+            status,
+            headers=response_headers,
+            content=content,
+            request=httpx.Request("POST", gateway + "/generate"),
+        )
+        if routing is None:
+            # Sampling already handles retryable statuses within its deadline.
+            return RoutedResponse(
+                response,
+                None,
+                dict(policy=self.policy, reason="router_error", wait_s=0.0),
+            )
+        return RoutedResponse(response, replica, json.loads(routing))
 
     async def aclose(self):
         if self.poller is not None:
             self.poller.cancel()
             with suppress(asyncio.CancelledError):
                 await self.poller
-        await asyncio.to_thread(self.runtime.close)
-        await self.client.aclose()
+        self.runtime.close()

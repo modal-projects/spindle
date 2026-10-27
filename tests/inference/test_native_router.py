@@ -183,9 +183,7 @@ def test_native_dispatch_owns_transport_retries_and_releases(worker, policy):
                 assert headers["modal-flash-upstream"] == "worker:8000"
                 assert "modal-session-id" not in headers
                 assert body["input_ids"] == [1, 2]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -204,9 +202,7 @@ def test_native_lost_response_reuses_worker_and_generation(worker, fault):
             assert len(worker["requests"]) == 2
             assert len(worker["generations"]) == 1
             assert worker["requests"][0] == worker["requests"][1]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -224,9 +220,7 @@ def test_native_replay_is_bounded_before_starting_new_attempt(worker):
             ids = [body["rid"] for _, body in worker["requests"]]
             assert len(ids) == 3
             assert ids[0] == ids[1] and ids[1] != ids[2]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -250,9 +244,7 @@ def test_native_transport_budget_and_worker_identity_remain_enforced(worker, fau
                 assert len(ids) == 16
                 assert len(set(ids)) == 8
                 assert all(ids[i] == ids[i + 1] for i in range(0, 16, 2))
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -278,7 +270,7 @@ def test_native_replay_obeys_cancellation_and_original_deadline(worker, cancel):
                 assert (await task).response.status_code == 504
             assert time.monotonic() - started < 1.2
             for _ in range(50):
-                state = (await router.client.get("/health")).json()
+                state = router.runtime.health()
                 if state == dict(pending=0, requests=0):
                     break
                 await asyncio.sleep(0.01)
@@ -305,9 +297,7 @@ def test_native_only_retries_explicitly_cancelled_replay(worker, state):
             assert len(ids) == (2 if state == "conflict" else 3)
             if state != "conflict":
                 assert ids[2] != ids[1]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -324,9 +314,7 @@ def test_native_capacity_pressure_does_not_exhaust_failure_budget(worker):
             assert result.response.status_code == 200
             assert len(worker["requests"]) == 10
             assert len({body["rid"] for _, body in worker["requests"]}) == 10
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -346,9 +334,7 @@ def test_native_busy_retries_obey_original_deadline(worker, policy):
             assert result.replica is None
             assert 1 <= len(worker["requests"]) <= 5
             assert time.monotonic() - started < 2.5
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -365,9 +351,7 @@ def test_native_permanent_worker_failure_still_has_a_retry_limit(worker):
             assert result.response.status_code == 502
             assert result.routing["reason"] == "router_error"
             assert len(worker["requests"]) == 8
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -394,7 +378,7 @@ def test_native_cancellation_releases_admission_and_inflight(
             with pytest.raises(asyncio.CancelledError):
                 await task
             for _ in range(50):
-                state = (await router.client.get("/health")).json()
+                state = router.runtime.health()
                 if state == dict(pending=0, requests=0):
                     break
                 await asyncio.sleep(0.01)
@@ -415,38 +399,58 @@ def test_native_deadline_bounds_capacity_wait(worker, policy):
             result = await dispatch(router, worker, timeout=0.2)
             assert result.response.status_code == 504
             assert not worker["requests"]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
     asyncio.run(run())
 
 
-def test_native_authentication_and_invalid_payload_do_not_reserve(worker):
+def test_native_admission_sees_every_concurrent_request(worker):
+    worker["active"] = 24
+
     async def run():
         router = make_router(worker)
         try:
-            response = await router.client.get(
-                "/health", headers={"Authorization": "wrong"}
+            tasks = [
+                asyncio.create_task(dispatch(router, worker, id=f"queued-{i}"))
+                for i in range(300)
+            ]
+            for _ in range(100):
+                if router.runtime.health()["requests"] == 300:
+                    break
+                await asyncio.sleep(0.01)
+            assert router.runtime.health() == dict(pending=0, requests=300)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for _ in range(50):
+                if router.runtime.health() == dict(pending=0, requests=0):
+                    break
+                await asyncio.sleep(0.01)
+            assert router.runtime.health() == dict(pending=0, requests=0)
+        finally:
+            await router.aclose()
+
+    asyncio.run(run())
+
+
+def test_native_invalid_payload_does_not_reserve(worker):
+    async def run():
+        router = make_router(worker)
+        try:
+            result = await router.dispatch(
+                router.prepare_request("", "", [1], 1),
+                request_id="bad",
+                gateway=worker["gateway"],
+                body=dict(input_ids=[1], sampling_params=dict(max_new_tokens=1)),
+                headers={},
+                client=None,
+                deadline=asyncio.get_running_loop().time() + 1,
             )
-            assert response.status_code == 401
-            response = await router.client.post(
-                "/generate",
-                json=dict(
-                    request_id="bad",
-                    adapter="",
-                    affinity="",
-                    body=dict(input_ids=[1], sampling_params=dict(max_new_tokens=1)),
-                    headers={},
-                    timeout_seconds=1,
-                ),
-            )
-            assert response.status_code == 400
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert result.response.status_code == 400
+            assert result.replica is None
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -462,9 +466,7 @@ def test_native_logical_conflict_is_returned_without_retry(worker):
             result = await dispatch(router, worker)
             assert result.response.status_code == 409
             assert len(worker["requests"]) == 1
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -484,9 +486,7 @@ def test_native_dispatch_does_not_serialize_worker_requests(worker):
             arrivals = worker["arrival_times"]
             # All requests must arrive before the first response finishes.
             assert max(arrivals) - min(arrivals) < worker["delay"]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 
@@ -547,9 +547,7 @@ def test_siblings_wait_for_shared_prefix_in_native_runtime(worker):
                 128,
                 128,
             ]
-            assert (await router.client.get("/health")).json() == dict(
-                pending=0, requests=0
-            )
+            assert router.runtime.health() == dict(pending=0, requests=0)
         finally:
             await router.aclose()
 

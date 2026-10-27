@@ -1,16 +1,12 @@
-//! PyO3 starts/stops this service only. Requests, observations and HTTP live in Rust.
+//! PyO3 hands each request to this runtime as one awaitable. Admission,
+//! observations, retries and worker HTTP live in Rust.
 use crate::{Replica, Request, Router, Snapshot};
-use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
-    routing::{delete, get, post, put},
-    Json,
-};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -35,7 +31,6 @@ struct ServiceRates {
 #[derive(Deserialize)]
 struct Config {
     gateway: String,
-    token: String,
     headers: HashMap<String, String>,
     policy: String,
     capacity: usize,
@@ -56,10 +51,9 @@ struct Service {
     client: reqwest::Client,
     gateway: String,
     headers: HashMap<String, String>,
-    token: String,
     policy: String,
     notify: Arc<Notify>,
-    requests: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    requests: Arc<Mutex<HashSet<String>>>,
     stop: CancellationToken,
 }
 #[derive(Deserialize)]
@@ -73,43 +67,18 @@ struct Generate {
     headers: HashMap<String, String>,
     timeout_seconds: f64,
 }
-type Reply = Result<Json<Value>, (StatusCode, String)>;
-fn error(status: StatusCode, message: &str) -> (StatusCode, String) {
+/// A worker's response, or the router's own status and message. Routing
+/// metadata is present only when a worker was selected.
+struct Routed {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+    replica: Option<String>,
+    routing: Option<String>,
+}
+type Reply = Result<Routed, (u16, String)>;
+fn error(status: u16, message: &str) -> (u16, String) {
     (status, message.into())
-}
-fn authorize(s: &Service, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
-    if headers.get("authorization").and_then(|v| v.to_str().ok())
-        != Some(&format!("Bearer {}", s.token))
-    {
-        return Err(error(
-            StatusCode::UNAUTHORIZED,
-            "Invalid local router token",
-        ));
-    }
-    Ok(())
-}
-async fn workers(
-    State(s): State<Service>,
-    headers: HeaderMap,
-    Json(rows): Json<Vec<Worker>>,
-) -> Reply {
-    authorize(&s, &headers)?;
-    *s.workers.lock().unwrap() = rows;
-    s.notify.notify_one();
-    Ok(Json(json!({"updated":true})))
-}
-async fn health(State(s): State<Service>, headers: HeaderMap) -> Reply {
-    authorize(&s, &headers)?;
-    Ok(Json(
-        json!({"pending":s.scheduler.lock().unwrap().reservations.len(),"requests":s.requests.lock().unwrap().len()}),
-    ))
-}
-async fn cancel(State(s): State<Service>, headers: HeaderMap, Path(id): Path<String>) -> Reply {
-    authorize(&s, &headers)?;
-    if let Some(token) = s.requests.lock().unwrap().get(&id) {
-        token.cancel();
-    }
-    Ok(Json(json!({"cancelled":true})))
 }
 // RAII releases on success, timeout, cancellation, transport error and task abort.
 struct Reservation {
@@ -135,48 +104,40 @@ impl Drop for ActiveRequest {
         self.service.requests.lock().unwrap().remove(&self.id);
     }
 }
-async fn generate(State(s): State<Service>, headers: HeaderMap, Json(g): Json<Generate>) -> Reply {
-    authorize(&s, &headers)?;
+async fn generate(s: Service, g: Generate) -> Reply {
     if !g.timeout_seconds.is_finite() || g.timeout_seconds <= 0.0 || g.timeout_seconds > 86400.0 {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid deadline"));
+        return Err(error(400, "Invalid deadline"));
     }
-    let token = CancellationToken::new();
-    {
-        let mut requests = s.requests.lock().unwrap();
-        if requests.contains_key(&g.request_id) {
-            return Err(error(StatusCode::CONFLICT, "Duplicate request ID"));
-        }
-        requests.insert(g.request_id.clone(), token.clone());
+    if !s.requests.lock().unwrap().insert(g.request_id.clone()) {
+        return Err(error(409, "Duplicate request ID"));
     }
     let _active = ActiveRequest {
         service: s.clone(),
         id: g.request_id.clone(),
     };
     tokio::select! {
-        _=token.cancelled()=>Err(error(StatusCode::REQUEST_TIMEOUT,"Request cancelled")),
-        _=s.stop.cancelled()=>Err(error(StatusCode::SERVICE_UNAVAILABLE,"Router stopped")),
+        _=s.stop.cancelled()=>Err(error(503,"Router stopped")),
         result=tokio::time::timeout(Duration::from_secs_f64(g.timeout_seconds),forward(&s,g))=>
-            result.unwrap_or_else(|_|Err(error(StatusCode::GATEWAY_TIMEOUT,"Routing/dispatch deadline exceeded"))),
+            result.unwrap_or_else(|_|Err(error(504,"Routing/dispatch deadline exceeded"))),
     }
 }
 async fn forward(s: &Service, mut g: Generate) -> Reply {
     let tokens: Vec<i64> =
         serde_json::from_value(g.body.get("input_ids").cloned().unwrap_or(Value::Null))
-            .map_err(|_| error(StatusCode::BAD_REQUEST, "input_ids must be token IDs"))?;
+            .map_err(|_| error(400, "input_ids must be token IDs"))?;
     let budget = g
         .body
         .pointer("/sampling_params/max_new_tokens")
         .and_then(Value::as_u64)
-        .ok_or_else(|| error(StatusCode::BAD_REQUEST, "Missing output token budget"))?
-        as usize;
+        .ok_or_else(|| error(400, "Missing output token budget"))? as usize;
     let request = Request::new(g.adapter, g.affinity, tokens, budget)
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid routing request"))?;
+        .map_err(|_| error(400, "Invalid routing request"))?;
     let request = s
         .scheduler
         .lock()
         .unwrap()
         .prepare_group(g.group.unwrap_or_else(|| g.request_id.clone()), request)
-        .map_err(|message| error(StatusCode::BAD_REQUEST, &message))?;
+        .map_err(|message| error(400, &message))?;
     let mut admission_seconds = 0.0;
     let mut affinity_started: Option<Instant> = None;
     let mut attempt = 0;
@@ -192,7 +153,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                 .lock()
                 .unwrap()
                 .select_destination(&request, id.clone(), elapsed)
-                .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Scheduler failed"))?;
+                .map_err(|_| error(500, "Scheduler failed"))?;
             if d.status == "route" {
                 break d;
             }
@@ -235,7 +196,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         );
         let http = http
             .build()
-            .map_err(|_| error(StatusCode::BAD_REQUEST, "Invalid worker request"))?;
+            .map_err(|_| error(400, "Invalid worker request"))?;
         let mut busy = false;
         // A lost connection may leave the generation running. Reconnect once
         // immediately with the same RID, payload and worker so its replay cache
@@ -258,7 +219,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                     if let Some(actual) = response_headers.get("x-spindle-replica") {
                         if Some(actual) != decision.replica.as_ref() {
                             reservation.outcome = "failed";
-                            return Err(error(StatusCode::BAD_GATEWAY, "Worker identity mismatch"));
+                            return Err(error(502, "Worker identity mismatch"));
                         }
                     }
                     let identified = response_headers.contains_key("x-spindle-replica");
@@ -292,18 +253,19 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                                 continue;
                             }
                             if !retry && !(200..300).contains(&status) {
-                                return Err(error(
-                                    StatusCode::BAD_GATEWAY,
-                                    "Worker response interrupted",
-                                ));
+                                return Err(error(502, "Worker response interrupted"));
                             }
                             break;
                         }
                     };
                     if !retry {
-                        return Ok(Json(
-                            json!({"status":status,"headers":response_headers,"body":String::from_utf8_lossy(&bytes),"routing":route,"replica":decision.replica,"attempts":attempt}),
-                        ));
+                        return Ok(Routed {
+                            status,
+                            headers: response_headers,
+                            body: bytes.to_vec(),
+                            replica: decision.replica,
+                            routing: Some(route.to_string()),
+                        });
                     }
                 }
                 Err(err) => {
@@ -321,10 +283,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         if !busy {
             failures += 1;
             if failures >= MAX_TRANSPORT_FAILURES {
-                return Err(error(
-                    StatusCode::BAD_GATEWAY,
-                    "Worker retry budget exhausted",
-                ));
+                return Err(error(502, "Worker retry budget exhausted"));
             }
         }
         let delay_ms = if busy {
@@ -390,17 +349,14 @@ async fn observe(s: Service) {
 }
 #[pyclass]
 pub struct NativeRuntime {
-    #[pyo3(get)]
-    address: String,
-    stop: CancellationToken,
-    thread: Option<std::thread::JoinHandle<()>>,
+    service: Service,
 }
 #[pymethods]
 impl NativeRuntime {
     #[new]
-    fn new(config: String) -> PyResult<Self> {
-        let c: Config = serde_json::from_str(&config)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    fn new(config: &str) -> PyResult<Self> {
+        let c: Config =
+            serde_json::from_str(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let scheduler = Router::new(
             &c.policy,
             c.capacity,
@@ -412,86 +368,71 @@ impl NativeRuntime {
             c.balance_relative,
             c.cache_threshold,
         )
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
-        let stop = CancellationToken::new();
-        let task_stop = stop.clone();
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let thread = std::thread::spawn(move || {
-            let ready = tx.clone();
-            let run = || -> Result<(), String> {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .map_err(|e| e.to_string())?;
-                runtime.block_on(async move {
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    let address = format!(
-                        "http://{}",
-                        listener.local_addr().map_err(|e| e.to_string())?
-                    );
-                    let client = reqwest::Client::builder()
-                        .no_proxy()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                        .map_err(|e| e.to_string())?;
-                    let s = Service {
-                        scheduler: Arc::new(Mutex::new(scheduler)),
-                        workers: Arc::new(Mutex::new(vec![])),
-                        client,
-                        gateway: c.gateway.trim_end_matches('/').into(),
-                        headers: c.headers,
-                        token: c.token,
-                        policy: c.policy,
-                        notify: Arc::new(Notify::new()),
-                        requests: Arc::new(Mutex::new(HashMap::new())),
-                        stop: task_stop.clone(),
-                    };
-                    tokio::spawn(observe(s.clone()));
-                    let app = axum::Router::new()
-                        .route("/generate", post(generate))
-                        .route("/workers", put(workers))
-                        .route("/health", get(health))
-                        .route("/requests/{id}", delete(cancel))
-                        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
-                        .with_state(s);
-                    let _ = ready.send(Ok(address));
-                    axum::serve(listener, app)
-                        .with_graceful_shutdown(task_stop.cancelled_owned())
-                        .await
-                        .map_err(|e| e.to_string())
-                })
-            };
-            if let Err(err) = run() {
-                let _ = tx.send(Err(err));
-            }
-        });
-        let address = rx
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| {
-                stop.cancel();
-                pyo3::exceptions::PyRuntimeError::new_err("Native router startup timed out")
-            })?
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        Ok(Self {
-            address,
-            stop,
-            thread: Some(thread),
+        .map_err(PyValueError::new_err)?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let service = Service {
+            scheduler: Arc::new(Mutex::new(scheduler)),
+            workers: Arc::new(Mutex::new(vec![])),
+            client,
+            gateway: c.gateway.trim_end_matches('/').into(),
+            headers: c.headers,
+            policy: c.policy,
+            notify: Arc::new(Notify::new()),
+            requests: Arc::new(Mutex::new(HashSet::new())),
+            stop: CancellationToken::new(),
+        };
+        pyo3_async_runtimes::tokio::get_runtime().spawn(observe(service.clone()));
+        Ok(Self { service })
+    }
+
+    /// Replace the discovered workers and observe them immediately.
+    fn set_workers(&self, workers: &str) -> PyResult<()> {
+        *self.service.workers.lock().unwrap() =
+            serde_json::from_str(workers).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.service.notify.notify_one();
+        Ok(())
+    }
+
+    /// Resolves to (status, headers, body, replica, routing JSON). Cancelling
+    /// the awaitable drops the request and releases its reservation.
+    fn generate<'py>(&self, py: Python<'py>, request: &str) -> PyResult<Bound<'py, PyAny>> {
+        let g: Generate =
+            serde_json::from_str(request).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let s = self.service.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let r = generate(s, g)
+                .await
+                .unwrap_or_else(|(status, message)| Routed {
+                    status,
+                    headers: HashMap::new(),
+                    body: message.into_bytes(),
+                    replica: None,
+                    routing: None,
+                });
+            Ok((r.status, r.headers, r.body, r.replica, r.routing))
         })
     }
-    fn close(&mut self, py: Python<'_>) {
-        self.stop.cancel();
-        if let Some(thread) = self.thread.take() {
-            py.detach(move || {
-                let _ = thread.join();
-            });
-        }
+
+    fn health(&self) -> HashMap<&'static str, usize> {
+        HashMap::from([
+            (
+                "pending",
+                self.service.scheduler.lock().unwrap().reservations.len(),
+            ),
+            ("requests", self.service.requests.lock().unwrap().len()),
+        ])
+    }
+
+    fn close(&self) {
+        self.service.stop.cancel();
     }
 }
 impl Drop for NativeRuntime {
     fn drop(&mut self) {
-        self.stop.cancel();
+        self.service.stop.cancel();
     }
 }
