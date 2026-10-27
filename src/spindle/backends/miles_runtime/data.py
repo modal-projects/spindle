@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import gc
+from contextlib import contextmanager
 from dataclasses import dataclass
 from math import prod
 from typing import Any
 
+import numpy as np
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.backends.contract import ForwardBatch
@@ -65,18 +68,21 @@ def prepare_batch(
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
-    for item_index, item in enumerate(batch.items):
-        if item.model_id not in slots:
-            raise ValueError(f"model {item.model_id} is not loaded")
-        if not item.data:
-            raise ValueError(f"forward_backward has no data for model {item.model_id}")
-        for datum_index, datum in enumerate(item.data):
-            row = _datum_row(datum, batch.loss_fn, datum_index)
-            target_length = int(row["target_len"])
-            _align_row(row, sequence_alignment)
-            entries.append(
-                (slots[item.model_id], item_index, datum_index, row, target_length)
-            )
+    with _gc_paused():
+        for item_index, item in enumerate(batch.items):
+            if item.model_id not in slots:
+                raise ValueError(f"model {item.model_id} is not loaded")
+            if not item.data:
+                raise ValueError(
+                    f"forward_backward has no data for model {item.model_id}"
+                )
+            for datum_index, datum in enumerate(item.data):
+                row = _datum_row(datum, batch.loss_fn, datum_index)
+                target_length = int(row["target_len"])
+                _align_row(row, sequence_alignment)
+                entries.append(
+                    (slots[item.model_id], item_index, datum_index, row, target_length)
+                )
 
     entries.sort(key=lambda entry: entry[0])
     return PreparedBatch(
@@ -86,6 +92,18 @@ def prepare_batch(
         ),
         target_lengths=tuple(length for *_, length in entries),
     )
+
+
+@contextmanager
+def _gc_paused():
+    # Label rows are many small lists; cyclic GC would rescan them as they are built.
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 def _align_row(row: dict[str, Any], multiple: int) -> None:
@@ -249,27 +267,26 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
 
 
 def _shaped_values(tensor, shape, cast, datum_index, name):
-    values = [cast(value) for value in _tensor_values(tensor)]
-    actual_shape = list(tensor.shape or [len(values)])
-    if actual_shape != shape or len(values) != prod(shape):
+    values = _tensor_values(tensor)
+    actual_shape = list(tensor.shape or [values.size])
+    if actual_shape != shape or values.size != prod(shape):
         raise ValueError(
             f"datum {datum_index}: {name} must have shape {shape} with matching data"
         )
-    if len(shape) == 2:
-        width = shape[1]
-        return [values[start : start + width] for start in range(0, len(values), width)]
-    return values
+    dtype = np.int64 if cast is int else np.float64
+    return values.astype(dtype).reshape(shape).tolist()
 
 
-def _tensor_values(tensor) -> list[Any]:
+def _tensor_values(tensor) -> np.ndarray:
     """Return row-major values; the SDK sends mostly-zero 2-D tensors as CSR."""
-    values = tensor.data
+    values = np.asarray(tensor.data)
     crow = tensor.sparse_crow_indices
     if crow is None:
-        return values
+        return values.reshape(-1)
     shape = list(tensor.shape or [])
     columns = tensor.sparse_col_indices
     rows, width = (1, shape[0]) if len(shape) == 1 else (shape + [None, None])[:2]
+    crow = np.asarray(crow, dtype=np.int64)
     if (
         len(shape) not in (1, 2)
         or columns is None
@@ -277,16 +294,16 @@ def _tensor_values(tensor) -> list[Any]:
         or crow[0] != 0
         or crow[-1] != len(values)
         or len(columns) != len(values)
-        or any(start > end for start, end in zip(crow, crow[1:], strict=False))
+        or (np.diff(crow) < 0).any()
     ):
         raise ValueError(
             "CSR TensorData must have shape [sequence] or [sequence, choices] "
             "with row pointers covering its values"
         )
-    if any(column < 0 or column >= width for column in columns):
+    columns = np.asarray(columns, dtype=np.int64)
+    if ((columns < 0) | (columns >= width)).any():
         raise ValueError("CSR TensorData column indices must be within the row width")
-    dense: list[Any] = [0] * (rows * width)
-    for row, (start, end) in enumerate(zip(crow, crow[1:], strict=False)):
-        for column, value in zip(columns[start:end], values[start:end], strict=True):
-            dense[row * width + int(column)] += value
+    dense = np.zeros(rows * width, dtype=values.dtype)
+    row_ids = np.repeat(np.arange(rows), np.diff(crow))
+    np.add.at(dense, row_ids * width + columns, values)
     return dense
