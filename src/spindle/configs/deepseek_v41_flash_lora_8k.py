@@ -98,7 +98,7 @@ class Config(BaseConfig):
         "weight_loader_disable_mmap": False,
         "disable_shared_experts_fusion": True,
         "max_running_requests": 32,
-        "max_queued_requests": 8,
+        "max_queued_requests": 128,
         "max_loaded_loras": 8,
         "max_loras_per_batch": 4,
         "lora_strict_loading": True,
