@@ -1,16 +1,19 @@
-"""Weekly synthetic monitoring for spindle deployments.
+"""Weekly synthetic monitoring for spindle model servers.
+
+Probes every model the shared deployment serves (client-side one-step RL
+run against its own parameterization) plus each registered FFT engine inside
+an ephemeral `spindle.run` scope, then posts a Slack table + per-probe
+timing-history charts.
 
 Test it out with:
 
 ```shell
-    uv run modal run -e ajhinh-dev -m synthetic_monitoring.server_probe --name lora-shared
+    uv run modal run -e ajhinh-dev -m synthetic_monitoring.model_validation --name lora-shared/qwen36-35b-a3b-lora-32k
 ```
 """
 
 from __future__ import annotations
 
-import io
-import math
 import os
 import time
 import traceback
@@ -20,39 +23,39 @@ from pathlib import Path
 
 import modal
 
+from synthetic_monitoring.chart import RunPoint, render_timing_history_chart
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# TODO: swap to the central team deployment env once it exists.
 MODAL_ENV = "ajhinh-dev"
 HISTORY_DICT_NAME = "spindle-synmon-baselines"
 SHARED_FRONTEND = "spindle"
-SHARED_MODEL = "Qwen/Qwen3.6-35B-A3B"
-SAMPLE_PROMPT = "What is 2 + 2? Answer with only the number."
+# TODO: move to #proj-train-spindle (C0BMATL1S4F) once reports go public.
 REPORT_CHANNEL_ID = "C0CDETGBHC0"
+SAMPLE_PROMPT = "What is 2 + 2? Answer with only the number."
 CALL_TIMEOUT_S = 60 * 60
 CLEANUP_GRACE_S = 5 * 60
-LOOKBACK_S = 90 * 24 * 3600
+FRONTEND_TIMEOUT_S = 2 * 60
+
+# TODO: extend as new engines are registered in spindle.engines.
+FFT_ENGINES = (
+    "qwen3_5_4b_full_64k",
+    "qwen3_6_27b_full_64k",
+    "qwen3_5_9b_full_64k",
+)
 
 
 @dataclass(frozen=True)
-class _ProbeConfig:
+class _ProbeKind:
     name: str
     timeout_s: int
 
 
-@dataclass(frozen=True)
-class RunPoint:
-    ts: float
-    timings: dict[str, float]
-    app_name: str
-    total_duration_s: float
-    status: str = "success"
-    url: str | None = None
-
-
-PROBES = (
-    _ProbeConfig("lora-shared", 3 * 60 * 60),
-    _ProbeConfig("fft-scoped", 3 * 60 * 60),
+PROBE_KINDS = (
+    _ProbeKind("lora-shared", 3 * 60 * 60),
+    _ProbeKind("fft-scoped", 3 * 60 * 60),
 )
-PROBE_TIMEOUT_S = max(c.timeout_s for c in PROBES)
+PROBE_TIMEOUT_S = max(c.timeout_s for c in PROBE_KINDS)
 MONITOR_TIMEOUT_S = PROBE_TIMEOUT_S + CLEANUP_GRACE_S + 30 * 60
 LAUNCH_TIMEOUT_S = MONITOR_TIMEOUT_S + 30 * 60
 
@@ -89,6 +92,18 @@ def _record(probe: str, point: RunPoint) -> list[RunPoint]:
     except Exception as exc:
         print(f"error: append_history failed for {probe}: {exc}")
         return [point]
+
+
+def _frontend_function(fn_name: str):
+    return modal.Function.from_name(
+        SHARED_FRONTEND, fn_name, environment_name=MODAL_ENV
+    )
+
+
+def _served_configs() -> list[dict]:
+    """Config rows the shared frontend currently serves."""
+    call = _frontend_function("deployed_configs").spawn()
+    return call.get(timeout=FRONTEND_TIMEOUT_S)
 
 
 def _raw_cell(text: str) -> dict:
@@ -153,90 +168,6 @@ def slack_report_blocks(
             "rows": table_rows,
         },
     ]
-
-
-_CHART_BG = "#181818"
-_CHART_PANEL = "#232323"
-_CHART_GRID = "#2f2f2f"
-_CHART_SPINE = "#464646"
-_CHART_TEXT = "#a3a3a3"
-_CHART_TITLE = "#d1d1d1"
-_CHART_BAR = "#85aef8"
-
-
-def _style_history_axes(ax) -> None:
-    ax.set_facecolor(_CHART_PANEL)
-    ax.set_axisbelow(True)
-    ax.yaxis.grid(True, color=_CHART_GRID, linewidth=0.8)
-    ax.xaxis.grid(False)
-    ax.tick_params(colors=_CHART_TEXT, length=3, width=0.8)
-    ax.xaxis.label.set_color(_CHART_TEXT)
-    ax.yaxis.label.set_color(_CHART_TEXT)
-    ax.title.set_color(_CHART_TITLE)
-    for spine in ax.spines.values():
-        spine.set_color(_CHART_SPINE)
-        spine.set_linewidth(0.9)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-
-def render_timing_history_chart(history: list[RunPoint], *, probe_name: str) -> bytes:
-    from matplotlib import pyplot
-
-    cutoff = time.time() - LOOKBACK_S
-    points = [p for p in history if p.status == "success" and p.ts >= cutoff]
-    phases: list[str] = []
-    for point in points:
-        for phase in point.timings:
-            if phase not in phases:
-                phases.append(phase)
-    if not phases:
-        return b""
-
-    series = {phase: [p.timings.get(phase) for p in points] for phase in phases}
-    tick_labels = [
-        datetime.fromtimestamp(p.ts, tz=timezone.utc).strftime("%m-%d\n%H:%M")
-        for p in points
-    ]
-    xs = list(range(len(points)))
-    n_cols = max(1, math.ceil(math.sqrt(len(phases))))
-    n_rows = math.ceil(len(phases) / n_cols)
-    fig, axes = pyplot.subplots(
-        n_rows,
-        n_cols,
-        figsize=(2 + 4 * n_cols, 2 + 4.2 * n_rows),
-        squeeze=False,
-        sharey=False,
-        layout="constrained",
-    )
-    fig.patch.set_facecolor(_CHART_BG)
-    fig.suptitle(
-        f"{probe_name} (n={len(points)} runs)",
-        color=_CHART_TITLE,
-        fontsize=13,
-        fontweight="medium",
-    )
-    for i, phase in enumerate(phases):
-        ax = axes[i // n_cols][i % n_cols]
-        for x, y in zip(xs, series[phase], strict=True):
-            if y is not None:
-                ax.bar(x, y, color=_CHART_BAR, width=0.72, zorder=2)
-        ax.set_title(phase.replace("_", " "), fontsize=10, pad=10)
-        ax.set_ylabel("seconds")
-        ax.set_xticks(xs)
-        ax.set_xticklabels(tick_labels, fontsize=7)
-        ax.ticklabel_format(axis="y", style="plain", useOffset=False)
-        _style_history_axes(ax)
-        if i // n_cols == n_rows - 1:
-            ax.set_xlabel("time (UTC)")
-    for j in range(len(phases), n_rows * n_cols):
-        axes[j // n_cols][j % n_cols].set_visible(False)
-    fig.get_layout_engine().set(h_pad=0.18, hspace=0.18)
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=_CHART_BG)
-    pyplot.close(fig)
-    return buf.getvalue()
 
 
 def _format_error(exc: BaseException, subject: str, timeout_s: int) -> str:
@@ -313,7 +244,7 @@ def _post_report(rows: list[dict], channel: str | None = None) -> None:
                             channel=channel,
                             thread_ts=thread_ts,
                             content=png,
-                            filename=f"timing_history_{row['probe']}.png",
+                            filename=f"timing_history_{row['probe'].replace('/', '_')}.png",
                             title=row["probe"],
                         )
                         continue
@@ -405,28 +336,40 @@ def _run_rl_step(
     return timings
 
 
-def _probe_lora_shared() -> tuple[dict[str, float], str, str]:
+def _probe_lora_shared(config_name: str) -> tuple[dict[str, float], str, str]:
+    recipe = next(
+        (
+            row["recipe"]
+            for row in _served_configs()
+            if row["recipe"]["name"] == config_name
+        ),
+        None,
+    )
+    if recipe is None:
+        raise RuntimeError(f"{SHARED_FRONTEND!r} does not serve config {config_name!r}")
     timings: dict[str, float] = {}
     t = time.time()
-    server = modal.Function.from_name(
-        SHARED_FRONTEND, "server", environment_name=MODAL_ENV
-    )
-    url = server.get_web_url()
+    url = _frontend_function("server").get_web_url()
     if not url:
         raise RuntimeError(f"deployed {SHARED_FRONTEND!r} frontend has no web url")
     timings["provision"] = time.time() - t
     timings.update(
-        _run_rl_step(url, os.environ["TINKER_API_KEY"], SHARED_MODEL, "lora")
+        _run_rl_step(
+            url,
+            os.environ["TINKER_API_KEY"],
+            recipe["model"],
+            recipe["parameterization"],
+        )
     )
     return timings, SHARED_FRONTEND, url
 
 
-def _probe_fft_scoped() -> tuple[dict[str, float], str, str | None]:
+def _probe_fft_scoped(engine_name: str) -> tuple[dict[str, float], str, str | None]:
     import spindle
-    from spindle.engines import qwen3_5_4b_full_64k
+    import spindle.engines
 
     timings: dict[str, float] = {}
-    engine = qwen3_5_4b_full_64k()
+    engine = getattr(spindle.engines, engine_name)()
     t = time.time()
     with spindle.run(engine=engine, name="spindle-synmon-fft") as (url, api_key):
         timings["provision"] = time.time() - t
@@ -456,18 +399,27 @@ def _run_with_timeout(fn, timeout_s: int):
         signal.setitimer(signal.ITIMER_REAL, 0)
 
 
+def _targets() -> list[tuple[str, str]]:
+    out = [("lora-shared", row["recipe"]["name"]) for row in _served_configs()]
+    out += [("fft-scoped", name) for name in FFT_ENGINES]
+    return out
+
+
 @app.function(
     image=probe_image,
     timeout=MONITOR_TIMEOUT_S,
     secrets=[api_secret, hf_secret],
 )
-def probe(name: str) -> dict:
-    config = next((c for c in PROBES if c.name == name), None)
+def probe(kind: str, target: str) -> dict:
+    config = next((c for c in PROBE_KINDS if c.name == kind), None)
     if config is None:
-        raise ValueError(f"unknown probe {name!r}")
+        raise ValueError(f"unknown probe kind {kind!r}")
+    name = f"{kind}/{target}"
     print(f"synmon: probe={name!r}")
     try:
-        timings, app_name, url = _run_with_timeout(_PROBERS[name], config.timeout_s)
+        timings, app_name, url = _run_with_timeout(
+            lambda: _PROBERS[kind](target), config.timeout_s
+        )
         point = RunPoint(
             ts=time.time(),
             timings=timings,
@@ -497,16 +449,25 @@ def probe(name: str) -> dict:
     secrets=[slack_secret],
 )
 def launch_weekly(name: str = "") -> list[dict]:
-    names = [c.name for c in PROBES] if not name else [name]
+    targets = _targets()
+    if name:
+        targets = [t for t in targets if f"{t[0]}/{t[1]}" == name or t[0] == name]
     rows: list[dict] = []
-    payloads = list(probe.map(names, return_exceptions=True))
-    for probe_name, payload in zip(names, payloads):
+    payloads = list(
+        probe.map(
+            [t[0] for t in targets],
+            [t[1] for t in targets],
+            return_exceptions=True,
+        )
+    )
+    for (kind, target), payload in zip(targets, payloads):
         if isinstance(payload, Exception):
             tb = "".join(
                 traceback.format_exception(
                     type(payload), payload, payload.__traceback__
                 )
             )
+            probe_name = f"{kind}/{target}"
             print(f"error: probe failed for {probe_name}:\n{tb}")
             rows.append(
                 {

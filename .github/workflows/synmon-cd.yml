@@ -45,4 +45,4 @@ jobs:
       - name: Deploy spindle synmon on Modal
         run: >
           uv run modal deploy
-          -m synthetic_monitoring.server_probe::app
+          -m synthetic_monitoring.model_validation::app
