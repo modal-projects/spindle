@@ -4,22 +4,36 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+## 0.1.2 - 2026-10-27
+
+DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.
+
 ### Added
 
 - `qwen3_4b_lora_32k`: Qwen3-4B LoRA on 4× H100 with 32K context, one model replica per GPU.
-- `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers.
-- DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four.
-- DeepSeek-V4.1-Flash-1017 LoRA recipes, `deepseek_v41_flash_1017_lora_8k` and `deepseek_v41_flash_1017_lora_32k`, which load the 1017 release.
+- DeepSeek-V4.1-Flash-1017 LoRA recipes, `deepseek_v41_flash_1017_lora_8k` and `deepseek_v41_flash_1017_lora_32k`, which load the 1017 release (#129).
+- DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four (#128).
+- `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers (#128).
+- `trainer_max_clients_per_batch` caps how many multi-LoRA clients a trainer trains together. With `1`, each client's step runs on its own, so clients that train independently no longer wait for each other (#124).
+- Samplers serve SGLang's Prometheus metrics at `/metrics`, so Modal collects inference metrics for sampler deployments (#125).
+- Example launchers for the Qwen3.8-27B DAPO run on 4 H200s and 12 B200s (#135) and the Qwen3.5-9B SWE-Gym run on B300s (#136).
 
 ### Changed
 
-- DeepSeek-V4.1-Flash recipes load DeepSeek's FP8/FP4 release instead of a BF16 export. The trainer dequantizes it to BF16 as it loads, and samplers serve it with FP8 routed experts. Redeploying downloads the release once.
+- DeepSeek-V4.1-Flash recipes load DeepSeek's FP8/FP4 release instead of a BF16 export. The trainer dequantizes it to BF16 as it loads, and samplers serve it with FP8 routed experts. Redeploying downloads the release once (#128).
+- `deepseek_v41_flash_lora_8k` keeps one sampler running for the length of a run, so the first sample doesn't wait for the weights to load. Recipes that subclass it inherit this (#134).
+- DeepSeek-V4.1-Flash samplers queue up to 128 requests instead of 8, so a GRPO step's group samples no longer get 503s and retries (#141).
+- Multi-LoRA trainers run optimizer steps, checkpoint saves and sampler-weight captures ahead of queued `forward_backward` requests, and serve queued training requests oldest first (#124).
+- A sampling request delivered again with the same request ID shares the in-flight work or the completed response instead of generating twice (#120).
 
 ### Fixed
 
-- DeepSeek-V4.1-Flash trainers on B200 no longer hang in their first step.
-- Miles' gloo process group waits as long as `distributed_timeout_minutes`, so trainers on slow-loading hosts no longer time out after 30 minutes.
-- The Miles v0.1.2 trainer image and the SGLang image are pinned to fork commits, so a cached build cannot serve an older fork branch.
+- DeepSeek-V4.1-Flash trainers on B200 no longer hang in their first step (#128).
+- Miles' gloo process group waits as long as `distributed_timeout_minutes`, so trainers on slow-loading hosts no longer time out after 30 minutes (#128).
+- The Miles v0.1.2 trainer image, the Miles Megatron base image and the SGLang image are pinned to exact commits or digests, so a cached build cannot serve an older fork branch (#128, #131).
+- The rollout image builds SGLang's radix-tree binding from the pinned fork revision, so the scheduler no longer crashes when routing observations are enabled (#137).
+- A sampling request that waited longer than 30 seconds, or a future polled after its sample completed, no longer fails with `unknown key family: sampler_warm` (#130).
+- Training runs named in sampler paths, `<model_id>:train:0`, resolve to the model's checkpoints, so tinker-cookbook's `run_inspect_evals` finds the base model (#130).
 
 ## 0.1.1 - 2026-10-23
 
