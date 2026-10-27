@@ -115,9 +115,9 @@ impl CacheWait {
             {
                 // Moving to another engine's queue does not provide immediate
                 // service. Keep the better cache while alternatives have queued
-                // work; the request deadline still bounds admission. A drained
-                // alternative queue restores the ordinary short spillover budget.
-                if available.iter().all(|c| c.queued > 0) {
+                // work, within the affinity budget. A drained alternative queue
+                // restores the ordinary short spillover budget.
+                if available.iter().all(|c| c.queued > 0) && elapsed < MAX_CACHE_WAIT {
                     return Selection::Wait("cached_saturated", 0.1);
                 }
                 if remaining > 0.0 {
@@ -154,12 +154,14 @@ impl CacheWait {
         if let Some(index) = selected {
             if let Some(target) = all.iter().filter(|c| balanced(c)).min_by_key(|c| rank(c)) {
                 // A full/busy target can still be the better adapter group.
-                // Only preserve it while every alternative already queues work;
-                // a drained queue or the existing imbalance guard permits spillover.
+                // Only preserve it while every alternative already queues work
+                // and the affinity budget remains; a drained queue or the
+                // existing imbalance guard permits spillover.
                 let alternative = &available[index];
                 if target.adapter_active > alternative.adapter_active
                     && (!use_cache || target.cached_tokens >= alternative.cached_tokens)
                     && available.iter().all(|c| c.queued > 0)
+                    && elapsed < MAX_CACHE_WAIT
                 {
                     return Selection::Wait("adapter_saturated", 0.1);
                 }

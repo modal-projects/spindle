@@ -159,9 +159,14 @@ impl Snapshot {
     fn new(replicas: Vec<Replica>, observed: Instant) -> Result<Self, String> {
         let mut ids = HashSet::new();
         if replicas.iter().any(|r| {
-            !ids.insert(&r.replica) || !r.work.age_seconds.is_finite() || r.work.age_seconds < 0.0
+            !ids.insert(&r.replica)
+                || r.upstream.is_empty()
+                || !r.work.age_seconds.is_finite()
+                || r.work.age_seconds < 0.0
         }) {
-            return Err(String::from("duplicate replica or invalid snapshot age"));
+            return Err(String::from(
+                "duplicate replica, missing upstream or invalid snapshot age",
+            ));
         }
         Ok(Self { replicas, observed })
     }
@@ -386,9 +391,8 @@ impl Router {
                 adapter_active,
                 active_adapter_count,
                 queued: w.waiting_requests,
-                kv_pinned_fraction: (w.kv_capacity_tokens > 0
-                    && w.kv_used_tokens <= w.kv_capacity_tokens)
-                    .then(|| w.kv_used_tokens as f64 / w.kv_capacity_tokens as f64),
+                kv_pinned_fraction: (w.kv_capacity_tokens > 0)
+                    .then(|| (w.kv_used_tokens as f64 / w.kv_capacity_tokens as f64).min(1.0)),
                 cached_tokens: hit,
                 backlog_seconds: backlog,
                 prefill_seconds: (request.prompt_tokens - hit) as f64 / self.prefill_rate,
@@ -693,6 +697,61 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn saturated_waits_end_with_the_affinity_budget() {
+        let q = request("m/v1");
+        let mut cached = replica("cached", 2, vec![], vec![format!("{:032x}", q.hashes[14])]);
+        let mut grouped = replica("grouped", 2, vec![], vec![]);
+        grouped["adapters"] = json!({"m/v1": 2});
+        let mut spare = replica("spare", 0, vec![], vec![]);
+        for row in [&mut cached, &mut grouped, &mut spare] {
+            row["work"]["waiting_requests"] = json!(1);
+        }
+        for (target, reason) in [(cached, "cached_saturated"), (grouped, "adapter_saturated")] {
+            let mut r = router("cache_wait", 2);
+            r.update_snapshot(&json!([target, spare]).to_string())
+                .unwrap();
+            let waiting = r.select_destination(&q, "1".into(), 1.99).unwrap();
+            assert_eq!((waiting.status, waiting.reason), ("wait", reason));
+            let routed = r.select_destination(&q, "1".into(), 2.0).unwrap();
+            assert_eq!(routed.replica.as_deref(), Some("spare"));
+        }
+    }
+
+    #[test]
+    fn kv_use_above_capacity_counts_as_full() {
+        let mut r =
+            Router::new("cache_wait", 136, 10463.96, 1290., 0.075, 0.68, 64, 2., 0.5).unwrap();
+        let q = Request::new("m/v1".into(), "conversation".into(), vec![42; 884], 16384).unwrap();
+        let mut a = replica(
+            "cached",
+            125,
+            vec!["m/v1"],
+            vec![format!("{:032x}", q.hashes[11])],
+        );
+        let mut b = replica("spare", 100, vec!["m/v1"], vec![]);
+        a["work"]["kv_used_tokens"] = json!(1_000_001);
+        a["work"]["kv_capacity_tokens"] = json!(1_000_000);
+        b["work"]["kv_used_tokens"] = json!(500_000);
+        b["work"]["kv_capacity_tokens"] = json!(1_000_000);
+        r.update_snapshot(&json!([a, b]).to_string()).unwrap();
+        assert_eq!(
+            r.select_destination(&q, "1".into(), 0.)
+                .unwrap()
+                .replica
+                .as_deref(),
+            Some("spare")
+        );
+    }
+
+    #[test]
+    fn snapshot_requires_an_upstream() {
+        let mut r = router("cache_wait", 1);
+        let mut a = replica("a", 0, vec![], vec![]);
+        a.as_object_mut().unwrap().remove("upstream");
+        assert!(r.update_snapshot(&json!([a]).to_string()).is_err());
     }
 
     #[test]
