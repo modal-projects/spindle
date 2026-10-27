@@ -303,7 +303,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
                 {
                     "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
                 }
-                if lora and recipe.inference_lora_routing == "cache_wait"
+                if lora and recipe.inference_lora_routing != "affinity"
                 else {}
             )
         ),

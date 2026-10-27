@@ -157,7 +157,7 @@ async def dispatch(router, worker, id="test", timeout=3):
     )
 
 
-@pytest.mark.parametrize("policy", ["cache_wait"])
+@pytest.mark.parametrize("policy", ["cache_wait", "bounded_hash"])
 def test_native_dispatch_owns_transport_retries_and_releases(worker, policy):
     worker["statuses"] = [503, 200]
 
@@ -312,7 +312,7 @@ def test_native_capacity_pressure_does_not_exhaust_failure_budget(worker):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("policy", ["cache_wait"])
+@pytest.mark.parametrize("policy", ["cache_wait", "bounded_hash"])
 def test_native_busy_retries_obey_original_deadline(worker, policy):
     worker["statuses"] = [503] * 100
 

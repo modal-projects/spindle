@@ -1,5 +1,6 @@
 //! One scheduler per sampling process (`_execute_sample`'s container) and
 //! inference pool. The policy does no I/O; its caller owns transport.
+mod bounded_hash;
 mod cache_wait;
 mod native;
 
@@ -12,6 +13,14 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 /// Observations at least this old never route.
 const MAX_OBSERVATION_AGE: f64 = 3.0;
+/// A run counts toward bounded_hash group sizing this long after its last request.
+const RECENT_RUN_SECONDS: f64 = 300.0;
+
+#[derive(Clone, Deserialize)]
+pub struct Worker {
+    pub replica: String,
+    pub upstream: String,
+}
 
 #[derive(Deserialize)]
 struct Work {
@@ -178,6 +187,9 @@ impl Snapshot {
 pub struct Router {
     replicas: Vec<Replica>,
     wait_policy: cache_wait::CacheWait,
+    bounded: Option<bounded_hash::BoundedHash>,
+    workers: Vec<Worker>,
+    recent_runs: HashMap<String, f64>,
     reservations: HashMap<String, Reservation>,
     groups: HashMap<String, Weak<Request>>,
     busy_until: HashMap<String, f64>,
@@ -196,9 +208,14 @@ impl Router {
         balance_relative: f64,
         cache_threshold: f64,
     ) -> Result<Self, String> {
-        if policy != "cache_wait" {
-            return Err(String::from("unknown routing policy"));
-        }
+        let bounded = match policy {
+            "cache_wait" => None,
+            "bounded_hash" => Some(bounded_hash::BoundedHash {
+                group_size: 0,
+                load_factor: bounded_hash::DEFAULT_LOAD_FACTOR,
+            }),
+            _ => return Err(String::from("unknown routing policy")),
+        };
         if !balance_relative.is_finite() || balance_relative < 1.0 {
             return Err(String::from("balance_relative must be finite and >= 1"));
         }
@@ -215,6 +232,9 @@ impl Router {
                 relative: balance_relative,
                 threshold: cache_threshold,
             },
+            bounded,
+            workers: vec![],
+            recent_runs: HashMap::new(),
             reservations: HashMap::new(),
             groups: HashMap::new(),
             busy_until: HashMap::new(),
@@ -224,6 +244,25 @@ impl Router {
             capacity,
             prefill_rate,
         })
+    }
+
+    fn configure_bounded_hash(
+        &mut self,
+        group_size: usize,
+        load_factor: f64,
+    ) -> Result<(), String> {
+        if !load_factor.is_finite() || load_factor < 1.0 {
+            return Err(String::from("load_factor must be finite and >= 1"));
+        }
+        if let Some(policy) = self.bounded.as_mut() {
+            policy.group_size = group_size;
+            policy.load_factor = load_factor;
+        }
+        Ok(())
+    }
+
+    fn set_workers(&mut self, workers: Vec<Worker>) {
+        self.workers = workers;
     }
 
     /// Siblings share pending-prefix hints only for the same exact prompt/version.
@@ -290,6 +329,9 @@ impl Router {
             .affinity_started
             .map_or(0.0, |t| t.elapsed().as_secs_f64());
         let now = self.clock.elapsed().as_secs_f64();
+        if self.bounded.is_some() {
+            return Ok(self.select_bounded(request, request_id, now));
+        }
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
         let mut candidates = Vec::new();
@@ -453,6 +495,85 @@ impl Router {
             available_replicas: available,
             best_cached_tokens: best_cached,
         })
+    }
+
+    /// Routes over discovered workers. A fresh observation adds other
+    /// frontends' requests to the load, but none is required.
+    fn select_bounded(&mut self, request: &Request, request_id: String, now: f64) -> Decision {
+        let run = request
+            .adapter
+            .rsplit_once('/')
+            .map_or(request.adapter.as_str(), |(run, _)| run);
+        self.recent_runs.insert(run.to_owned(), now);
+        self.recent_runs
+            .retain(|_, seen| now - *seen < RECENT_RUN_SECONDS);
+        let loads: Vec<usize> = self
+            .workers
+            .iter()
+            .map(|worker| {
+                let local = self
+                    .reservations
+                    .iter()
+                    .filter(|(_, r)| r.replica == worker.replica);
+                match self.replicas.iter().find(|r| {
+                    r.replica == worker.replica
+                        && r.work.age_seconds + now - self.updated < MAX_OBSERVATION_AGE
+                }) {
+                    Some(observed) => {
+                        observed.active
+                            + local
+                                .filter(|(id, _)| !observed.work.request_ids.contains(*id))
+                                .count()
+                    }
+                    None => local.count(),
+                }
+            })
+            .collect();
+        let cooling = |table: &HashMap<String, f64>, replica: &str| {
+            table.get(replica).is_some_and(|t| *t > now)
+        };
+        let usable: Vec<bool> = self
+            .workers
+            .iter()
+            .zip(&loads)
+            .map(|(worker, load)| {
+                *load < self.capacity
+                    && !cooling(&self.failed_until, &worker.replica)
+                    && !cooling(&self.busy_until, &worker.replica)
+            })
+            .collect();
+        let available = usable.iter().filter(|u| **u).count();
+        let policy = self.bounded.as_ref().unwrap();
+        let ids: Vec<&str> = self.workers.iter().map(|w| w.replica.as_str()).collect();
+        let order = policy.order(run, &request.affinity, &ids, self.recent_runs.len());
+        let group = policy.group(ids.len(), self.recent_runs.len());
+        let Some((index, reason)) = policy.select(&order, group, &loads, &usable) else {
+            let mut d = Decision::wait(if self.workers.is_empty() {
+                "unavailable"
+            } else {
+                "wait"
+            });
+            d.available_replicas = available;
+            return d;
+        };
+        let worker = &self.workers[index];
+        self.reservations.insert(
+            request_id,
+            Reservation {
+                replica: worker.replica.clone(),
+                adapter: request.adapter.clone(),
+            },
+        );
+        Decision {
+            status: "route",
+            replica: Some(worker.replica.clone()),
+            upstream: Some(worker.upstream.clone()),
+            cached_tokens: 0,
+            reason,
+            retry_after: 0.0,
+            available_replicas: available,
+            best_cached_tokens: 0,
+        }
     }
 
     /// Completion/cancellation always releases. Only real failures affect health.
@@ -843,5 +964,91 @@ mod tests {
                 Some("cached")
             );
         }
+    }
+
+    fn bounded(replicas: &[&str]) -> Router {
+        let mut r = router("bounded_hash", 64);
+        r.set_workers(
+            replicas
+                .iter()
+                .map(|id| Worker {
+                    replica: id.to_string(),
+                    upstream: id.to_string(),
+                })
+                .collect(),
+        );
+        r
+    }
+    fn conversation(adapter: &str, affinity: &str) -> Request {
+        Request::new(adapter.into(), affinity.into(), vec![42; 128], 100).unwrap()
+    }
+    fn route(r: &mut Router, q: &Request, id: &str) -> (String, &'static str) {
+        let d = r.select_destination(q, id.into(), &mut fresh()).unwrap();
+        (d.replica.unwrap(), d.reason)
+    }
+    const FOUR: [&str; 4] = ["a", "b", "c", "d"];
+
+    #[test]
+    fn bounded_hash_sticks_then_spills_in_a_stable_order() {
+        let routed = || {
+            let mut r = bounded(&FOUR);
+            // New weight versions of a run keep the same order.
+            (0..12)
+                .map(|i| {
+                    let q = conversation(&format!("run/weight_v{i:06}"), "conversation");
+                    route(&mut r, &q, &i.to_string())
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = routed();
+        assert_eq!(first, routed());
+        assert_eq!(first[0].1, "sticky");
+        let spill = first.iter().find(|(replica, _)| *replica != first[0].0);
+        assert_eq!(spill.unwrap().1, "group_spill");
+    }
+
+    #[test]
+    fn one_run_spreads_and_many_runs_group() {
+        let replicas_used = |r: &mut Router, run: &str| {
+            let mut used = HashSet::new();
+            for i in 0..64 {
+                let q = conversation(&format!("{run}/weight_v000001"), &format!("c{i}"));
+                let id = format!("{run}:{i}");
+                used.insert(route(r, &q, &id).0);
+                r.complete(&id, "ok").unwrap();
+            }
+            used.len()
+        };
+        assert_eq!(replicas_used(&mut bounded(&FOUR), "solo"), 4);
+        let mut r = bounded(&FOUR);
+        for run in 0..8 {
+            let q = conversation(&format!("run{run}/weight_v000001"), "warmup");
+            route(&mut r, &q, &format!("warmup{run}"));
+            r.complete(&format!("warmup{run}"), "ok").unwrap();
+        }
+        for run in 0..8 {
+            assert_eq!(replicas_used(&mut r, &format!("run{run}")), 2);
+        }
+    }
+
+    #[test]
+    fn bounded_hash_routes_without_fresh_observations_and_counts_fresh_load() {
+        let q = conversation("run/weight_v000001", "conversation");
+        let (home, _) = route(&mut bounded(&FOUR), &q, "probe");
+        for age in [None, Some(4.)] {
+            let mut r = bounded(&FOUR);
+            if let Some(age) = age {
+                let mut row = replica(&home, 50, vec![], vec![]);
+                row["work"]["age_seconds"] = json!(age);
+                r.update_snapshot(&json!([row]).to_string()).unwrap();
+            }
+            assert_eq!(route(&mut r, &q, "1"), (home.clone(), "sticky"));
+        }
+        let mut r = bounded(&FOUR);
+        r.update_snapshot(&json!([replica(&home, 50, vec![], vec![])]).to_string())
+            .unwrap();
+        let (replica, reason) = route(&mut r, &q, "1");
+        assert_ne!(replica, home);
+        assert_eq!(reason, "group_spill");
     }
 }

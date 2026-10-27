@@ -1,6 +1,6 @@
 //! PyO3 hands each request to this runtime as one awaitable. Admission,
 //! observations, retries and worker HTTP live in Rust.
-use crate::{Admission, Replica, Request, Router, Snapshot};
+use crate::{Admission, Replica, Request, Router, Snapshot, Worker};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use serde::Deserialize;
@@ -31,11 +31,8 @@ struct Config {
     balance_absolute: usize,
     balance_relative: f64,
     cache_threshold: f64,
-}
-#[derive(Clone, Deserialize)]
-struct Worker {
-    replica: String,
-    upstream: String,
+    group_size: usize,
+    load_factor: f64,
 }
 #[derive(Clone)]
 struct Service {
@@ -340,7 +337,7 @@ impl NativeRuntime {
     fn new(config: &str) -> PyResult<Self> {
         let c: Config =
             serde_json::from_str(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let scheduler = Router::new(
+        let mut scheduler = Router::new(
             &c.policy,
             c.capacity,
             c.prefill_tokens_per_second,
@@ -349,6 +346,9 @@ impl NativeRuntime {
             c.cache_threshold,
         )
         .map_err(PyValueError::new_err)?;
+        scheduler
+            .configure_bounded_hash(c.group_size, c.load_factor)
+            .map_err(PyValueError::new_err)?;
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -371,8 +371,14 @@ impl NativeRuntime {
 
     /// Replace the discovered workers and observe them immediately.
     fn set_workers(&self, workers: &str) -> PyResult<()> {
-        *self.service.workers.lock().unwrap() =
+        let workers: Vec<Worker> =
             serde_json::from_str(workers).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.service
+            .scheduler
+            .lock()
+            .unwrap()
+            .set_workers(workers.clone());
+        *self.service.workers.lock().unwrap() = workers;
         self.service.notify.notify_one();
         Ok(())
     }

@@ -67,6 +67,10 @@ class BaseConfig:
     inference_routing_balance_relative = 1.25
     inference_routing_cache_threshold = 0.5
     inference_lora_routing = "affinity"
+    # bounded_hash: replicas per run (0 sizes groups from active runs) and the
+    # load bound as a multiple of the mean in-flight requests per replica.
+    inference_routing_group_size = 0
+    inference_routing_load_factor = 1.25
     inference_scaledown_window_s = 300
     inference_startup_timeout_s = 1200
     inference_env = {}

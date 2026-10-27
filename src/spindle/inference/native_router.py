@@ -32,6 +32,8 @@ class NativeRouter:
         balance_absolute=4,
         balance_relative=1.25,
         cache_threshold=0.5,
+        group_size=0,
+        load_factor=1.25,
     ):
         self.policy = policy
         self.discover = discover
@@ -47,6 +49,8 @@ class NativeRouter:
                     balance_absolute=balance_absolute,
                     balance_relative=balance_relative,
                     cache_threshold=cache_threshold,
+                    group_size=group_size,
+                    load_factor=load_factor,
                 )
             )
         )
