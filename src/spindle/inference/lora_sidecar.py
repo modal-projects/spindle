@@ -36,6 +36,7 @@ def _routing_adapter(payload: dict) -> str:
         return VersionRef(str(run_id), constraint.exact_version).identity
     return payload.get("lora_path", "base")
 
+
 FETCH_METRICS_TIMEOUT_SECONDS = 2.0
 
 
