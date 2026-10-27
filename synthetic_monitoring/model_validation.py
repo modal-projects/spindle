@@ -37,13 +37,6 @@ CALL_TIMEOUT_S = 60 * 60
 CLEANUP_GRACE_S = 5 * 60
 FRONTEND_TIMEOUT_S = 2 * 60
 
-# TODO: extend as new engines are registered in spindle.engines.
-FFT_ENGINES = (
-    "qwen3_5_4b_full_64k",
-    "qwen3_6_27b_full_64k",
-    "qwen3_5_9b_full_64k",
-)
-
 
 @dataclass(frozen=True)
 class _ProbeKind:
@@ -399,9 +392,21 @@ def _run_with_timeout(fn, timeout_s: int):
         signal.setitimer(signal.ITIMER_REAL, 0)
 
 
+def _fft_engine_names() -> list[str]:
+    import inspect
+
+    import spindle.engines
+
+    return [
+        name
+        for name, fn in inspect.getmembers(spindle.engines, inspect.isfunction)
+        if inspect.signature(fn).return_annotation in ("Engine", spindle.engines.Engine)
+    ]
+
+
 def _targets() -> list[tuple[str, str]]:
     out = [("lora-shared", row["recipe"]["name"]) for row in _served_configs()]
-    out += [("fft-scoped", name) for name in FFT_ENGINES]
+    out += [("fft-scoped", name) for name in _fft_engine_names()]
     return out
 
 
