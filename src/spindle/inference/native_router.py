@@ -3,6 +3,7 @@
 import asyncio
 import json
 import secrets
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -121,7 +122,9 @@ class NativeRouter:
                 None,
                 dict(policy=self.policy, reason="router_error", wait_s=0.0),
             )
-        return RoutedResponse(response, replica, json.loads(routing))
+        routing = json.loads(routing)
+        _log_decision(prepared, body, status, content, replica, routing)
+        return RoutedResponse(response, replica, routing)
 
     async def aclose(self):
         if self.poller is not None:
@@ -129,3 +132,32 @@ class NativeRouter:
             with suppress(asyncio.CancelledError):
                 await self.poller
         self.runtime.close()
+
+
+def _log_decision(prepared, body, status, content, replica, routing):
+    """Ablation measurement: one JSON line per routed request."""
+    try:
+        meta = json.loads(content).get("meta_info") or {}
+    except (ValueError, AttributeError):
+        meta = {}
+    print(
+        "spindle.routing "
+        + json.dumps(
+            dict(
+                **routing,
+                t=time.time(),
+                adapter=prepared.adapter,
+                affinity=prepared.affinity,
+                replica=replica,
+                status=status,
+                prompt_tokens=len(body["input_ids"]),
+                engine_cached_tokens=meta.get("cached_tokens"),
+                completion_tokens=meta.get("completion_tokens"),
+                e2e_latency=meta.get("e2e_latency"),
+                queue_time=meta.get("queue_time"),
+                forward_entry_time=meta.get("forward_entry_time"),
+                prefill_finished_time=meta.get("prefill_finished_time"),
+            )
+        ),
+        flush=True,
+    )
