@@ -74,6 +74,9 @@ class Config(BaseConfig):
     inference_cpu = 32
     inference_memory_mib = 700_000
     inference_disk_mib = 600_000
+    # A sampler takes about 20 minutes to start, so one starts with the trainer and
+    # stays up until the run ends.
+    inference_min_replicas = 1
     inference_max_replicas = 2
     inference_startup_timeout_s = 7200
     inference_env = {
