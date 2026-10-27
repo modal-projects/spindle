@@ -109,7 +109,7 @@ def test_sampler_sdk_training_roundtrip(encoding):
     assert row["sampling_mask_offsets"] == [0, 0, 0, 2, 5]
     assert row["routed_experts"]["shape"] == [4, 2, 1]
     # Exercise zero-loss DP padding, not only a single-rank transport.
-    rows = pad_slot_rows(((0, row),), 2)
+    rows, _ = pad_slot_rows(((0, row),), 2)
     batch = {}
     add_replay_to_train_data(batch, [r for _, r in rows])
     assert batch["rollout_routed_experts"][0].tolist() == [

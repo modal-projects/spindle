@@ -50,7 +50,7 @@ def test_mixed_shapes_alignment_and_outputs():
     assert rows[0]["tokens"][:3] == [1, 2, 3]
     assert rows[1]["target_tokens"][:3] == [[2, 4], [3, 5], [4, 6]]
     assert rows[1]["weights"] == [[1.0, 1.0]] * 3 + [[0.0, 0.0]] * 4
-    padded = pad_slot_rows(prepared.slot_rows, 4)
+    padded, _ = pad_slot_rows(prepared.slot_rows, 4)
     assert len(padded) == 4 and padded[-1][1]["weights"] == [0.0]
     raw = [
         {"loss": 1, "logprobs": [-1.0] * 7},

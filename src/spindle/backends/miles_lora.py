@@ -208,9 +208,9 @@ class MilesCommandBackend(Backend):
             self._timer.phase(phase_name, step, model_id=batch.items[0].model_id),
             self._record(f"spindle/{phase_name}"),
         ):
-            slot_rows = pad_slot_rows(
+            slot_rows, kept = pad_slot_rows(
                 prepared.slot_rows,
-                self.config.data_parallel_size,
+                self.config.data_parallel_size * self.config.micro_batch_size,
             )
             raw_outputs = self.runtime.forward_backward(
                 slot_rows,
@@ -223,7 +223,7 @@ class MilesCommandBackend(Backend):
             duration_s=round(time.perf_counter() - started, 3),
             step=step,
         )
-        raw_outputs = raw_outputs[: len(prepared.slot_rows)]
+        raw_outputs = [raw_outputs[index] for index in kept]
         if not batch.forward_only:
             for item in batch.items:
                 self.jobs[item.model_id].accumulating = True

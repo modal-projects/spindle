@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import groupby
 from math import prod
 from typing import Any
 
@@ -25,11 +26,26 @@ class PreparedBatch:
 def pad_slot_rows(
     slot_rows: tuple[tuple[int, dict[str, Any]], ...],
     multiple: int,
-) -> tuple[tuple[int, dict[str, Any]], ...]:
-    """Pad to a multiple of multiple with zero-weight rows for Miles DP sharding."""
-    if multiple <= 1 or len(slot_rows) % multiple == 0:
-        return slot_rows
-    slot, last = slot_rows[-1]
+) -> tuple[tuple[tuple[int, dict[str, Any]], ...], tuple[int, ...]]:
+    """Pad each slot's rows to a multiple of ``multiple`` with zero-weight rows.
+
+    Miles deals rows round-robin over DP ranks and sorts each rank's rows by
+    slot, so padding every slot to ``dp * micro_batch_size`` rows gives each
+    rank fixed-size micro-batches that each hold one slot. Returns the padded
+    rows and the positions of the original rows in them.
+    """
+    padded: list[tuple[int, dict[str, Any]]] = []
+    kept: list[int] = []
+    for slot, group in groupby(slot_rows, key=lambda slot_row: slot_row[0]):
+        rows = list(group)
+        kept.extend(range(len(padded), len(padded) + len(rows)))
+        padded.extend(rows)
+        pad = _pad_row(rows[-1][1])
+        padded.extend((slot, dict(pad)) for _ in range(-len(rows) % multiple))
+    return tuple(padded), tuple(kept)
+
+
+def _pad_row(last: dict[str, Any]) -> dict[str, Any]:
     pad: dict[str, Any] = {
         "tokens": last["tokens"][:2],
         "target_len": 1,
@@ -51,8 +67,7 @@ def pad_slot_rows(
     if "sampling_mask_ids" in last:
         pad["sampling_mask_ids"] = []
         pad["sampling_mask_offsets"] = [0, 0]
-    n_pad = -len(slot_rows) % multiple
-    return (*slot_rows, *((slot, dict(pad)) for _ in range(n_pad)))
+    return pad
 
 
 def prepare_batch(

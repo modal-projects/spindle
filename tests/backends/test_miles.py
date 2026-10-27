@@ -201,6 +201,20 @@ def test_config_static_micro_batches_replace_dynamic_batching() -> None:
     assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
     assert "--use-dynamic-batch-size" in _config().miles_arguments()
 
+    arguments = _config(dynamic_batch_size=False, micro_batch_size=8).miles_arguments()
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "8"
+
+
+@pytest.mark.parametrize("micro_batch_size", [0, 2.0])
+def test_config_rejects_bad_micro_batch_size(micro_batch_size) -> None:
+    with pytest.raises(ValueError, match="micro_batch_size"):
+        _config(dynamic_batch_size=False, micro_batch_size=micro_batch_size).validate()
+
+
+def test_config_rejects_micro_batches_with_dynamic_batching() -> None:
+    with pytest.raises(ValueError, match="dynamic_batch_size"):
+        _config(micro_batch_size=8).validate()
+
 
 def test_config_points_reference_load_at_the_hf_checkpoint() -> None:
     arguments = _config().miles_arguments()
@@ -392,15 +406,29 @@ def test_backend_routes_batches_and_preserves_per_model_state(tmp_path) -> None:
 
 def test_pad_slot_rows_adds_zero_weight_rows() -> None:
     rows = tuple((0, {"tokens": [1, 2], "target_len": 1}) for _ in range(11))
-    padded = pad_slot_rows(rows, 2)
+    padded, kept = pad_slot_rows(rows, 2)
     assert len(padded) == 12
+    assert kept == tuple(range(11))
     assert padded[-1] == (
         0,
         {"tokens": [1, 2], "target_len": 1, "target_tokens": [2]},
     )
 
     rows = tuple((0, {"tokens": [1, 2], "target_len": 1}) for _ in range(3))
-    assert len(pad_slot_rows(rows, 4)) == 4
+    assert len(pad_slot_rows(rows, 4)[0]) == 4
+    assert pad_slot_rows(rows, 1) == (rows, (0, 1, 2))
+
+
+def test_pad_slot_rows_pads_each_slot_to_whole_micro_batches() -> None:
+    rows = (
+        *((0, {"tokens": [1, 2], "target_len": 1}) for _ in range(3)),
+        *((1, {"tokens": [3, 4], "target_len": 1}) for _ in range(2)),
+    )
+    padded, kept = pad_slot_rows(rows, 4)
+    assert [slot for slot, _ in padded] == [0, 0, 0, 0, 1, 1, 1, 1]
+    assert kept == (0, 1, 2, 4, 5)
+    assert padded[3][1]["tokens"] == [1, 2]
+    assert padded[7][1]["tokens"] == [3, 4]
 
 
 def test_backend_pads_dp_ragged_batches(tmp_path) -> None:
@@ -455,6 +483,40 @@ def test_backend_pads_dp_ragged_batches(tmp_path) -> None:
         )
     )
     assert len(dp1_runtime.last_slot_rows) == 1
+
+
+def test_backend_pads_each_slot_to_dp_micro_batches(tmp_path) -> None:
+    runtime = FakeMilesRuntime()
+    backend = MilesCommandBackend(
+        _config(
+            actor_num_gpus_per_node=4,
+            tensor_model_parallel_size=2,
+            dynamic_batch_size=False,
+            micro_batch_size=2,
+        ),
+        checkpoint_dir=tmp_path / "checkpoints",
+        capture_dir=tmp_path / "captures",
+        base_model="Qwen/Qwen3-4B",
+        runtime=runtime,
+    )
+    backend.accept_model("model-a", _spec())
+    backend.accept_model("model-b", _spec())
+
+    outputs = backend.forward_backward(
+        ForwardBatch(
+            items=(
+                ForwardItem("model-b", (_datum([4, 5, 6], 7),)),
+                ForwardItem("model-a", (_datum([1, 2], 3),)),
+            ),
+            loss_fn="cross_entropy",
+        )
+    )
+
+    assert [slot for slot, _ in runtime.last_slot_rows] == [0, 0, 0, 0, 1, 1, 1, 1]
+    lengths = [row["target_len"] for _, row in runtime.last_slot_rows]
+    assert lengths == [2, 1, 1, 1, 3, 1, 1, 1]
+    assert outputs[0].loss_fn_outputs[0]["logprobs"].data == [-2.0, -2.0, -2.0]
+    assert outputs[1].loss_fn_outputs[0]["logprobs"].data == [-1.0, -1.0]
 
 
 def test_checkpoint_capture_persist_and_restore(tmp_path, monkeypatch) -> None:

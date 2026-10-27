@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- `miles_cfg.micro_batch_size` trains several sequences per micro-batch when `dynamic_batch_size` is off. The DeepSeek-V4.1-Flash 8K recipes train 8 sequences per micro-batch and pad rows to a multiple of 128 tokens.
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.

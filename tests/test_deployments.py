@@ -101,6 +101,7 @@ def test_no_model_catalog_required():
             {"miles_cfg__cli_options": {"pipeline_model_parallel_size": 2}},
             "managed",
         ),
+        ({"miles_cfg__cli_options": {"micro_batch_size": 2}}, "managed"),
         ({"sglang_cfg": {"model_path": "other"}}, "managed"),
         ({"sglang_cfg": {"tp_size": 2}}, "replica GPU"),
         ({"trainer_max_clients_per_instance": 7}, "max_lora_slots"),
@@ -126,9 +127,10 @@ def test_deepseek_v41_lora_recipe():
     ) == (16, 4, 1, 16, 1)
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
-    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "8"
     assert "--use-dynamic-batch-size" not in arguments
     assert miles.cli_options["qkv_format"] == "bshd"
+    assert miles.cli_options["data_pad_size_multiplier"] == 32
     assert miles.cli_options["moe_router_freeze_gate"] is True
     assert lora_target_flags(miles.target_modules) == (True, True, False)
 
@@ -160,6 +162,7 @@ def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
         8,
         16,
     )
+    assert miles.micro_batch_size == 1
     assert row.inference_settings["context_length"] == 32768
 
 

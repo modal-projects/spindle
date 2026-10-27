@@ -35,6 +35,7 @@ MILES_MANAGED = {
     "use_dynamic_global_batch_size",
     "delay_split_train_data_by_dp",
     "use_dynamic_batch_size",
+    "micro_batch_size",
     "optimizer",
     "gradient_accumulation_fusion",
     "save",

@@ -93,6 +93,7 @@ class MilesBackendConfig:
     )
     max_tokens_per_gpu: int = 8192
     dynamic_batch_size: bool = True
+    micro_batch_size: int = 1
     align_sequences_to_parallel_layout: bool = False
     extra_args: tuple[str, ...] = ()
     cli_options: dict[str, Any] = field(default_factory=dict)
@@ -135,10 +136,15 @@ class MilesBackendConfig:
             "max_lora_slots": self.max_lora_slots,
             "max_lora_rank": self.max_lora_rank,
             "max_tokens_per_gpu": self.max_tokens_per_gpu,
+            "micro_batch_size": self.micro_batch_size,
         }
         for name, value in positive.items():
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.dynamic_batch_size and self.micro_batch_size != 1:
+            raise ValueError(
+                "micro_batch_size applies only when dynamic_batch_size is off"
+            )
         if not self.hf_checkpoint:
             raise ValueError("hf_checkpoint is required")
         if not self.model_type and not self.cli_options:
@@ -244,8 +250,7 @@ class MilesBackendConfig:
                 "--max-tokens-per-gpu",
                 str(self.max_tokens_per_gpu),
             ]
-        # Attention layouts such as bshd take one sequence per micro-batch.
-        return ["--micro-batch-size", "1"]
+        return ["--micro-batch-size", str(self.micro_batch_size)]
 
 
 def parse_backend_config(
