@@ -579,23 +579,17 @@ def create_control_plane_app(
 
     @app.post("/api/v1/forward_backward")
     async def forward_backward(request: Request) -> dict[str, str]:
-        body = await request.body()
-        mark(
-            "cp.forward_backward.received",
-            bytes=len(body),
-            encoding=request.headers.get("content-encoding", "identity"),
-        )
+        received = await request.body()
+        encoding = request.headers.get("content-encoding", "identity")
+        mark("cp.forward_backward.received", bytes=len(received), encoding=encoding)
         content_type = request.headers.get("content-type", "application/json")
         body, identity = await asyncio.to_thread(
-            _training_envelope,
-            body,
-            content_type,
-            request.headers.get("content-encoding", "identity"),
+            _training_envelope, received, content_type, encoding
         )
         mark("cp.forward_backward.decompressed", bytes=len(body))
         model_id = identity["model_id"]
         engine = await control_plane.engine_for(model_id)
-        request_id = await engine.forward_backward(body, content_type)
+        request_id = await engine.forward_backward(received, content_type, encoding)
         mark("cp.forward_backward.forwarded", request_id=request_id, model_id=model_id)
         return {"request_id": request_id, "model_id": model_id}
 

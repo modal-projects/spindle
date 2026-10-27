@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-import zstandard
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
@@ -110,12 +109,10 @@ def create_engine_app(server: EngineApi, *, token: str | None = None) -> FastAPI
 
     @app.post("/api/v1/forward_backward")
     async def forward_backward(request: Request) -> dict[str, str]:
-        body = await request.body()
-        if request.headers.get("content-encoding") == "zstd":
-            body = zstandard.ZstdDecompressor().decompress(body)
         request_id = await server.forward_backward(
-            body,
+            await request.body(),
             request.headers.get("content-type", "application/json"),
+            request.headers.get("content-encoding", "identity"),
         )
         return {"request_id": request_id}
 
@@ -239,11 +236,14 @@ class HttpEngineClient:
         _raise_mapped(response)
         return tuple(response.json()["model_ids"])
 
-    async def forward_backward(self, body: bytes, content_type: str) -> str:
+    async def forward_backward(
+        self, body: bytes, content_type: str, content_encoding: str = "identity"
+    ) -> str:
+        headers = {"Content-Type": content_type}
+        if content_encoding != "identity":
+            headers["Content-Encoding"] = content_encoding
         response = await self.http.post(
-            "/api/v1/forward_backward",
-            content=body,
-            headers={"Content-Type": content_type},
+            "/api/v1/forward_backward", content=body, headers=headers
         )
         _raise_mapped(response)
         return response.json()["request_id"]
