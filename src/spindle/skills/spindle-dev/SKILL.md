@@ -1,7 +1,7 @@
 ---
 name: spindle-dev
 description: Contributor guide for modifying the Spindle repo itself.
-when_to_use: Changing Spindle internals (configs, backends, control plane, engine, publication, sampling) or writing a validation entry. Not for running training.
+when_to_use: Changing Spindle internals (configs, backends, control plane, engine, publication, sampling), upstreaming a config fix, or writing a validation entry. Not for running training.
 ---
 
 # Developing Spindle
@@ -23,13 +23,10 @@ Lanes: GPU ops serialize; `capture_*` runs on the GPU lane, `persist_*`/`publish
 - Limits: `trainer.max_instances`, `inference.min_replicas`/`max_replicas`. Platform settings must match across the config set.
 - Verify: `uv run --no-sync pytest -q` (preset resolution + JSON round-trip) and `spindle config validate`; live-check on an isolated frontend per docs/deployment-validation.md.
 
-## Add a backend
+## Task references
 
-- Implement `Backend` in `backends/contract.py` (`accept_model`, `forward_backward(ForwardBatch)`, optimizer step, `load_checkpoint`, capture/persist/publish split, `unload_model`, shutdown) plus `build_executor()` returning the `DistributedExecutor`. A model definition passes `module:build_executor` to `run_engine_with_backend`.
-- Rank 0 exposes the HTTP bridge; followers run `run_follower_loop` (engine/spmd.py). `HttpBackendClient` crosses the subprocess boundary.
-- Lock-free lanes (rule above); references `backends/megatron_lora.py`, `backends/megatron_fft.py`.
-- A new loss needs the backend's supported set + `loss_fn_config` validation; contract `LossFn` is the union.
-- Tests: `tests/backends`, `tests/engine` (CPU). GPU smoke pattern: `tests/gpu` + `scripts/check_multi_targets_gpu.py` (temporary H100s, no deploy).
+- Add a backend: [add-backend.md](references/add-backend.md)
+- Improve a bundled config and upstream the fix: [upstream-config.md](references/upstream-config.md)
 
 ## Validation entries
 

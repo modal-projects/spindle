@@ -10,6 +10,8 @@ when_to_use: Launch, continue, evaluate, monitor, or debug a Spindle training ru
 
 - Asked to train: own plan → prove → smoke → monitor → promote. Asked for one stage: only that stage. A status request is not a relaunch; a diagnosis request is not a fix.
 - Compute-billed: cold starts and idle capacity are real spend in the user's workspace.
+- For Tinker SDK usage, datums/renderers, losses, hyperparameters, RL/SFT/DPO/distillation methodology, and generic debugging, use tinker-cookbook's skills (install in Claude Code: `/plugin marketplace add thinking-machines-lab/tinker-cookbook`, then the `tinker` plugin: `tinker:research`, `tinker:debug`), pointing `base_url` at the Spindle server.
+- Locate installed Spindle source: `python -c "import spindle.control_plane.http as m; print(m.__file__)"`.
 
 ## 1. Plan
 
@@ -28,7 +30,7 @@ sample → `forward_backward` → `optim_step` → `save_weights_and_get_samplin
 
 ## 3. Smoke (~10 steps)
 
-Same config, real batch size. Compare step timing (rollout / train / publish) and reward against [baselines.md](references/baselines.md). One change at a time; consult the symptom table before changing anything.
+Same config, real batch size. Compare step timing (rollout / train / publish) and reward against the closest run in [docs/validation.md](https://github.com/modal-projects/spindle/blob/main/docs/validation.md) or [docs/lora_validation.md](https://github.com/modal-projects/spindle/blob/main/docs/lora_validation.md). One change at a time; consult the symptom table before changing anything.
 
 ## 4. Promote and report
 
@@ -43,8 +45,9 @@ Same config, real batch size. Compare step timing (rollout / train / publish) an
 | --- | --- |
 | 408s, hangs, slow cold start | startup |
 | Slow steps, idle trainer, rollout bottleneck | throughput |
+| Where a step's GPU time goes | [profiling.md](references/profiling.md) |
 | logprob drift, nondeterminism | numerics |
 | 410 `model_lost`, uncertain updates, retries | recovery |
 | Unrecognized API error | errors |
 
-Datum shapes, masks, loss matrix: [sdk.md](references/sdk.md). Advantages, staleness, DPO, validated hyperparams: [training.md](references/training.md).
+Spindle-specific SDK notes, loss support pointers, staleness, DPO, validated hyperparams: [training.md](references/training.md).
