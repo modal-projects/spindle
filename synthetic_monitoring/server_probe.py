@@ -26,6 +26,7 @@ HISTORY_DICT_NAME = "spindle-synmon-baselines"
 SHARED_FRONTEND = "spindle"
 SHARED_MODEL = "Qwen/Qwen3.6-35B-A3B"
 SAMPLE_PROMPT = "What is 2 + 2? Answer with only the number."
+REPORT_CHANNEL_ID = "C0CDETGBHC0"
 CALL_TIMEOUT_S = 60 * 60
 CLEANUP_GRACE_S = 5 * 60
 LOOKBACK_S = 90 * 24 * 3600
@@ -64,9 +65,7 @@ probe_image = (
     .add_local_python_source("spindle", "synthetic_monitoring")
 )
 
-slack_secret = modal.Secret.from_name(
-    "spindle-synmon-slack", environment_name=MODAL_ENV
-)
+slack_secret = modal.Secret.from_name("gym-bot-slack", environment_name=MODAL_ENV)
 api_secret = modal.Secret.from_name("spindle-api", environment_name=MODAL_ENV)
 hf_secret = modal.Secret.from_name("huggingface-secret", environment_name=MODAL_ENV)
 
@@ -523,7 +522,7 @@ def launch_weekly(name: str = "") -> list[dict]:
             continue
         rows.append(payload)
 
-    _post_report(rows)
+    _post_report(rows, channel=REPORT_CHANNEL_ID)
     if any(row["status"] != "success" for row in rows):
         raise RuntimeError("synmon fan-out finished with failures")
     return rows
