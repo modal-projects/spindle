@@ -37,7 +37,12 @@ from .image_dependencies import (
     TINKER_PACKAGE,
     ignore_config_source,
 )
-from .kernel_cache import KERNEL_CACHE_ENV, KERNEL_CACHE_ROOT, kernel_cache_volume
+from .kernel_cache import (
+    KERNEL_CACHE_ENV,
+    KERNEL_CACHE_ROOT,
+    SAMPLER_KERNEL_CACHE_ENV,
+    kernel_cache_volume,
+)
 from .kv import shared_kv
 from .lora_pool import LoraPoolSpec
 from .lora_pool import deploy_pool as deploy_lora
@@ -297,7 +302,7 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         ephemeral_disk=recipe.inference_disk_mib or None,
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
-        env=deployment_env(recipe.inference_env),
+        env={**SAMPLER_KERNEL_CACHE_ENV, **deployment_env(recipe.inference_env)},
         min_containers=minimum,
         max_containers=maximum,
         target_concurrency=recipe.inference_target_concurrency,

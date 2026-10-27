@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Changed
+
+- Sampler replicas keep their compiled kernels on the shared kernel-cache volume, as trainers already do. A DeepSeek-V4.1-Flash sampler skips about four minutes of kernel compilation once the cache is warm.
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.

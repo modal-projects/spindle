@@ -37,6 +37,9 @@ def test_kernel_cache_creates_one_v2_volume_without_live_lookup() -> None:
         "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/kernel-cache/inductor",
         "TILELANG_CACHE_DIR": "/root/.cache/kernel-cache/tilelang",
     }
+    assert module["SAMPLER_KERNEL_CACHE_ENV"] == {
+        "SGLANG_CACHE_DIR": "/root/.cache/kernel-cache/sglang"
+    }
 
 
 def test_configured_trainers_mount_the_shared_kernel_cache() -> None:

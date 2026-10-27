@@ -1,8 +1,8 @@
-"""Persistent Triton/TorchInductor/TileLang kernel cache shared across trainer containers.
+"""Persistent kernel cache shared across trainer and sampler containers.
 
-Trainers run in single-use containers, so without this every instance compiles
-its kernels from scratch. Mounting one v2 Volume at ``KERNEL_CACHE_ROOT`` and
-pointing the compilers at it lets later containers reuse earlier compiles.
+Trainers and samplers run in fresh containers, so without this every instance
+compiles its kernels from scratch. Mounting one v2 Volume at ``KERNEL_CACHE_ROOT``
+and pointing the compilers at it lets later containers reuse earlier compiles.
 """
 
 from __future__ import annotations
@@ -23,3 +23,7 @@ KERNEL_CACHE_ENV = {
     "TORCHINDUCTOR_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/inductor",
     "TILELANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/tilelang",
 }
+
+# SGLang keeps every JIT cache it uses (Triton, Inductor, TileLang, FlashInfer,
+# DeepGEMM) under this one directory, apart from the trainer's caches.
+SAMPLER_KERNEL_CACHE_ENV = {"SGLANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/sglang"}
