@@ -163,6 +163,15 @@ def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
     assert row.inference_settings["context_length"] == 32768
 
 
+@pytest.mark.parametrize("context, tp", [("8k", 4), ("32k", 8)])
+def test_deepseek_v41_1017_recipes_load_the_1017_release(context, tp):
+    row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert miles.tensor_model_parallel_size == tp
+    assert row.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    assert row.recipe.weights_revision == "1bae0e1088993b9b82de08f59de5be5a34e42170"
+
+
 def test_asset_paths_follow_the_model():
     a = resolved()
     assert a.asset_path == f"/assets/{a.recipe.model}"
