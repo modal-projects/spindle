@@ -196,8 +196,10 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             if d.status == "route" {
                 break d;
             }
-            if matches!(d.reason, "pending_prefix" | "cached_capacity")
-                && affinity_started.is_none()
+            if matches!(
+                d.reason,
+                "pending_prefix" | "cached_capacity" | "cached_saturated" | "adapter_saturated"
+            ) && affinity_started.is_none()
             {
                 affinity_started = Some(Instant::now());
             }
