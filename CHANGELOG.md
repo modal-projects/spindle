@@ -12,7 +12,6 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Changed
 
 - DeepSeek-V4.1-Flash recipes load DeepSeek's FP8/FP4 release instead of a BF16 export. The trainer dequantizes it to BF16 as it loads, and samplers serve it with FP8 routed experts. Redeploying downloads the release once.
-- DeepSeek-V4.1-Flash samplers queue up to 128 requests instead of 8, so an RL step's group samples wait in the sampler instead of being turned away and retried.
 
 ### Fixed
 
