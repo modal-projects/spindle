@@ -7,6 +7,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Changed
 
 - The frontend server runs in `platform.modal.region`, or `us-east` when no region is set. Before, its containers could start in any region; a frontend outside us-east added 2 s or more to each training step.
+- `forward` requests use the same binary transport and protobuf results as `forward_backward`, and queued forwards are batched into one trainer call. For 128 examples with `[seq, 5]` labels this saves about 1.6 s per forward.
 
 ## 0.1.2 - 2026-10-27
 

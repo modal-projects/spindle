@@ -18,6 +18,9 @@ class OperationKind(StrEnum):
     SKIP = "skip"
 
 
+# Operations the engine batches and sends over the binary training transport.
+BATCHED_OPERATIONS = frozenset({OperationKind.FORWARD, OperationKind.FORWARD_BACKWARD})
+
 JSON_OPERATIONS = (
     OperationKind.FORWARD,
     OperationKind.OPTIM_STEP,
