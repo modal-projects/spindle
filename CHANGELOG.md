@@ -10,6 +10,7 @@ DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from
 
 ### Added
 
+- `qwen3_4b_lora_32k`: Qwen3-4B LoRA on 4× H100 with 32K context, one model replica per GPU.
 - DeepSeek-V4.1-Flash-1017 LoRA recipes, `deepseek_v41_flash_1017_lora_8k` and `deepseek_v41_flash_1017_lora_32k`, which load the 1017 release (#129).
 - DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four (#128).
 - `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers (#128).
