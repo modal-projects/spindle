@@ -404,12 +404,6 @@ def _fft_engine_names() -> list[str]:
     ]
 
 
-def _targets() -> list[tuple[str, str]]:
-    out = [("lora-shared", row["recipe"]["name"]) for row in _served_configs()]
-    out += [("fft-scoped", name) for name in _fft_engine_names()]
-    return out
-
-
 @app.function(
     image=probe_image,
     timeout=MONITOR_TIMEOUT_S,
@@ -454,10 +448,34 @@ def probe(kind: str, target: str) -> dict:
     secrets=[slack_secret],
 )
 def launch_weekly(name: str = "") -> list[dict]:
-    targets = _targets()
+    targets: list[tuple[str, str]] = []
+    discovery_error: Exception | None = None
+    try:
+        targets += [("lora-shared", row["recipe"]["name"]) for row in _served_configs()]
+    except Exception as exc:
+        discovery_error = exc
+    targets += [("fft-scoped", engine) for engine in _fft_engine_names()]
     if name:
         targets = [t for t in targets if f"{t[0]}/{t[1]}" == name or t[0] == name]
+        if not targets:
+            raise ValueError(f"no probe matches {name!r}")
+
     rows: list[dict] = []
+    if discovery_error is not None:
+        rows.append(
+            {
+                "probe": "lora-shared",
+                "status": "failed",
+                "total_duration_s": None,
+                "delta": "n/a",
+                "url": None,
+                "timings": {},
+                "error": (
+                    f"deployed_configs failed: {type(discovery_error).__name__}: "
+                    f"{discovery_error}"
+                ),
+            }
+        )
     payloads = list(
         probe.map(
             [t[0] for t in targets],
