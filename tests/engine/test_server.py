@@ -164,6 +164,24 @@ async def forward_backward(
     return await server.forward_backward(body, "application/json")
 
 
+async def forward(server: Engine, seq_id: int, model_id: str = "model-a") -> str:
+    return await server.forward(
+        {
+            "model_id": model_id,
+            "seq_id": seq_id,
+            "forward_input": {
+                "data": [
+                    {
+                        "model_input": {"chunks": [{"tokens": [seq_id]}]},
+                        "loss_fn_inputs": {},
+                    }
+                ],
+                "loss_fn": "cross_entropy",
+            },
+        }
+    )
+
+
 def test_capacity_and_idempotent_accept() -> None:
     async def run() -> None:
         server = Engine(EchoExecutor(), max_models=1)
@@ -672,6 +690,80 @@ def test_batches_compatible_forward_backward_across_models() -> None:
     asyncio.run(run())
 
 
+def test_batches_forward_separately_from_forward_backward() -> None:
+    async def run() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class RecordingExecutor(EchoExecutor):
+            def __init__(self) -> None:
+                self.batches = []
+
+            async def execute(self, model_id, kind, payload):
+                if kind == OperationKind.OPTIM_STEP:
+                    started.set()
+                    await release.wait()
+                return await super().execute(model_id, kind, payload)
+
+            async def execute_forward_backward_batch(self, executions):
+                self.batches.append(
+                    [(item.model_id, item.kind.value) for item in executions]
+                )
+                return await super().execute_forward_backward_batch(executions)
+
+        executor = RecordingExecutor()
+        server = Engine(executor)
+        for model_id in ("model-a", "model-b", "model-c"):
+            await server.accept_model(model_id, {})
+        await server.optim_step({"model_id": "model-c", "seq_id": 1, "adam_params": {}})
+        await started.wait()
+        await forward(server, 1, model_id="model-a")
+        await forward(server, 1, model_id="model-b")
+        await forward_backward(server, 2, model_id="model-c")
+
+        release.set()
+        for request_id in ("model-a:1", "model-b:1", "model-c:2"):
+            state = await server.retrieve_future(request_id, timeout=1.0)
+            assert state.status == FutureStatus.COMPLETE
+        assert executor.batches == [
+            [("model-a", "forward"), ("model-b", "forward")],
+            [("model-c", "forward_backward")],
+        ]
+        await server.close()
+
+    asyncio.run(run())
+
+
+def test_failed_forward_batch_retries_each_forward_alone() -> None:
+    async def run() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class FailingExecutor(EchoExecutor):
+            async def execute(self, model_id, kind, payload):
+                if kind == OperationKind.OPTIM_STEP:
+                    started.set()
+                    await release.wait()
+                if model_id == "model-b":
+                    raise ValueError("bad input")
+                return await super().execute(model_id, kind, payload)
+
+        server = Engine(FailingExecutor())
+        for model_id in ("model-a", "model-b", "model-c"):
+            await server.accept_model(model_id, {})
+        await server.optim_step({"model_id": "model-c", "seq_id": 1, "adam_params": {}})
+        await started.wait()
+        await forward(server, 1, model_id="model-a")
+        await forward(server, 1, model_id="model-b")
+
+        release.set()
+        good = await server.retrieve_future("model-a:1", timeout=1.0)
+        bad = await server.retrieve_future("model-b:1", timeout=1.0)
+        assert good.status == FutureStatus.COMPLETE
+        assert bad.status == FutureStatus.FAILED and "bad input" in bad.error
+        await server.close()
+
+    asyncio.run(run())
+
+
 def test_batches_consecutive_forward_backward_for_one_model() -> None:
     async def run() -> None:
         first_started = asyncio.Event()
@@ -856,12 +948,12 @@ def test_forward_and_load_wait_their_turn_behind_older_forward_backward() -> Non
 
         class RecordingExecutor(EchoExecutor):
             async def execute(self, model_id, kind, payload):
-                if kind != OperationKind.FORWARD_BACKWARD:
+                if kind == OperationKind.LOAD_WEIGHTS:
                     order.append((model_id, kind.value))
                 return await super().execute(model_id, kind, payload)
 
             async def execute_forward_backward_batch(self, executions):
-                order.extend((item.model_id, "forward_backward") for item in executions)
+                order.extend((item.model_id, item.kind.value) for item in executions)
                 if len(order) == 1:
                     first_started.set()
                     await release_first.wait()

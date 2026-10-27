@@ -15,7 +15,14 @@ from spindle.encoding import fingerprint
 from spindle.errors import EngineSaturated, RecordNotFound, SequenceConflict
 from spindle.request_timing import mark
 
-from .api import Command, Executor, FutureState, FutureStatus, OperationKind
+from .api import (
+    BATCHED_OPERATIONS,
+    Command,
+    Executor,
+    FutureState,
+    FutureStatus,
+    OperationKind,
+)
 from .ingress import decode_forward_backward, decode_json_operation
 from .operations import (
     LoadCheckpointPayload,
@@ -489,20 +496,8 @@ class Engine:
             )
             started = time.time()
             try:
-                if operation.kind == OperationKind.FORWARD_BACKWARD:
-                    results = await self.executor.execute_forward_backward_batch(
-                        tuple(
-                            Command(
-                                item.model_id,
-                                item.kind,
-                                item.payload,
-                                item.encoded_payload,
-                            )
-                            for item in operations
-                        )
-                    )
-                    if len(results) != len(operations):
-                        raise RuntimeError("executor returned the wrong result count")
+                if operation.kind in BATCHED_OPERATIONS:
+                    results = await self._execute_batch(operations)
                 else:
                     results = (
                         await self.executor.execute(
@@ -523,9 +518,17 @@ class Engine:
                 )
             except Exception as exc:  # noqa: BLE001
                 error = _failure(exc, f"{operation.kind.value} x{len(operations)}")
-                states = tuple(
-                    FutureState(FutureStatus.FAILED, error=error) for _ in operations
-                )
+                if operation.kind == OperationKind.FORWARD and len(operations) > 1:
+                    # Forwards change no state: retry alone so one client's bad
+                    # input does not fail the others it was batched with.
+                    states = tuple(
+                        [await self._execute_alone(item) for item in operations]
+                    )
+                else:
+                    states = tuple(
+                        FutureState(FutureStatus.FAILED, error=error)
+                        for _ in operations
+                    )
                 mark(
                     "engine.op.exec_end",
                     kind=operation.kind.value,
@@ -549,6 +552,26 @@ class Engine:
                 kind=operation.kind.value,
                 request_ids=[item.request_id for item in operations],
             )
+
+    async def _execute_batch(self, operations: tuple[Operation, ...]) -> tuple:
+        results = await self.executor.execute_forward_backward_batch(
+            tuple(
+                Command(item.model_id, item.kind, item.payload, item.encoded_payload)
+                for item in operations
+            )
+        )
+        if len(results) != len(operations):
+            raise RuntimeError("executor returned the wrong result count")
+        return results
+
+    async def _execute_alone(self, operation: Operation) -> FutureState:
+        try:
+            (result,) = await self._execute_batch((operation,))
+        except Exception as exc:  # noqa: BLE001
+            return FutureState(
+                FutureStatus.FAILED, error=_failure(exc, operation.kind.value)
+            )
+        return FutureState(FutureStatus.COMPLETE, result=result)
 
     async def _run_accept(self, operation: _AcceptOperation) -> None:
         error = None
@@ -794,7 +817,7 @@ class Engine:
         )
 
         selected = [ready[0]]
-        if ready[0].kind == OperationKind.FORWARD_BACKWARD:
+        if ready[0].kind in BATCHED_OPERATIONS:
             limit = self.max_forward_backward_batch
             models = self.max_forward_backward_models
             key = self._forward_backward_batch_key(ready[0])
@@ -804,7 +827,7 @@ class Engine:
                 if models is not None and len(selected) >= models:
                     break
                 if (
-                    operation.kind == OperationKind.FORWARD_BACKWARD
+                    operation.kind in BATCHED_OPERATIONS
                     and self._forward_backward_batch_key(operation) == key
                 ):
                     selected.append(operation)
@@ -814,7 +837,7 @@ class Engine:
                 while (
                     (limit is None or len(selected) < limit)
                     and (queued := buffered.get(seq_id)) is not None
-                    and queued.kind == OperationKind.FORWARD_BACKWARD
+                    and queued.kind in BATCHED_OPERATIONS
                     and self._forward_backward_batch_key(queued) == key
                 ):
                     selected.append(queued)
