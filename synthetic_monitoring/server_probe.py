@@ -326,6 +326,8 @@ def _probe_fft_scoped() -> tuple[dict[str, float], str, str | None]:
     with spindle.run(engine=engine, name="spindle-synmon-fft") as (url, api_key):
         timings["provision"] = time.time() - t
         timings.update(_run_rl_step(url, api_key, engine.model, "full"))
+        t = time.time()
+    timings["teardown"] = time.time() - t
     return timings, "spindle-synmon-fft", url
 
 
