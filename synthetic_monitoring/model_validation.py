@@ -461,7 +461,7 @@ def launch_weekly(name: str = "") -> list[dict]:
             raise ValueError(f"no probe matches {name!r}")
 
     rows: list[dict] = []
-    if discovery_error is not None:
+    if discovery_error is not None and not name:
         rows.append(
             {
                 "probe": "lora-shared",
