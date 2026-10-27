@@ -13,7 +13,7 @@ from stitch.publish import constrain_request
 from stitch.types import VersionRef
 
 if TYPE_CHECKING:
-    from .router_transport import RouterTransport as Router
+    from .native_router import NativeRouter as Router
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -136,14 +136,15 @@ async def sample_task(
             headers=headers,
         )
     )
-    routing_request = None
-    if router is not None and model_id is not None and not latest:
-        routing_request = router.prepare_request(
-            VersionRef(str(model_id), int(version)).identity,
-            routing_session_id,
-            prompt,
-            params["max_new_tokens"],
+    if model_id is None or latest:
+        router = None
+    routing_request = (
+        router.prepare_request(
+            VersionRef(str(model_id), int(version)).identity, routing_session_id
         )
+        if router is not None
+        else None
+    )
     async with client_context as active_client:
         outputs = await asyncio.gather(
             *(
@@ -170,7 +171,7 @@ async def sample_task(
                     trace_attrs=trace_attrs,
                     base_headers=headers,
                     request_timeout=timeout,
-                    router=router if model_id is not None and not latest else None,
+                    router=router,
                     routing_request=routing_request,
                 )
                 for index in range(num_samples)
@@ -325,7 +326,6 @@ async def _sample_one(
                 "prompt_tokens": len(prompt),
             },
         )
-        upstream = None
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
@@ -336,13 +336,10 @@ async def _sample_one(
                     gateway=gateway_url,
                     body=body,
                     headers=headers,
-                    client=client,
                     deadline=min(deadline, loop.time() + request_timeout),
-                    trace_attrs=attempt_result,
                 )
                 response = dispatched.response
-                upstream = dispatched.replica
-                observation.attrs["selected_replica"] = upstream
+                observation.attrs["selected_replica"] = dispatched.replica
                 observation.attrs["routing"] = dispatched.routing
                 observation.attrs["routing_wait_s"] = dispatched.routing["wait_s"]
                 if stats is not None:
@@ -375,8 +372,6 @@ async def _sample_one(
         else:
             attempt_result["http_status"] = response.status_code
             actual_replica = response.headers.get("x-spindle-replica")
-            if upstream is not None and actual_replica and actual_replica != upstream:
-                attempt_result["route_mismatch"] = True
             if actual_replica:
                 attempt_result["upstream"] = actual_replica
             retryable = (

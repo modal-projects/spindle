@@ -1,6 +1,6 @@
 //! PyO3 hands each request to this runtime as one awaitable. Admission,
 //! observations, retries and worker HTTP live in Rust.
-use crate::{Admission, Replica, Request, Router, Snapshot};
+use crate::{Admission, Outcome, Replica, Request, Router, Snapshot};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use serde::Deserialize;
@@ -77,12 +77,11 @@ fn error(status: u16, message: &str) -> (u16, String) {
 struct Reservation {
     scheduler: Arc<Mutex<Router>>,
     id: String,
-    outcome: &'static str,
+    outcome: Outcome,
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let _ = self
-            .scheduler
+        self.scheduler
             .lock()
             .unwrap()
             .complete(&self.id, self.outcome);
@@ -155,7 +154,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         let mut reservation = Reservation {
             scheduler: s.scheduler.clone(),
             id: id.clone(),
-            outcome: "cancelled",
+            outcome: Outcome::Released,
         };
         let route = json!({"policy":s.policy,"reason":decision.reason,"available_replicas":decision.available_replicas,
             "cached_tokens":decision.cached_tokens,"best_cached_tokens":decision.best_cached_tokens,
@@ -202,7 +201,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                         .collect();
                     if let Some(actual) = response_headers.get("x-spindle-replica") {
                         if Some(actual) != decision.replica.as_ref() {
-                            reservation.outcome = "failed";
+                            reservation.outcome = Outcome::Failed;
                             return Err(error(502, "Worker identity mismatch"));
                         }
                     }
@@ -223,16 +222,16 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                     }
                     busy = status == 429 || (status == 503 && identified);
                     reservation.outcome = if busy {
-                        "busy"
+                        Outcome::Busy
                     } else if retry {
-                        "failed"
+                        Outcome::Failed
                     } else {
-                        "ok"
+                        Outcome::Released
                     };
                     let bytes = match response.bytes().await {
                         Ok(bytes) => bytes,
                         Err(_) => {
-                            reservation.outcome = "failed";
+                            reservation.outcome = Outcome::Failed;
                             if (200..300).contains(&status) && delivery == 0 {
                                 continue;
                             }
@@ -253,7 +252,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                     }
                 }
                 Err(err) => {
-                    reservation.outcome = "failed";
+                    reservation.outcome = Outcome::Failed;
                     if delivery == 0 && !err.is_connect() {
                         continue;
                     }
@@ -341,7 +340,6 @@ impl NativeRuntime {
         let c: Config =
             serde_json::from_str(config).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let scheduler = Router::new(
-            &c.policy,
             c.capacity,
             c.prefill_tokens_per_second,
             c.balance_absolute,

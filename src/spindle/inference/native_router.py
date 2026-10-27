@@ -5,11 +5,10 @@ import json
 import secrets
 from contextlib import suppress
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from spindle_router import NativeRuntime
-
-from .router_transport import RoutedResponse
 
 
 @dataclass(frozen=True)
@@ -17,6 +16,13 @@ class RoutingKey:
     adapter: str
     affinity: str
     group: str
+
+
+@dataclass
+class RoutedResponse:
+    response: httpx.Response
+    replica: str | None
+    routing: dict[str, Any]
 
 
 class NativeRouter:
@@ -52,7 +58,7 @@ class NativeRouter:
         )
         self.poller = None
 
-    def prepare_request(self, adapter, affinity, prompt, output_tokens):
+    def prepare_request(self, adapter, affinity):
         return RoutingKey(adapter, affinity, secrets.token_hex(16))
 
     async def _discover(self):
@@ -74,9 +80,7 @@ class NativeRouter:
         gateway,
         body,
         headers,
-        client,
         deadline,
-        trace_attrs=None,
     ):
         if gateway.rstrip("/") != self.gateway:
             raise ValueError("Native router belongs to a different inference pool")

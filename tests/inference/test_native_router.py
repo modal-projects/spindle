@@ -147,12 +147,11 @@ def make_router(worker, policy="cache_wait"):
 
 async def dispatch(router, worker, id="test", timeout=3):
     return await router.dispatch(
-        router.prepare_request("adapter/v1", "group", [1, 2], 4),
+        router.prepare_request("adapter/v1", "group"),
         request_id=id,
         gateway=worker["gateway"],
         body=dict(input_ids=[1, 2], sampling_params=dict(max_new_tokens=4)),
         headers={"Modal-Session-ID": "must-be-removed"},
-        client=None,
         deadline=asyncio.get_running_loop().time() + timeout,
     )
 
@@ -431,12 +430,11 @@ def test_native_invalid_payload_does_not_reserve(worker):
         router = make_router(worker)
         try:
             result = await router.dispatch(
-                router.prepare_request("", "", [1], 1),
+                router.prepare_request("", ""),
                 request_id="bad",
                 gateway=worker["gateway"],
                 body=dict(input_ids=[1], sampling_params=dict(max_new_tokens=1)),
                 headers={},
-                client=None,
                 deadline=asyncio.get_running_loop().time() + 1,
             )
             assert result.response.status_code == 400
@@ -515,7 +513,7 @@ def test_siblings_wait_for_shared_prefix_in_native_runtime(worker):
 
     async def run():
         router = make_router(worker)
-        prepared = router.prepare_request("adapter/v1", "group", prompt, 4)
+        prepared = router.prepare_request("adapter/v1", "group")
         try:
 
             async def sample(index):
@@ -525,7 +523,6 @@ def test_siblings_wait_for_shared_prefix_in_native_runtime(worker):
                     gateway=worker["gateway"],
                     body=dict(input_ids=prompt, sampling_params=dict(max_new_tokens=4)),
                     headers={},
-                    client=None,
                     deadline=asyncio.get_running_loop().time() + 5,
                 )
 
