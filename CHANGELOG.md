@@ -18,6 +18,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 - The frontend server runs in `platform.modal.region`, or `us-east` when no region is set. Only the CPU frontend is placed; trainers and samplers stay unpinned unless the recipe sets a region. Before, frontend containers could start in any region, and one on another continent added 2 s or more to each training step.
 - `forward` requests use the same binary transport and protobuf results as `forward_backward`, and queued forwards are batched into one trainer call.
+- The Miles backend prepares labels and weights with numpy instead of per-value Python loops. For 128 examples with `[seq, 5]` labels this saves about 1 s per training call.
 
 ## 0.1.2 - 2026-10-27
 
