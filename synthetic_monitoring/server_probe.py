@@ -337,6 +337,20 @@ _PROBERS = {
 }
 
 
+def _run_with_timeout(fn, timeout_s: int):
+    import signal
+
+    def _raise(signum, frame):
+        raise TimeoutError
+
+    signal.signal(signal.SIGALRM, _raise)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return fn()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 @app.function(
     image=probe_image,
     timeout=MONITOR_TIMEOUT_S,
@@ -348,7 +362,7 @@ def probe(name: str) -> dict:
         raise ValueError(f"unknown probe {name!r}")
     print(f"synmon: probe={name!r}")
     try:
-        timings, app_name, url = _PROBERS[name]()
+        timings, app_name, url = _run_with_timeout(_PROBERS[name], config.timeout_s)
         point = RunPoint(
             ts=time.time(),
             timings=timings,
