@@ -1,4 +1,5 @@
-//! One scheduler per frontend process and inference pool; native owns transport.
+//! One scheduler per sampling process (`_execute_sample`'s container) and
+//! inference pool. The policy does no I/O; its caller owns transport.
 mod cache_wait;
 
 use serde::Deserialize;
@@ -6,6 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
+
+/// Observations at least this old never route.
+const MAX_OBSERVATION_AGE: f64 = 3.0;
 
 #[derive(Deserialize)]
 struct Work {
@@ -22,8 +26,6 @@ struct Work {
     gpu_adapters: HashSet<String>,
     request_ids: HashSet<String>,
     pending_adapters: HashSet<String>,
-    prefill_tokens: u64,
-    decode_tokens: u64,
 }
 // Decode endpoint hashes once per observation, away from the request path.
 fn deserialize_prefixes<'de, D>(deserializer: D) -> Result<HashSet<u128>, D::Error>
@@ -96,14 +98,17 @@ impl Request {
     }
 }
 
+/// One sample's admission state, kept by the caller across polls and attempts.
+#[derive(Default)]
+pub struct Admission {
+    affinity_started: Option<Instant>,
+}
+
 pub struct Decision {
     pub status: &'static str,
     pub replica: Option<String>,
     pub upstream: Option<String>,
     pub cached_tokens: usize,
-    pub backlog_seconds: f64,
-    pub prefill_seconds: f64,
-    pub adapter_seconds: f64,
     pub reason: &'static str,
     pub retry_after: f64,
     pub available_replicas: usize,
@@ -116,9 +121,6 @@ impl Decision {
             replica: None,
             upstream: None,
             cached_tokens: 0,
-            backlog_seconds: 0.0,
-            prefill_seconds: 0.0,
-            adapter_seconds: 0.0,
             reason: "capacity",
             retry_after: 0.5,
             available_replicas: 0,
@@ -140,14 +142,10 @@ pub struct Candidate {
     queued: usize,
     kv_pinned_fraction: Option<f64>,
     cached_tokens: usize,
-    backlog_seconds: f64,
-    prefill_seconds: f64,
-    adapter_seconds: f64,
 }
 struct Reservation {
     replica: String,
     adapter: String,
-    work: f64,
 }
 
 /// Built away from the asyncio thread; installation only swaps immutable state.
@@ -156,19 +154,23 @@ pub struct Snapshot {
     observed: Instant,
 }
 impl Snapshot {
-    fn new(replicas: Vec<Replica>, observed: Instant) -> Result<Self, String> {
-        let mut ids = HashSet::new();
-        if replicas.iter().any(|r| {
-            !ids.insert(&r.replica)
-                || r.upstream.is_empty()
-                || !r.work.age_seconds.is_finite()
-                || r.work.age_seconds < 0.0
-        }) {
-            return Err(String::from(
-                "duplicate replica, missing upstream or invalid snapshot age",
-            ));
+    /// Drops rows with a shared replica ID, no upstream or an invalid age.
+    /// Those replicas keep their previous observation until it ages out.
+    fn new(replicas: Vec<Replica>, observed: Instant) -> Self {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for r in &replicas {
+            *counts.entry(r.replica.clone()).or_default() += 1;
         }
-        Ok(Self { replicas, observed })
+        let replicas = replicas
+            .into_iter()
+            .filter(|r| {
+                counts[&r.replica] == 1
+                    && !r.upstream.is_empty()
+                    && r.work.age_seconds.is_finite()
+                    && r.work.age_seconds >= 0.0
+            })
+            .collect();
+        Self { replicas, observed }
     }
 }
 pub struct Router {
@@ -182,19 +184,12 @@ pub struct Router {
     updated: f64,
     capacity: usize,
     prefill_rate: f64,
-    decode_rate: f64,
-    gpu_load_seconds: f64,
-    registration_seconds: f64,
 }
 impl Router {
-    #[allow(clippy::too_many_arguments)] // Flat Python configuration boundary.
     fn new(
         policy: &str,
         capacity: usize,
         prefill_rate: f64,
-        decode_rate: f64,
-        gpu_load_seconds: f64,
-        registration_seconds: f64,
         balance_absolute: usize,
         balance_relative: f64,
         cache_threshold: f64,
@@ -208,24 +203,16 @@ impl Router {
         if !cache_threshold.is_finite() || !(0.0..=1.0).contains(&cache_threshold) {
             return Err(String::from("cache_threshold must be between 0 and 1"));
         }
-        let wait_policy = cache_wait::CacheWait {
-            absolute: balance_absolute,
-            relative: balance_relative,
-            threshold: cache_threshold,
-        };
-        if capacity == 0
-            || [prefill_rate, decode_rate]
-                .iter()
-                .any(|x| !x.is_finite() || *x <= 0.0)
-            || [gpu_load_seconds, registration_seconds]
-                .iter()
-                .any(|x| !x.is_finite() || *x < 0.0)
-        {
-            return Err(String::from("invalid capacity or service rates"));
+        if capacity == 0 || !prefill_rate.is_finite() || prefill_rate <= 0.0 {
+            return Err(String::from("invalid capacity or prefill rate"));
         }
         Ok(Self {
             replicas: vec![],
-            wait_policy,
+            wait_policy: cache_wait::CacheWait {
+                absolute: balance_absolute,
+                relative: balance_relative,
+                threshold: cache_threshold,
+            },
             reservations: HashMap::new(),
             groups: HashMap::new(),
             busy_until: HashMap::new(),
@@ -234,9 +221,6 @@ impl Router {
             updated: 0.0,
             capacity,
             prefill_rate,
-            decode_rate,
-            gpu_load_seconds,
-            registration_seconds,
         })
     }
 
@@ -260,20 +244,34 @@ impl Router {
         Ok(request)
     }
 
-    /// Replace a complete observation, not an incremental request-path lookup.
     #[cfg(test)]
     fn update_snapshot(&mut self, json: &str) -> Result<(), String> {
         let observed = Instant::now();
         let rows = serde_json::from_str(json).map_err(|e| format!("{e}"))?;
-        let snapshot = Snapshot::new(rows, observed)?;
-        self.install_snapshot(snapshot);
+        self.install_snapshot(Snapshot::new(rows, observed));
         Ok(())
     }
 
+    /// A replica missing from one poll keeps its last observation until it ages out.
     fn install_snapshot(&mut self, snapshot: Snapshot) {
-        self.replicas = snapshot.replicas;
-        self.updated =
+        let updated =
             self.clock.elapsed().as_secs_f64() - snapshot.observed.elapsed().as_secs_f64();
+        let observed: HashSet<String> = snapshot
+            .replicas
+            .iter()
+            .map(|r| r.replica.clone())
+            .collect();
+        let mut replicas = snapshot.replicas;
+        for mut previous in std::mem::take(&mut self.replicas) {
+            previous.work.age_seconds += updated - self.updated;
+            if !observed.contains(&previous.replica)
+                && previous.work.age_seconds < MAX_OBSERVATION_AGE
+            {
+                replicas.push(previous);
+            }
+        }
+        self.replicas = replicas;
+        self.updated = updated;
     }
 
     /// Select and reserve in one short call. A busy pool stays busy, not unhealthy.
@@ -281,14 +279,14 @@ impl Router {
         &mut self,
         request: &Request,
         request_id: String,
-        affinity_elapsed: f64,
+        admission: &mut Admission,
     ) -> Result<Decision, String> {
-        if !affinity_elapsed.is_finite() || affinity_elapsed < 0.0 {
-            return Err(String::from("invalid affinity elapsed time"));
-        }
         if self.reservations.contains_key(&request_id) {
             return Err(String::from("request already has a reservation"));
         }
+        let affinity_elapsed = admission
+            .affinity_started
+            .map_or(0.0, |t| t.elapsed().as_secs_f64());
         let now = self.clock.elapsed().as_secs_f64();
         let preferred = request.preferred.lock().unwrap().clone();
         let mut fresh = false;
@@ -296,7 +294,7 @@ impl Router {
         let mut cooling_down = HashSet::new();
         for (i, replica) in self.replicas.iter().enumerate() {
             let w = &replica.work;
-            if w.age_seconds + now - self.updated >= 3.0 {
+            if w.age_seconds + now - self.updated >= MAX_OBSERVATION_AGE {
                 continue;
             }
             fresh = true;
@@ -343,33 +341,13 @@ impl Router {
                 .rev()
                 .find(|(_, hash)| w.prefixes.contains(hash))
                 .map_or(0, |(index, _)| (index + 1) * 64);
-            let mut pending = w.pending_adapters.clone();
-            for r in &unobserved {
-                pending.insert(r.adapter.clone());
-            }
-            let backlog = w.prefill_tokens as f64 / self.prefill_rate
-                + w.decode_tokens as f64 / self.decode_rate
-                + unobserved.iter().map(|r| r.work).sum::<f64>()
-                + pending.difference(&w.gpu_adapters).count() as f64 * self.gpu_load_seconds
-                + pending.difference(&w.cpu_adapters).count() as f64 * self.registration_seconds;
-            let adapter_seconds = if pending.contains(&request.adapter) {
-                0.0
-            } else {
-                (if w.gpu_adapters.contains(&request.adapter) {
-                    0.0
-                } else {
-                    self.gpu_load_seconds
-                }) + if w.cpu_adapters.contains(&request.adapter) {
-                    0.0
-                } else {
-                    self.registration_seconds
-                }
-            };
+            let adapter_pending = w.pending_adapters.contains(&request.adapter)
+                || unobserved.iter().any(|r| r.adapter == request.adapter);
             candidates.push(Candidate {
                 replica_index: i,
                 adapter_tier: if w.gpu_adapters.contains(&request.adapter) {
                     0
-                } else if pending.contains(&request.adapter) {
+                } else if adapter_pending {
                     1
                 } else if w.cpu_adapters.contains(&request.adapter) {
                     2
@@ -394,9 +372,6 @@ impl Router {
                 kv_pinned_fraction: (w.kv_capacity_tokens > 0)
                     .then(|| (w.kv_used_tokens as f64 / w.kv_capacity_tokens as f64).min(1.0)),
                 cached_tokens: hit,
-                backlog_seconds: backlog,
-                prefill_seconds: (request.prompt_tokens - hit) as f64 / self.prefill_rate,
-                adapter_seconds,
             });
         }
         let all = candidates;
@@ -424,6 +399,7 @@ impl Router {
                 affinity_elapsed,
             ) {
                 cache_wait::Selection::Wait(why, seconds) => {
+                    admission.affinity_started.get_or_insert_with(Instant::now);
                     let mut d = Decision::wait("wait");
                     d.reason = why;
                     d.retry_after = seconds;
@@ -463,7 +439,6 @@ impl Router {
             Reservation {
                 replica: replica.replica.clone(),
                 adapter: request.adapter.clone(),
-                work: c.prefill_seconds + request.output_tokens as f64 / self.decode_rate,
             },
         );
         Ok(Decision {
@@ -471,9 +446,6 @@ impl Router {
             replica: Some(replica.replica.clone()),
             upstream: Some(replica.upstream.clone()),
             cached_tokens: c.cached_tokens,
-            backlog_seconds: c.backlog_seconds,
-            prefill_seconds: c.prefill_seconds,
-            adapter_seconds: c.adapter_seconds,
             reason,
             retry_after: 0.0,
             available_replicas: available,
@@ -507,11 +479,24 @@ impl Router {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
     fn router(policy: &str, capacity: usize) -> Router {
-        Router::new(policy, capacity, 1000., 100., 0.1, 1., 4, 1.25, 0.5).unwrap()
+        Router::new(policy, capacity, 1000., 4, 1.25, 0.5).unwrap()
+    }
+    fn swe_router() -> Router {
+        Router::new("cache_wait", 136, 10463.96, 64, 2., 0.5).unwrap()
     }
     fn request(adapter: &str) -> Request {
         Request::new(adapter.into(), "problem".into(), vec![42; 1024], 100).unwrap()
+    }
+    /// An admission whose affinity clock started `seconds` ago.
+    fn waited(seconds: f64) -> Admission {
+        Admission {
+            affinity_started: Some(Instant::now() - Duration::from_secs_f64(seconds)),
+        }
+    }
+    fn fresh() -> Admission {
+        Admission::default()
     }
     fn replica(
         id: &str,
@@ -521,7 +506,7 @@ mod tests {
     ) -> serde_json::Value {
         json!({"replica":id,"upstream":id,"active":active,"work":{
             "age_seconds":0.,"prefixes":prefixes,"gpu_adapters":gpu,"cpu_adapters":gpu,
-            "pending_adapters":[],"request_ids":[],"prefill_tokens":0,"decode_tokens":0}})
+            "pending_adapters":[],"request_ids":[]}})
     }
     #[test]
     fn reservations_bound_admission_and_busy_is_not_health_failure() {
@@ -530,23 +515,31 @@ mod tests {
         r.update_snapshot(&json!([replica("a", 0, vec![], vec![])]).to_string())
             .unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "1".into(), &mut fresh())
+                .unwrap()
+                .status,
             "route"
         );
         assert_eq!(
-            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "2".into(), &mut fresh())
+                .unwrap()
+                .status,
             "wait"
         );
         r.complete("1", "busy").unwrap();
         assert_eq!(r.pending(), 0);
         assert!(r.failed_until.is_empty());
         assert_eq!(
-            r.select_destination(&q, "2".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "2".into(), &mut fresh())
+                .unwrap()
+                .status,
             "wait"
         );
         r.busy_until.clear();
         assert_eq!(
-            r.select_destination(&q, "2".into(), 2.01).unwrap().status,
+            r.select_destination(&q, "2".into(), &mut waited(2.01))
+                .unwrap()
+                .status,
             "route"
         );
         r.complete("2", "cancelled").unwrap();
@@ -558,12 +551,14 @@ mod tests {
         let q = request("m/v1");
         let mut a = replica("a", 0, vec![], vec![]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
-        r.select_destination(&q, "1".into(), 0.0).unwrap();
+        r.select_destination(&q, "1".into(), &mut fresh()).unwrap();
         a["active"] = json!(1);
         a["work"]["request_ids"] = json!(["1"]);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "2".into(), 2.01).unwrap().status,
+            r.select_destination(&q, "2".into(), &mut waited(2.01))
+                .unwrap()
+                .status,
             "route"
         );
     }
@@ -572,16 +567,61 @@ mod tests {
         let mut r = router("cache_wait", 1);
         let q = request("m/v1");
         assert_eq!(
-            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "1".into(), &mut fresh())
+                .unwrap()
+                .status,
             "unavailable"
         );
         let mut a = replica("a", 0, vec![], vec![]);
         a["work"]["age_seconds"] = json!(4.);
         r.update_snapshot(&json!([a]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into(), 0.0).unwrap().status,
+            r.select_destination(&q, "1".into(), &mut fresh())
+                .unwrap()
+                .status,
             "unavailable"
         );
+    }
+    #[test]
+    fn a_missed_poll_keeps_the_last_observation_until_it_ages_out() {
+        let mut r = router("cache_wait", 8);
+        let q = request("m/v1");
+        let mut a = replica("a", 0, vec![], vec![]);
+        a["work"]["age_seconds"] = json!(2.5);
+        r.update_snapshot(&json!([a, replica("b", 4, vec![], vec![])]).to_string())
+            .unwrap();
+        r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
+            .unwrap();
+        let routed = r.select_destination(&q, "1".into(), &mut fresh()).unwrap();
+        assert_eq!(routed.replica.as_deref(), Some("a"));
+        r.updated -= 0.5;
+        r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
+            .unwrap();
+        let routed = r.select_destination(&q, "2".into(), &mut fresh()).unwrap();
+        assert_eq!(routed.replica.as_deref(), Some("b"));
+    }
+    #[test]
+    fn invalid_rows_are_dropped_without_discarding_the_snapshot() {
+        let mut r = router("cache_wait", 8);
+        let q = request("m/v1");
+        let mut negative = replica("negative", 0, vec![], vec![]);
+        negative["work"]["age_seconds"] = json!(-1.);
+        let mut no_upstream = replica("no-upstream", 0, vec![], vec![]);
+        no_upstream.as_object_mut().unwrap().remove("upstream");
+        r.update_snapshot(
+            &json!([
+                negative,
+                no_upstream,
+                replica("twice", 0, vec![], vec![]),
+                replica("twice", 0, vec![], vec![]),
+                replica("valid", 3, vec![], vec![]),
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        // Any surviving idle row would outrank the loaded valid replica.
+        let routed = r.select_destination(&q, "1".into(), &mut fresh()).unwrap();
+        assert_eq!(routed.replica.as_deref(), Some("valid"));
     }
     #[test]
     fn adapter_versions_have_distinct_prefixes() {
@@ -607,15 +647,16 @@ mod tests {
         assert!(r.prepare_group("group".into(), request("m/v2")).is_err());
         let separate = r.prepare_group("other".into(), request("m/v1")).unwrap();
         assert!(!Arc::ptr_eq(&leader, &separate));
-        r.select_destination(&leader, "leader".into(), 0.).unwrap();
+        r.select_destination(&leader, "leader".into(), &mut fresh())
+            .unwrap();
         assert_eq!(
-            r.select_destination(&sibling, "sibling".into(), 0.)
+            r.select_destination(&sibling, "sibling".into(), &mut fresh())
                 .unwrap()
                 .reason,
             "pending_prefix"
         );
         assert_eq!(
-            r.select_destination(&sibling, "sibling".into(), 2.01)
+            r.select_destination(&sibling, "sibling".into(), &mut waited(2.01))
                 .unwrap()
                 .status,
             "route"
@@ -640,8 +681,7 @@ mod tests {
             (970_000, 950_000, 17152, 17334, "cached"),
             (700_000, 500_000, 768, 884, "cached"),
         ] {
-            let mut r =
-                Router::new("cache_wait", 136, 10463.96, 1290., 0.075, 0.68, 64, 2., 0.5).unwrap();
+            let mut r = swe_router();
             let q = Request::new(
                 "m/v1".into(),
                 "conversation".into(),
@@ -667,7 +707,7 @@ mod tests {
             }
             r.update_snapshot(&json!([a, b]).to_string()).unwrap();
             assert_eq!(
-                r.select_destination(&q, "1".into(), 0.)
+                r.select_destination(&q, "1".into(), &mut fresh())
                     .unwrap()
                     .replica
                     .as_deref(),
@@ -690,7 +730,7 @@ mod tests {
             let b = replica("spare", 0, vec![], vec![]);
             r.update_snapshot(&json!([a, b]).to_string()).unwrap();
             assert_eq!(
-                r.select_destination(&q, "1".into(), 0.)
+                r.select_destination(&q, "1".into(), &mut fresh())
                     .unwrap()
                     .replica
                     .as_deref(),
@@ -700,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn saturated_waits_end_with_the_affinity_budget() {
+    fn every_wait_starts_the_affinity_budget() {
         let q = request("m/v1");
         let mut cached = replica("cached", 2, vec![], vec![format!("{:032x}", q.hashes[14])]);
         let mut grouped = replica("grouped", 2, vec![], vec![]);
@@ -713,17 +753,37 @@ mod tests {
             let mut r = router("cache_wait", 2);
             r.update_snapshot(&json!([target, spare]).to_string())
                 .unwrap();
-            let waiting = r.select_destination(&q, "1".into(), 1.99).unwrap();
+            let mut admission = fresh();
+            let waiting = r
+                .select_destination(&q, "1".into(), &mut admission)
+                .unwrap();
             assert_eq!((waiting.status, waiting.reason), ("wait", reason));
-            let routed = r.select_destination(&q, "1".into(), 2.0).unwrap();
+            assert!(admission.affinity_started.is_some());
+            admission.affinity_started = Some(Instant::now() - Duration::from_secs(2));
+            let routed = r
+                .select_destination(&q, "1".into(), &mut admission)
+                .unwrap();
             assert_eq!(routed.replica.as_deref(), Some("spare"));
         }
     }
 
     #[test]
+    fn capacity_waits_do_not_start_the_affinity_budget() {
+        let mut r = router("cache_wait", 1);
+        let q = request("m/v1");
+        r.update_snapshot(&json!([replica("a", 1, vec![], vec![])]).to_string())
+            .unwrap();
+        let mut admission = fresh();
+        let waiting = r
+            .select_destination(&q, "1".into(), &mut admission)
+            .unwrap();
+        assert_eq!((waiting.status, waiting.reason), ("wait", "capacity"));
+        assert!(admission.affinity_started.is_none());
+    }
+
+    #[test]
     fn kv_use_above_capacity_counts_as_full() {
-        let mut r =
-            Router::new("cache_wait", 136, 10463.96, 1290., 0.075, 0.68, 64, 2., 0.5).unwrap();
+        let mut r = swe_router();
         let q = Request::new("m/v1".into(), "conversation".into(), vec![42; 884], 16384).unwrap();
         let mut a = replica(
             "cached",
@@ -738,7 +798,7 @@ mod tests {
         b["work"]["kv_capacity_tokens"] = json!(1_000_000);
         r.update_snapshot(&json!([a, b]).to_string()).unwrap();
         assert_eq!(
-            r.select_destination(&q, "1".into(), 0.)
+            r.select_destination(&q, "1".into(), &mut fresh())
                 .unwrap()
                 .replica
                 .as_deref(),
@@ -747,18 +807,9 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_requires_an_upstream() {
-        let mut r = router("cache_wait", 1);
-        let mut a = replica("a", 0, vec![], vec![]);
-        a.as_object_mut().unwrap().remove("upstream");
-        assert!(r.update_snapshot(&json!([a]).to_string()).is_err());
-    }
-
-    #[test]
     fn stale_or_full_spare_cannot_force_migration() {
         for restriction in ["stale", "full"] {
-            let mut r =
-                Router::new("cache_wait", 136, 10463.96, 1290., 0.075, 0.68, 64, 2., 0.5).unwrap();
+            let mut r = swe_router();
             let q = request("m/v1");
             let mut a = replica(
                 "cached",
@@ -778,7 +829,7 @@ mod tests {
             }
             r.update_snapshot(&json!([a, b]).to_string()).unwrap();
             assert_eq!(
-                r.select_destination(&q, "1".into(), 0.)
+                r.select_destination(&q, "1".into(), &mut fresh())
                     .unwrap()
                     .replica
                     .as_deref(),
