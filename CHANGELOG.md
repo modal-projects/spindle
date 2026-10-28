@@ -10,7 +10,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Changed
 
-- When every datum in a batch has the same number of candidate labels (`target_tokens` shaped `[sequence_length, K]`), the Miles backend scores all K labels from one softmax over the vocabulary instead of K. For a 4B LoRA classifier with 5 labels per position on 4× H100, `forward_backward` takes 5.3 s instead of 7.3 s and peak memory falls from 55 GB to 25 GB per GPU (#157).
+- When every datum in a batch has the same number of candidate labels (`target_tokens` shaped `[sequence_length, K]`), the Miles backend scores all K labels from one softmax over the vocabulary instead of K (#157).
 
 ## 0.1.2 - 2026-10-27
 
