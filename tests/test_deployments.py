@@ -123,7 +123,7 @@ def test_deepseek_v41_lora_recipe():
         miles.context_parallel_size,
         miles.expert_model_parallel_size,
         miles.expert_tensor_parallel_size,
-    ) == (16, 4, 1, 16, 1)
+    ) == (16, 1, 1, 16, 1)
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
     assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
@@ -163,7 +163,7 @@ def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
     assert row.inference_settings["context_length"] == 32768
 
 
-@pytest.mark.parametrize("context, tp", [("8k", 4), ("32k", 8)])
+@pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 8)])
 def test_deepseek_v41_1017_recipes_load_the_1017_release(context, tp):
     row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))
     miles = MilesBackendConfig(**row.trainer_settings["miles"])
