@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
+
 ### Changed
 
 - Samplers now keep their compiled kernels on the shared kernel-cache volume, like trainers. A DeepSeek-V4.1-Flash sampler with a warm cache starts nearly five minutes sooner.
