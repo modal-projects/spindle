@@ -155,11 +155,13 @@ that shape. Dense tensors and the sparse CSR encoding produced by the Tinker
 SDK are supported. The `megatron_lora` and `megatron_fft` backends do not support
 2D targets.
 
-The transformer evaluates each input sequence once. When every datum in a batch
-has the same number of candidate columns, the trainer computes the softmax over
-the vocabulary once per position and reads every candidate from it, so time and
-memory stay close to single-target training. Batches that mix widths score each
-column separately, so their vocabulary work and memory grow with `num_choices`.
+The transformer evaluates each input sequence once. When every 2D datum in a
+batch has the same number of candidate columns, the trainer computes the softmax
+over the vocabulary once per position and reads every candidate from it. For a
+4B LoRA classifier with 5 candidates per position, this cut `forward_backward`
+from 6.6 s to 4.4 s and peak memory from 55 GB to 25 GB per GPU. Batches that mix
+widths score each column separately, so their vocabulary work and memory grow
+with `num_choices`.
 
 # Deterministic Training (Experimental) 
 

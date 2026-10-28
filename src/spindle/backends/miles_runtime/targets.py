@@ -60,22 +60,37 @@ def install_multi_target_hooks(tinker_losses, math_utils=None) -> None:
         if all(target.ndim == 1 for target in targets):
             return original_target(args, batch, logits)
         widths = [target.shape[1] if target.ndim == 2 else 1 for target in targets]
+        shared = {target.shape[1] for target in targets if target.ndim == 2}
+        width = max(shared)
         if (
             math_utils is not None
-            and all(target.ndim == 2 for target in targets)
-            and len(set(widths)) == 1
-            and widths[0] > 1
+            and shared == {width}
+            and width > 1
+            # Under CP a short 1-D row (DP padding) can leave a rank with no rows to score.
+            and (
+                args.context_parallel_size == 1
+                or all(target.ndim == 2 for target in targets)
+            )
             and not args.allgather_cp
             and not args.true_on_policy_mode
             and "rollout_sampling_mask_ids" not in batch
         ):
             joint_batch = dict(batch)
             joint_batch["unconcat_tokens"] = [
-                torch.as_tensor(tokens)[:, None].expand(-1, widths[0])
+                torch.as_tensor(tokens)[:, None].expand(-1, width)
                 for tokens in batch["unconcat_tokens"]
             ]
-            joint_batch["target_tokens"] = targets
-            return original_target(args, joint_batch, logits)
+            joint_batch["target_tokens"] = [
+                target if target.ndim == 2 else target[:, None].expand(-1, width)
+                for target in targets
+            ]
+            scores = original_target(args, joint_batch, logits)
+            return [
+                score.reshape(-1, width)
+                if target.ndim == 2
+                else score.reshape(-1, width)[:, 0]
+                for score, target in zip(scores, targets, strict=True)
+            ]
         columns = []
         for column in range(max(widths)):
             column_batch = dict(batch)
@@ -104,6 +119,12 @@ def _install_candidate_log_probs(math_utils) -> None:
     @wraps(original)
     def compute_log_probs(logits, tokens, process_group, **kwargs):
         if tokens.ndim == 2:
+            if kwargs.get("sampling_mask") is not None or kwargs.get(
+                "true_on_policy_mode"
+            ):
+                raise ValueError(
+                    "candidate label scoring supports neither sampling masks nor true-on-policy mode"
+                )
             return CandidateLogProbs.apply(logits, tokens, process_group)
         return original(logits, tokens, process_group, **kwargs)
 

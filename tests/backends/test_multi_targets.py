@@ -10,9 +10,7 @@ from spindle.backends.miles_runtime.data import (
     pad_slot_rows,
     prepare_batch,
 )
-from spindle.backends.miles_runtime.targets import (
-    install_multi_target_hooks,
-)
+from spindle.backends.miles_runtime.targets import install_multi_target_hooks
 
 
 def datum(targets, weights=None):
@@ -196,7 +194,9 @@ def test_candidate_columns_share_one_softmax_pass():
         _response_masks=lambda batch, _: batch["loss_masks"],
     )
     install_multi_target_hooks(losses, math_utils)
-    args = SimpleNamespace(allgather_cp=False, true_on_policy_mode=False)
+    args = SimpleNamespace(
+        context_parallel_size=1, allgather_cp=False, true_on_policy_mode=False
+    )
     batch = {
         "unconcat_tokens": [torch.cat([p, t[:, 0]]) for p, t in zip(prompts, targets)],
         "target_tokens": targets,
