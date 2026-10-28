@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Changed
+
+- The frontend server runs in `platform.modal.region`, or `us-east` when no region is set. Before, its containers could start in any region; a frontend outside us-east added 2 s or more to each training step.
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.
