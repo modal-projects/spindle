@@ -1,16 +1,10 @@
-"""Nightly synthetic monitoring for spindle.
-
-Picks one script from SCRIPTS and deploys only that script's recipe. Inference
-stays at 2×B200. DAPO trains on 2×H200. SWE-Gym trains on 4×H200 so a 128k
-sequence is four 32k-token microbatches.
+"""Nightly synthetic monitoring for spindle configs.
 
 Test it out with:
 
 ```shell
-    uv run modal run -e ajhinh-dev -m synthetic_monitoring.config_validation::launch_nightly
+    uv run modal run -e spindle-ci -m synthetic_monitoring.config_validation::launch_nightly
 ```
-
-TODO: change to shared env
 """
 
 from __future__ import annotations
@@ -18,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,8 +28,7 @@ from spindle.deployments import DeploymentConfig, config_path, load
 from synthetic_monitoring.chart import RunPoint, render_timing_history_chart
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# TODO: change to shared env
-MODAL_ENV = "ajhinh-dev"
+MODAL_ENV = "spindle-ci"
 HISTORY_DICT_NAME = "spindle-synmon-timing-baselines"
 FRONTEND_NAME = "spindle-synmon"
 WORKER_APP_PREFIXES = ("spindle-trainer-", "spindle-inference-", "spindle-lora-")
@@ -42,17 +36,15 @@ DAPO_DIR = "/opt/dapo-math"
 SWE_GYM = "/opt/modal-examples/06_gpu_and_ml/swe_gym/swe_gym.py"
 SWE_GYM_REV = "29c7c4929286d00903339ef863041592a99a2348"
 
-# Stopped at the start of a run so an older nightly cannot leave its pools up.
-# Only the chosen script's recipe is deployed.
 CONFIGS = (
     "qwen38-27b-lora-16k",
     "qwen35-9b-lora-128k",
     "qwen35-9b-lora-16k",
     "deepseek-v41-flash-lora-8k",
 )
-# Shared cap: one trainer node and at most two B200 samplers.
 GPU_BUDGET = {
     "trainer_gpu": "H200",
+    "trainer_gpus_per_node": 2,
     "trainer_nodes": 1,
     "trainer_max_instances": 1,
     "trainer_max_clients_per_instance": 2,
@@ -64,8 +56,6 @@ GPU_BUDGET = {
     "sglang_cfg.tp_size": 1,
     "sglang_cfg.max_running_requests": 4,
 }
-# 4×H200 matches the long-context 9B trainer. Context parallel keeps each GPU
-# at a 32k microbatch while the script still samples a 128k window.
 SWE_TRAINER = {
     "max_context_length": 131_072,
     "trainer_gpus_per_node": 4,
@@ -77,8 +67,6 @@ SWE_TRAINER = {
     "sglang_cfg.chunked_prefill_size": 8192,
     "sglang_cfg.mem_fraction_static": 0.85,
 }
-# Same invocation for every entry: python <script> --clients N --steps N,
-# with TINKER_BASE_URL set to the deployed frontend.
 SCRIPTS = {
     "dapo-math": {
         "clients": 2,
@@ -91,22 +79,6 @@ SCRIPTS = {
             "miles_cfg.tensor_model_parallel_size": 2,
             "miles_cfg.max_tokens_per_gpu": 8192,
         },
-        "argv": [
-            "{python}",
-            f"{DAPO_DIR}/launch_clients.py",
-            "--clients",
-            "{clients}",
-            "--steps",
-            "{steps}",
-            "--mode",
-            "gate",
-            "--stagger-seconds",
-            "10",
-            "--config",
-            "{config}",
-            "--base-url",
-            "{base_url}",
-        ],
     },
     "swe-gym": {
         "clients": 2,
@@ -115,20 +87,6 @@ SCRIPTS = {
         "timeout_s": 6 * 60 * 60,
         "recipe": "qwen35-9b-lora-128k",
         "overrides": SWE_TRAINER,
-        "argv": [
-            "{python}",
-            SWE_GYM,
-            "--clients",
-            "{clients}",
-            "--steps",
-            "{steps}",
-            "--groups-per-batch",
-            "{groups}",
-            "--hours",
-            "{hours}",
-            "--output",
-            "{output}",
-        ],
     },
 }
 DEPLOY_TIMEOUT_S = 30 * 60
@@ -184,51 +142,53 @@ def synmon_configs(names=None, extra_overrides=None):
     return recipes
 
 
-def recipes_for(script: str):
-    spec = SCRIPTS[script]
-    return synmon_configs([spec["recipe"]], spec.get("overrides"))
-
-
-def light_dapo_config(cfg: dict) -> dict:
-    """Short generations so a 27B step fits in the two-GPU trainer."""
-    updated = dict(cfg)
-    updated.update(
-        context_tokens=8192,
-        max_tokens=1024,
-        groups_per_update=1,
-        samples_per_group=4,
-        max_candidate_groups=4,
-        warmup_samples=1,
-    )
-    return updated
-
-
-def script_argv(
-    name: str, *, base_url: str, output: str, config: str = ""
-) -> list[str]:
-    spec = SCRIPTS[name]
-    fields = {
-        "python": sys.executable,
-        "clients": str(spec["clients"]),
-        "steps": str(spec["steps"]),
-        "groups": str(spec.get("groups", 1)),
-        "hours": str(spec["timeout_s"] / 3600),
-        "base_url": base_url,
-        "output": output,
-        "config": config,
-    }
-    return [part.format(**fields) for part in spec["argv"]]
-
-
 def run_script(name: str, base_url: str) -> None:
-    output = tempfile.mkdtemp(prefix=f"synmon-{name}-")
-    config = ""
+    spec = SCRIPTS[name]
+    output = Path(tempfile.mkdtemp(prefix=f"synmon-{name}-"))
     if name == "dapo-math":
-        source = json.loads((Path(DAPO_DIR) / "config.json").read_text())
-        dest = Path(output) / "config.json"
-        dest.write_text(json.dumps(light_dapo_config(source)))
-        config = str(dest)
-    command = script_argv(name, base_url=base_url, output=output, config=config)
+        work = output / "dapo"
+        shutil.copytree(DAPO_DIR, work)
+        cfg = json.loads((work / "config.json").read_text())
+        cfg.update(
+            updates=spec["steps"],
+            context_tokens=8192,
+            max_tokens=1024,
+            groups_per_update=1,
+            samples_per_group=4,
+            max_candidate_groups=4,
+            warmup_samples=1,
+        )
+        config = work / "config.json"
+        config.write_text(json.dumps(cfg))
+        command = [
+            sys.executable,
+            str(work / "launch_clients.py"),
+            "--clients",
+            str(spec["clients"]),
+            "--mode",
+            "gate",
+            "--stagger-seconds",
+            "10",
+            "--config",
+            str(config),
+            "--base-url",
+            base_url,
+        ]
+    else:
+        command = [
+            sys.executable,
+            SWE_GYM,
+            "--clients",
+            str(spec["clients"]),
+            "--steps",
+            str(spec["steps"]),
+            "--groups-per-batch",
+            str(spec["groups"]),
+            "--hours",
+            str(spec["timeout_s"] / 3600),
+            "--output",
+            str(output),
+        ]
     env = os.environ.copy()
     env["TINKER_BASE_URL"] = base_url
     print("running", " ".join(command))
@@ -243,8 +203,11 @@ def stop_worker_apps(names):
                 worker = modal.App.lookup(app_name, environment_name=MODAL_ENV)
             except modal.exception.NotFoundError:
                 continue
+            except Exception as exc:
+                print(f"error: lookup {app_name} failed: {exc}")
+                continue
             print(f"stopping {app_name}")
-            subprocess.run(
+            result = subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -256,8 +219,10 @@ def stop_worker_apps(names):
                     "--env",
                     MODAL_ENV,
                 ],
-                check=True,
+                check=False,
             )
+            if result.returncode:
+                print(f"error: stopping {app_name} failed")
 
 
 def _history_dict():
@@ -423,6 +388,21 @@ def monitor(script: str) -> dict:
     return _row(script, point, _record(script, point), error)
 
 
+def _failed_row(script: str, started: float, error: str) -> dict:
+    point = RunPoint(
+        ts=started,
+        timings={},
+        total_duration_s=max(0, time.time() - started),
+        status="failed",
+    )
+    try:
+        history = _record(script, point)
+    except Exception as exc:
+        print(f"error: recording {script} failed: {exc}")
+        history = [point]
+    return _row(script, point, history, error)
+
+
 @app.function(
     image=probe_image,
     timeout=LAUNCH_TIMEOUT_S,
@@ -431,31 +411,30 @@ def monitor(script: str) -> dict:
 )
 def launch_nightly() -> list[dict]:
     script = random.choice(tuple(SCRIPTS))
+    spec = SCRIPTS[script]
     print(f"synmon script: {script}")
-    recipes = recipes_for(script)
-    # Drop pools from earlier nightlies that deployed every recipe.
-    stop_worker_apps(CONFIGS)
-    deploy([DeploymentConfig.create(recipe) for recipe in recipes])
     rows: list[dict] = []
+    started = time.time()
     try:
+        recipes = synmon_configs([spec["recipe"]], spec.get("overrides"))
+        stop_worker_apps([spec["recipe"]])
+        deploy([DeploymentConfig.create(recipe) for recipe in recipes])
         call = monitor.spawn(script)
-        start = time.time()
-        timeout_s = SCRIPTS[script]["timeout_s"]
+        timeout_s = spec["timeout_s"]
         try:
             rows.append(call.get(timeout=timeout_s))
         except Exception as exc:
             call.cancel()
             error = f"{type(exc).__name__}: {str(exc) or f'did not finish within {timeout_s}s'}"
             print(f"error: {script} failed: {error}")
-            point = RunPoint(
-                ts=start,
-                timings={},
-                total_duration_s=time.time() - start,
-                status="failed",
-            )
-            rows.append(_row(script, point, _record(script, point), error))
+            rows.append(_failed_row(script, started, error))
+    except Exception as exc:
+        if not rows:
+            error = f"{type(exc).__name__}: {exc}"
+            print(f"error: {script} failed: {error}")
+            rows.append(_failed_row(script, started, error))
     finally:
-        stop_worker_apps(CONFIGS)
+        stop_worker_apps([spec["recipe"]])
 
     _post_report(rows)
     if any(row["status"] != "success" for row in rows):

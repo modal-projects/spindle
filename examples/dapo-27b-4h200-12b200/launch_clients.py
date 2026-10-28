@@ -12,22 +12,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent
-
-
-def steps_config(path: Path, steps: int | None) -> Path:
-    if steps is None:
-        return path
-    if steps < 1:
-        raise SystemExit("steps must be positive")
-    cfg = json.loads(path.read_text())
-    cfg["updates"] = steps
-    dest = Path(tempfile.mkdtemp()) / "config.json"
-    dest.write_text(json.dumps(cfg))
-    return dest
 
 
 def ready(path):
@@ -68,7 +55,6 @@ def main():
     parser.add_argument("--clients", type=int, default=2)
     parser.add_argument("--stagger-seconds", type=float, default=150)
     parser.add_argument("--config", type=Path, default=ROOT / "config.json")
-    parser.add_argument("--steps", type=int, help="override config updates")
     parser.add_argument("--base-url", default=os.environ.get("TINKER_BASE_URL"))
     parser.add_argument("--mode", choices=("ready", "gate"), default="ready")
     args = parser.parse_args()
@@ -76,7 +62,6 @@ def main():
         raise SystemExit("clients must be positive")
     if not os.environ.get("TINKER_API_KEY"):
         raise SystemExit("Set TINKER_API_KEY")
-    config = steps_config(args.config, args.steps)
     processes = []
     if args.mode == "gate":
         gate = ROOT / "start.json"
@@ -85,7 +70,7 @@ def main():
                 f"{gate} already exists; remove it before a new sweep stage"
             )
         for index in range(args.clients):
-            processes.append(spawn(index, config, args.base_url, gate))
+            processes.append(spawn(index, args.config, args.base_url, gate))
         while not all(
             ready(ROOT / f"client-{i:02d}" / "events.jsonl")
             for i in range(args.clients)
@@ -104,7 +89,7 @@ def main():
         )
     else:
         for index in range(args.clients):
-            processes.append(spawn(index, config, args.base_url, None))
+            processes.append(spawn(index, args.config, args.base_url, None))
             while not ready(ROOT / f"client-{index:02d}" / "events.jsonl"):
                 if processes[-1].poll() not in (None, 0):
                     raise SystemExit(f"Client {index} exited before it was ready")

@@ -7,8 +7,6 @@ on:
     paths:
       - "src/spindle/**"
       - "synthetic_monitoring/**"
-  schedule:
-    - cron: "0 18 * * *"
 
   workflow_dispatch:
 
@@ -27,8 +25,7 @@ jobs:
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-      # TODO: change to shared env
-      MODAL_ENVIRONMENT: ajhinh-dev
+      MODAL_ENVIRONMENT: spindle-ci
       UV_CACHE_DIR: /tmp/uv-cache
     steps:
       - uses: actions/checkout@v4
