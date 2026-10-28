@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.
