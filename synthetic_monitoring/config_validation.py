@@ -357,12 +357,6 @@ def _post_report(rows: list[dict]) -> None:
             print(f"error: reply failed for {row['config']}: {exc}")
 
 
-def frontend_url() -> str:
-    return modal.Function.from_name(
-        FRONTEND_NAME, "server", environment_name=MODAL_ENV
-    ).get_web_url()
-
-
 @app.function(
     image=probe_image,
     timeout=MONITOR_TIMEOUT_S,
@@ -373,7 +367,12 @@ def monitor(script: str) -> dict:
     started = time.time()
     error: str | None = None
     try:
-        run_script(script, frontend_url())
+        run_script(
+            script,
+            modal.Function.from_name(
+                FRONTEND_NAME, "server", environment_name=MODAL_ENV
+            ).get_web_url(),
+        )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         print(f"error: {script} failed: {error}")
