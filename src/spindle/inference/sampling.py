@@ -371,14 +371,13 @@ async def _sample_one(
             )
         else:
             attempt_result["http_status"] = response.status_code
-            actual_replica = response.headers.get("x-spindle-replica")
-            if actual_replica:
-                attempt_result["upstream"] = actual_replica
             retryable = (
                 response.status_code == 409
-                or (response.status_code in {404, 408, 429} and router is not None)
                 or response.status_code >= 500
-                or (response.status_code == 404 and not isinstance(gateway, str))
+                or (
+                    response.status_code == 404
+                    and (router is not None or not isinstance(gateway, str))
+                )
             )
             if not retryable:
                 if response.is_error:
@@ -398,7 +397,6 @@ async def _sample_one(
                     else None
                 )
                 if version_error is not None:
-                    attempt_result["version_error"] = version_error
                     reason = version_error
                     if not isinstance(gateway, str):
                         rejected.add(gateway_url)
@@ -416,12 +414,6 @@ async def _sample_one(
                     if stats is not None:
                         stats["reroutes"] = stats.get("reroutes", 0) + reroute_attempt
                         stats["upstream"] = gateway_url
-                        stats["seconds"] = loop.time() - started_at
-                        stats["replica"] = response.headers.get("x-spindle-replica")
-                        stats["output_tokens"] = attempt_result["generated_tokens"]
-                        stats["cached_tokens"] = (result.get("meta_info") or {}).get(
-                            "cached_tokens", 0
-                        )
                     return result
             else:
                 reason = f"HTTP {response.status_code}: {response.text[:500]}"
