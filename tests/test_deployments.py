@@ -195,6 +195,65 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.inference_identity() != resolved().inference_identity()
 
 
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        (dict(inference_lora_routing="nearest"), "unknown inference_lora_routing"),
+        (
+            dict(inference_routing_prefill_tokens_per_second=0),
+            "prefill_tokens_per_second",
+        ),
+        *(
+            (dict(inference_lora_routing="cache_wait", **change), match)
+            for change, match in [
+                (dict(sglang_cfg__dp_size=2), "data-parallel"),
+                (dict(inference_routing_balance_relative=0.5), "balance_relative"),
+                (dict(inference_routing_balance_absolute=-1), "balance_absolute"),
+                (dict(inference_routing_cache_threshold=1.5), "cache_threshold"),
+            ]
+        ),
+    ],
+)
+def test_invalid_routing_fails_at_deploy(changes, match):
+    with pytest.raises(ValueError, match=match):
+        resolved(**changes)
+
+
+@pytest.mark.parametrize(
+    ("preset", "changes", "routing"),
+    [
+        ("qwen35-9b-lora-16k", {}, "cache_wait"),
+        ("qwen35-9b-lora-16k", dict(sglang_cfg__dp_size=2), "affinity"),
+        ("qwen35-4b-fft-64k", {}, "affinity"),
+        ("qwen35-9b-lora-16k", dict(inference_lora_routing="affinity"), "affinity"),
+    ],
+)
+def test_lora_pools_with_one_data_parallel_rank_default_to_cache_wait(
+    preset, changes, routing
+):
+    row = resolved(recipe(preset, **changes))
+    assert row.recipe.inference_lora_routing == routing
+
+
+@pytest.mark.parametrize(
+    ("running", "absolute"), [(4, 4), (32, 13), (80, 32), (128, 51)]
+)
+def test_cache_wait_balance_scales_with_running_requests(running, absolute):
+    row = resolved(sglang_cfg__max_running_requests=running)
+    assert row.recipe.inference_routing_balance_absolute == absolute
+    assert row.recipe.inference_routing_prefill_tokens_per_second is None
+    configured = resolved(
+        sglang_cfg__max_running_requests=running, inference_routing_balance_absolute=7
+    )
+    assert configured.recipe.inference_routing_balance_absolute == 7
+
+
+def test_switching_routing_redeploys_the_pool():
+    # Only cache_wait pools run the observer.
+    affinity = resolved(inference_lora_routing="affinity")
+    assert affinity.inference_identity() != resolved().inference_identity()
+
+
 def test_trainer_image_is_part_of_trainer_identity():
     trainer = resolved(recipe(trainer_image="trainer-x"))
     assert trainer.trainer_identity() != resolved().trainer_identity()
