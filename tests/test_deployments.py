@@ -392,10 +392,21 @@ def test_added_deployment_takes_a_base_or_a_recipe_under_frontend_settings():
         with pytest.raises(ValueError, match="lifecycle"):
             await routes.add("other", {"sweep_interval_s": 1}, base=routes.base[0].name)
         assert routes.added_store.rows == {}
+        with pytest.raises(ValueError, match="unknown config settings: trainer_gpuu"):
+            await routes.add(
+                "other", {"trainer_gpuu": "H200"}, base=routes.base[0].name
+            )
         file_recipe = {**vars(recipe()), "platform": {"frontend": "elsewhere"}}
         deployment, state = await routes.add("from-file", {}, recipe=file_recipe)
         assert state == "deploying"
         assert deployment.recipe.platform == routes.base[0].recipe.platform
+
+        row = routes.added_store.rows["from-file"]
+        row["state"] = "ready"
+        row["config"]["recipe"]["platform"] = {"frontend": "old"}
+        await routes.refresh()
+        assert routes.get("from-file") is None
+        assert [row["state"] for row in routes.pending] == ["stale"]
 
     asyncio.run(run())
 

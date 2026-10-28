@@ -4,7 +4,10 @@ from spindle.configuration import BaseConfig
 from spindle.deployments import DeploymentConfig, validate_frontend
 
 
-def _settings(config):
+RECIPE_FIELDS = frozenset(key for key in vars(BaseConfig) if not key.startswith("_"))
+
+
+def _comparable(config):
     return {**config, "spindle_version": None}
 
 
@@ -27,7 +30,6 @@ class DeploymentRoutes:
 
     @property
     def pending(self):
-        """Added recipes whose apps are still deploying or failed to deploy."""
         return tuple(row for row in self.added_rows if row["state"] != "ready")
 
     def get(self, definition_id):
@@ -38,7 +40,14 @@ class DeploymentRoutes:
     async def refresh(self):
         if self.added_store is None:
             return
-        self.added_rows = tuple(await self.added_store.list())
+        platform = self.base[0].recipe.platform
+        self.added_rows = tuple(
+            {**row, "state": "stale"}
+            if row["state"] == "ready"
+            and row["config"]["recipe"]["platform"] != platform
+            else row
+            for row in await self.added_store.list()
+        )
         self.added = tuple(
             DeploymentConfig.model_validate(row["config"])
             for row in self.added_rows
@@ -58,10 +67,15 @@ class DeploymentRoutes:
         return selected
 
     async def add(self, name, overrides, base=None, recipe=None):
-        """Derive a recipe from a deployed one, or take a full recipe, and start
-        deploying it under this frontend's platform settings; returns its state."""
+        """Start deploying a recipe under this frontend's platform; returns its state."""
         if self.added_store is None:
             raise ValueError("this frontend does not accept added deployments")
+        unknown = sorted(
+            ({*(recipe or {})} | {key.split(".")[0] for key in overrides})
+            - RECIPE_FIELDS
+        )
+        if unknown:
+            raise ValueError(f"unknown config settings: {', '.join(unknown)}")
         await self.refresh()
         if recipe is None:
             parent = self.get(base)
@@ -80,7 +94,9 @@ class DeploymentRoutes:
             row = await self.added_store.add(deployment)
         else:
             row = {"config": current.model_dump(mode="json"), "state": "ready"}
-        if _settings(row["config"]) != _settings(deployment.model_dump(mode="json")):
+        if _comparable(row["config"]) != _comparable(
+            deployment.model_dump(mode="json")
+        ):
             raise ValueError(
                 f"deployment {name!r} already exists with different settings"
             )

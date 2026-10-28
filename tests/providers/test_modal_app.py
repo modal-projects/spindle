@@ -1236,3 +1236,55 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+def test_added_deployment_rows_deploy_once_and_retry_failures(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    spawned = []
+    running = {"call-0": True}
+
+    async def spawn(name, attempt):
+        spawned.append((name, attempt))
+        return SimpleNamespace(object_id=f"call-{len(spawned) - 1}")
+
+    async def call_running(call_id):
+        return running.get(call_id, False)
+
+    real_deploy = modal_app.deploy_added
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    monkeypatch.setattr(modal_app, "_call_running", call_running)
+    monkeypatch.setattr(
+        modal_app, "deploy_added", SimpleNamespace(spawn=SimpleNamespace(aio=spawn))
+    )
+    recipe = load(config_path("qwen35-9b-lora-16k"))
+    recipe.name = "variant"
+    deployment = DeploymentConfig.create(recipe)
+    added = modal_app.AddedDeployments()
+
+    def fail_deploy(deployment, role):
+        raise subprocess.CalledProcessError(1, "modal deploy", stderr="no capacity")
+
+    async def run():
+        first = await added.add(deployment)
+        assert (await store.get("variant"))["call_id"] == "call-0"
+        assert (await added.add(deployment))["attempt"] == first["attempt"]
+        assert len(spawned) == 1
+
+        running["call-0"] = False
+        retry = await added.add(deployment)
+        assert len(spawned) == 2 and retry["attempt"] != first["attempt"]
+
+        monkeypatch.setattr(modal_app, "_deploy_worker_app", fail_deploy)
+        await real_deploy.local("variant", first["attempt"])
+        assert (await store.get("variant"))["state"] == "deploying"
+        with pytest.raises(subprocess.CalledProcessError):
+            await real_deploy.local("variant", retry["attempt"])
+        row = await store.get("variant")
+        assert row["state"] == "failed" and row["error"] == "no capacity"
+
+        await store.put("variant", {**row, "state": "ready"})
+        await modal_app._update_added("variant", retry["attempt"], state="failed")
+        assert (await store.get("variant"))["state"] == "ready"
+
+    asyncio.run(run())

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict
 
 import modal
@@ -87,30 +88,65 @@ from .trainer_reconciler import (
 )
 
 
+DEPLOY_ADDED_TIMEOUT_S = 60 * 60
+
+
 class AddedDeployments:
     """Recipes added through the deployments API, stored per frontend."""
 
     async def list(self):
         return sorted(
             (row for _, row in await deployment_kv().list_items("")),
-            key=lambda row: row["added_at"],
+            key=lambda row: row.get("ready_at", row["added_at"]),
         )
 
     async def add(self, deployment):
-        """Record the recipe and deploy its apps, unless it is already deploying or ready."""
         store = deployment_kv()
         row = {
             "config": deployment.model_dump(mode="json"),
             "added_at": time.time(),
             "state": "deploying",
+            "attempt": uuid.uuid4().hex,
         }
         inserted = await store.put_if_absent(deployment.name, row)
         if not inserted.created:
-            if inserted.value["state"] != "failed":
+            if not await _replaceable(inserted.value, row):
                 return inserted.value
             await store.put(deployment.name, row)
-        await deploy_added.spawn.aio(deployment.name)
+        try:
+            call = await deploy_added.spawn.aio(deployment.name, row["attempt"])
+        except Exception as exc:
+            await _update_added(
+                deployment.name, row["attempt"], state="failed", error=str(exc)
+            )
+            raise
+        await _update_added(deployment.name, row["attempt"], call_id=call.object_id)
         return row
+
+
+async def _replaceable(current, new) -> bool:
+    """A failed, abandoned, or stale-platform row may be redeployed."""
+    if current["config"]["recipe"]["platform"] != new["config"]["recipe"]["platform"]:
+        return True
+    if current["state"] != "deploying":
+        return current["state"] == "failed"
+    if "call_id" not in current:
+        return time.time() - current["added_at"] > DEPLOY_ADDED_TIMEOUT_S
+    try:
+        return not await _call_running(current["call_id"])
+    except Exception:
+        return True
+
+
+async def _update_added(name: str, attempt: str, **changes) -> None:
+    """Write to the row only for its current attempt, and never demote a ready row."""
+    store = deployment_kv()
+    row = await store.get(name)
+    if row.get("attempt") != attempt or (
+        row["state"] == "ready" and changes.get("state") == "failed"
+    ):
+        return
+    await store.put(name, {**row, **changes})
 
 
 DEPLOYMENTS = DeploymentRoutes(configs_from_env(), AddedDeployments())
@@ -264,6 +300,7 @@ def _deploy_worker_app(deployment: DeploymentConfig, role: str) -> None:
         check=True,
         capture_output=True,
         text=True,
+        timeout=DEPLOY_ADDED_TIMEOUT_S // 2 - 60,
         env={
             **os.environ,
             DEPLOYMENT_ENV: deployment.model_dump_json(),
@@ -273,20 +310,21 @@ def _deploy_worker_app(deployment: DeploymentConfig, role: str) -> None:
     )
 
 
-@app.function(image=image, timeout=60 * 60)
-async def deploy_added(name: str) -> None:
+@app.function(image=image, timeout=DEPLOY_ADDED_TIMEOUT_S)
+async def deploy_added(name: str, attempt: str) -> None:
     """Deploy an added recipe's trainer and inference apps, then make it routable."""
-    store = deployment_kv()
-    row = await store.get(name)
+    row = await deployment_kv().get(name)
+    if row.get("attempt") != attempt:
+        return
     deployment = DeploymentConfig.model_validate(row["config"])
     try:
         for role in ("trainer", "inference"):
             await asyncio.to_thread(_deploy_worker_app, deployment, role)
     except Exception as exc:
         output = getattr(exc, "stderr", None) or str(exc)
-        await store.put(name, {**row, "state": "failed", "error": output[-2000:]})
+        await _update_added(name, attempt, state="failed", error=output[-2000:])
         raise
-    await store.put(name, {**row, "state": "ready"})
+    await _update_added(name, attempt, state="ready", ready_at=time.time())
     await DEPLOYMENTS.refresh()
     await _start_weights_download(name)
 

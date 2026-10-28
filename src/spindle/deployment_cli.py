@@ -218,6 +218,19 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
 
 
 ADD_POLL_INTERVAL_S = 10
+ADD_DEADLINE_S = 70 * 60
+
+
+def _response_body(response, action):
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if response.is_error:
+        raise ValueError(
+            f"{action} failed ({response.status_code}): {body.get('message', response.text)}"
+        )
+    return body
 
 
 def add(paths):
@@ -237,24 +250,32 @@ def add(paths):
                 "/api/v1/spindle/deployments",
                 json={"name": recipe.name, "recipe": vars(recipe)},
             )
-            if response.status_code in (404, 405):
+            if response.status_code == 405:
                 raise ValueError(
                     "This frontend predates adding configs; redeploy it once with spindle deploy."
                 )
-            if response.is_error:
-                raise ValueError(
-                    f"Adding {recipe.name} failed: {response.json().get('message', response.text)}"
+            row = _response_body(response, f"Adding {recipe.name}")["deployment"]
+            deadline = time.monotonic() + ADD_DEADLINE_S
+            if row["state"] == "deploying":
+                print(
+                    f"Deploying {recipe.name}. Building its apps can take several minutes."
                 )
-            row = response.json()["deployment"]
-            print(
-                f"Deploying {recipe.name}. Building its apps can take several minutes."
-            )
             while row["state"] == "deploying":
+                if time.monotonic() > deadline:
+                    raise ValueError(
+                        f"{recipe.name} is still deploying; run spindle deploy --add again to retry."
+                    )
                 time.sleep(ADD_POLL_INTERVAL_S)
-                listed = client.get("/api/v1/spindle/deployments").json()
-                row = next(r for r in listed["deployments"] if r["name"] == recipe.name)
-            if row["state"] == "failed":
-                raise ValueError(f"Deploying {recipe.name} failed:\n{row['error']}")
+                listed = _response_body(
+                    client.get("/api/v1/spindle/deployments"), "Listing deployments"
+                )
+                row = next(
+                    (r for r in listed["deployments"] if r["name"] == recipe.name), row
+                )
+            if row["state"] != "ready":
+                raise ValueError(
+                    f"Deploying {recipe.name} ended {row['state']}:\n{row.get('error') or ''}"
+                )
             print(
                 f"Added {recipe.name}. Train on it by passing base_model={recipe.name!r}."
             )

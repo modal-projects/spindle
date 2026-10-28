@@ -191,7 +191,9 @@ spindle deploy --add my_variant.py
 
 Either way, the new config takes the frontend's platform settings, and it must match the frontend's lifecycle settings. Once it is ready, train on it by passing its name as `base_model`. A plain model ID such as `Qwen/Qwen3.5-9B` keeps going to the config that already served it, so adding a variant does not move anyone else's jobs.
 
-Adding only creates new names. Sending the same config again changes nothing, and a different config under an existing name is rejected. Added configs stay registered when the frontend is redeployed. If the `spindle deploy` set has a config with the same name, that config takes its place.
+Adding only creates new names. Sending the same config again changes nothing, and a different config under an existing name is rejected. Unknown settings are rejected by name, so a typo does not deploy a copy of the base. Added configs stay registered when the frontend is redeployed. If the `spindle deploy` set has a config with the same name, that config takes its place. If a redeploy changes the frontend's platform settings, its added configs show as `stale` and stop taking requests. Send each one again to redeploy it under the new settings.
+
+Anyone with the frontend's API key can add configs, and each added config can start GPUs.
 
 ## Update isolation
 

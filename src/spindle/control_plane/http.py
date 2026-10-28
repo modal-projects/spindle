@@ -311,6 +311,7 @@ def create_control_plane_app(
 
     @app.get("/api/v1/get_server_capabilities")
     async def get_server_capabilities() -> dict[str, object]:
+        await routes.refresh()
         return {
             "supported_models": routes.capabilities(),
             "spindle_version": __version__,
