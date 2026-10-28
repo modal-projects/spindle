@@ -4,7 +4,7 @@ mod cache_wait;
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Mutex;
 use std::time::Instant;
 use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
@@ -52,16 +52,8 @@ pub struct Request {
     adapter: String,
     affinity: String,
     prompt_tokens: usize,
-    output_tokens: usize,
     hashes: Vec<u128>,
-    fingerprint: u128,
     preferred: Mutex<Option<String>>,
-    pending_prefix: Mutex<Option<PendingPrefix>>,
-}
-struct PendingPrefix {
-    replica: String,
-    leader: String,
-    started: Instant,
 }
 
 impl Request {
@@ -89,11 +81,8 @@ impl Request {
             adapter,
             affinity,
             prompt_tokens: tokens.len(),
-            output_tokens,
-            fingerprint: hasher.digest128(),
             hashes,
             preferred: Mutex::new(None),
-            pending_prefix: Mutex::new(None),
         })
     }
 }
@@ -184,7 +173,6 @@ pub struct Router {
     replicas: Vec<Replica>,
     wait_policy: cache_wait::CacheWait,
     reservations: HashMap<String, Reservation>,
-    groups: HashMap<String, Weak<Request>>,
     busy_until: HashMap<String, f64>,
     failed_until: HashMap<String, f64>,
     clock: Instant,
@@ -217,7 +205,6 @@ impl Router {
                 threshold: cache_threshold,
             },
             reservations: HashMap::new(),
-            groups: HashMap::new(),
             busy_until: HashMap::new(),
             failed_until: HashMap::new(),
             clock: Instant::now(),
@@ -225,26 +212,6 @@ impl Router {
             capacity,
             prefill_rate,
         })
-    }
-
-    /// Siblings share pending-prefix hints only for the same exact prompt/version.
-    fn prepare_group(&mut self, group: String, request: Request) -> Result<Arc<Request>, String> {
-        if let Some(shared) = self.groups.get(&group).and_then(Weak::upgrade) {
-            if shared.adapter != request.adapter
-                || shared.affinity != request.affinity
-                || shared.fingerprint != request.fingerprint
-                || shared.prompt_tokens != request.prompt_tokens
-                || shared.output_tokens != request.output_tokens
-            {
-                return Err("sampling group changed prompt, adapter or output budget".into());
-            }
-            return Ok(shared);
-        }
-        // Weak references retain no request data after completion or cancellation.
-        self.groups.retain(|_, request| request.strong_count() > 0);
-        let request = Arc::new(request);
-        self.groups.insert(group, Arc::downgrade(&request));
-        Ok(request)
     }
 
     #[cfg(test)]
@@ -388,16 +355,10 @@ impl Router {
         let reason;
         let selected = {
             let policy = &self.wait_policy;
-            let pending = request.pending_prefix.lock().unwrap();
-            let pending = pending
-                .as_ref()
-                .filter(|p| self.reservations.contains_key(&p.leader));
             match policy.select(
                 &all,
                 &candidates,
-                &self.replicas,
                 request,
-                pending,
                 self.prefill_rate,
                 affinity_elapsed,
             ) {
@@ -421,20 +382,6 @@ impl Router {
         let i = c.replica_index;
         let replica = &self.replicas[i];
         *request.preferred.lock().unwrap() = Some(replica.replica.clone());
-        {
-            let mut pending = request.pending_prefix.lock().unwrap();
-            // One leader per live group; retries may replace a failed leader.
-            if pending
-                .as_ref()
-                .is_none_or(|p| !self.reservations.contains_key(&p.leader))
-            {
-                *pending = Some(PendingPrefix {
-                    replica: replica.replica.clone(),
-                    leader: request_id.clone(),
-                    started: Instant::now(),
-                });
-            }
-        }
         self.reservations.insert(
             request_id,
             Reservation {
@@ -564,65 +511,86 @@ mod tests {
         );
     }
     #[test]
-    fn stale_or_missing_observations_never_route() {
-        let mut r = router(1);
-        let q = request("m/v1");
-        assert_eq!(
-            r.select_destination(&q, "1".into(), &mut fresh())
-                .unwrap()
-                .status,
-            "unavailable"
-        );
-        let mut a = replica("a", 0, vec![], vec![]);
-        a["work"]["age_seconds"] = json!(4.);
-        r.update_snapshot(&json!([a]).to_string()).unwrap();
-        assert_eq!(
-            r.select_destination(&q, "1".into(), &mut fresh())
-                .unwrap()
-                .status,
-            "unavailable"
-        );
-    }
-    #[test]
-    fn a_missed_poll_keeps_the_last_observation_until_it_ages_out() {
-        let mut r = router(8);
-        let q = request("m/v1");
-        let mut a = replica("a", 0, vec![], vec![]);
-        a["work"]["age_seconds"] = json!(2.5);
-        r.update_snapshot(&json!([a, replica("b", 4, vec![], vec![])]).to_string())
-            .unwrap();
-        r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
-            .unwrap();
-        let routed = r.select_destination(&q, "1".into(), &mut fresh()).unwrap();
-        assert_eq!(routed.replica.as_deref(), Some("a"));
-        r.updated -= 0.5;
-        r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
-            .unwrap();
-        let routed = r.select_destination(&q, "2".into(), &mut fresh()).unwrap();
-        assert_eq!(routed.replica.as_deref(), Some("b"));
-    }
-    #[test]
-    fn invalid_rows_are_dropped_without_discarding_the_snapshot() {
-        let mut r = router(8);
-        let q = request("m/v1");
-        let mut negative = replica("negative", 0, vec![], vec![]);
-        negative["work"]["age_seconds"] = json!(-1.);
-        let mut no_upstream = replica("no-upstream", 0, vec![], vec![]);
-        no_upstream.as_object_mut().unwrap().remove("upstream");
-        r.update_snapshot(
-            &json!([
-                negative,
-                no_upstream,
-                replica("twice", 0, vec![], vec![]),
-                replica("twice", 0, vec![], vec![]),
-                replica("valid", 3, vec![], vec![]),
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        // Any surviving idle row would outrank the loaded valid replica.
-        let routed = r.select_destination(&q, "1".into(), &mut fresh()).unwrap();
-        assert_eq!(routed.replica.as_deref(), Some("valid"));
+    fn snapshot_intake() {
+        for case in ["none", "stale", "missed_poll", "invalid_row"] {
+            let capacity = if case == "missed_poll" || case == "invalid_row" {
+                8
+            } else {
+                1
+            };
+            let mut r = router(capacity);
+            let q = request("m/v1");
+            match case {
+                "none" => assert_eq!(
+                    r.select_destination(&q, "1".into(), &mut fresh())
+                        .unwrap()
+                        .status,
+                    "unavailable"
+                ),
+                "stale" => {
+                    let mut a = replica("a", 0, vec![], vec![]);
+                    a["work"]["age_seconds"] = json!(4.);
+                    r.update_snapshot(&json!([a]).to_string()).unwrap();
+                    assert_eq!(
+                        r.select_destination(&q, "1".into(), &mut fresh())
+                            .unwrap()
+                            .status,
+                        "unavailable"
+                    );
+                }
+                "missed_poll" => {
+                    let mut a = replica("a", 0, vec![], vec![]);
+                    a["work"]["age_seconds"] = json!(2.5);
+                    r.update_snapshot(&json!([a, replica("b", 4, vec![], vec![])]).to_string())
+                        .unwrap();
+                    r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
+                        .unwrap();
+                    assert_eq!(
+                        r.select_destination(&q, "1".into(), &mut fresh())
+                            .unwrap()
+                            .replica
+                            .as_deref(),
+                        Some("a")
+                    );
+                    r.updated -= 0.5;
+                    r.update_snapshot(&json!([replica("b", 4, vec![], vec![])]).to_string())
+                        .unwrap();
+                    assert_eq!(
+                        r.select_destination(&q, "2".into(), &mut fresh())
+                            .unwrap()
+                            .replica
+                            .as_deref(),
+                        Some("b")
+                    );
+                }
+                "invalid_row" => {
+                    let mut negative = replica("negative", 0, vec![], vec![]);
+                    negative["work"]["age_seconds"] = json!(-1.);
+                    let mut no_upstream = replica("no-upstream", 0, vec![], vec![]);
+                    no_upstream.as_object_mut().unwrap().remove("upstream");
+                    r.update_snapshot(
+                        &json!([
+                            negative,
+                            no_upstream,
+                            replica("twice", 0, vec![], vec![]),
+                            replica("twice", 0, vec![], vec![]),
+                            replica("valid", 3, vec![], vec![]),
+                        ])
+                        .to_string(),
+                    )
+                    .unwrap();
+                    // Any surviving idle row would outrank the loaded valid replica.
+                    assert_eq!(
+                        r.select_destination(&q, "1".into(), &mut fresh())
+                            .unwrap()
+                            .replica
+                            .as_deref(),
+                        Some("valid")
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
     }
     #[test]
     fn adapter_versions_have_distinct_prefixes() {
@@ -632,87 +600,82 @@ mod tests {
         assert_eq!(a.hashes.len() * 64, 960);
     }
     #[test]
-    fn group_hints_are_scoped_and_released() {
-        let mut r = router(8);
-        r.update_snapshot(
-            &json!([
-                replica("a", 0, vec![], vec![]),
-                replica("b", 0, vec![], vec![])
-            ])
-            .to_string(),
-        )
-        .unwrap();
-        let leader = r.prepare_group("group".into(), request("m/v1")).unwrap();
-        let sibling = r.prepare_group("group".into(), request("m/v1")).unwrap();
-        assert!(Arc::ptr_eq(&leader, &sibling));
-        assert!(r.prepare_group("group".into(), request("m/v2")).is_err());
-        let separate = r.prepare_group("other".into(), request("m/v1")).unwrap();
-        assert!(!Arc::ptr_eq(&leader, &separate));
-        r.select_destination(&leader, "leader".into(), &mut fresh())
-            .unwrap();
-        assert_eq!(
-            r.select_destination(&sibling, "sibling".into(), &mut fresh())
-                .unwrap()
-                .reason,
-            "pending_prefix"
-        );
-        assert_eq!(
-            r.select_destination(&sibling, "sibling".into(), &mut waited(2.01))
-                .unwrap()
-                .status,
-            "route"
-        );
-        r.complete("leader", Outcome::Released);
-        r.complete("sibling", Outcome::Released);
-        drop(leader);
-        drop(sibling);
-        drop(separate);
-        r.prepare_group("next".into(), request("m/v1")).unwrap();
-        assert_eq!(r.groups.len(), 1);
-        assert_eq!(r.pending(), 0);
-    }
-
-    #[test]
-    fn memory_guards_preserve_history_without_stranding_requests() {
-        for (pinned, spare, hit, prompt, expected) in [
-            (920_000, 700_000, 17152, 17334, "spare"),
-            (850_000, 600_000, 17152, 17334, "cached"),
-            (850_000, 650_000, 768, 884, "spare"),
-            (920_000, 800_000, 17152, 17334, "cached"),
-            (970_000, 950_000, 17152, 17334, "cached"),
-            (700_000, 500_000, 768, 884, "cached"),
+    fn memory_guards() {
+        // pinned, spare used, spare active, spare age, hit, prompt, output, gpu, short spare, expected
+        for (
+            pinned,
+            spare_used,
+            spare_active,
+            spare_age,
+            hit,
+            prompt,
+            output,
+            gpu,
+            short_spare,
+            expected,
+        ) in [
+            (
+                920_000, 700_000, 100, 0., 17152, 17334, 16384, true, true, "spare",
+            ),
+            (
+                850_000, 600_000, 100, 0., 17152, 17334, 16384, true, true, "cached",
+            ),
+            (
+                850_000, 650_000, 100, 0., 768, 884, 16384, true, true, "spare",
+            ),
+            (
+                920_000, 800_000, 100, 0., 17152, 17334, 16384, true, true, "cached",
+            ),
+            (
+                970_000, 950_000, 100, 0., 17152, 17334, 16384, true, true, "cached",
+            ),
+            (
+                700_000, 500_000, 100, 0., 768, 884, 16384, true, true, "cached",
+            ),
+            (
+                1_000_001, 500_000, 100, 0., 768, 884, 16384, true, false, "spare",
+            ),
+            (
+                950_000, 500_000, 100, 4., 960, 1024, 100, false, false, "cached",
+            ),
+            (
+                950_000, 500_000, 136, 0., 960, 1024, 100, false, false, "cached",
+            ),
         ] {
             let mut r = swe_router();
             let q = Request::new(
                 "m/v1".into(),
                 "conversation".into(),
                 vec![42; prompt],
-                16384,
+                output,
             )
             .unwrap();
+            let adapters: Vec<&str> = if gpu { vec!["m/v1"] } else { vec![] };
             let mut a = replica(
                 "cached",
                 125,
-                vec!["m/v1"],
+                adapters.clone(),
                 vec![format!("{:032x}", q.hashes[hit / 64 - 1])],
             );
-            let mut b = replica(
-                "spare",
-                100,
-                vec!["m/v1"],
-                vec![format!("{:032x}", q.hashes[5])],
-            );
-            for (row, used) in [(&mut a, pinned), (&mut b, spare)] {
+            let spare_prefix = if short_spare {
+                vec![format!("{:032x}", q.hashes[5])]
+            } else {
+                vec![]
+            };
+            let mut b = replica("spare", spare_active, adapters, spare_prefix);
+            for (row, used) in [(&mut a, pinned), (&mut b, spare_used)] {
                 row["work"]["kv_used_tokens"] = json!(used);
                 row["work"]["kv_capacity_tokens"] = json!(1_000_000);
             }
+            b["work"]["age_seconds"] = json!(spare_age);
             r.update_snapshot(&json!([a, b]).to_string()).unwrap();
             assert_eq!(
                 r.select_destination(&q, "1".into(), &mut fresh())
                     .unwrap()
                     .replica
                     .as_deref(),
-                Some(expected)
+                Some(expected),
+                "pinned={pinned} spare={spare_used} hit={hit}"
             );
         }
     }
@@ -741,100 +704,44 @@ mod tests {
     }
 
     #[test]
-    fn every_wait_starts_the_affinity_budget() {
-        let q = request("m/v1");
-        let mut cached = replica("cached", 2, vec![], vec![format!("{:032x}", q.hashes[14])]);
-        let mut grouped = replica("grouped", 2, vec![], vec![]);
-        grouped["adapters"] = json!({"m/v1": 2});
-        let mut spare = replica("spare", 0, vec![], vec![]);
-        for row in [&mut cached, &mut grouped, &mut spare] {
-            row["work"]["waiting_requests"] = json!(1);
-        }
-        for (target, reason) in [(cached, "cached_saturated"), (grouped, "adapter_saturated")] {
-            let mut r = router(2);
-            r.update_snapshot(&json!([target, spare]).to_string())
-                .unwrap();
+    fn affinity_budget() {
+        for kind in ["cached_saturated", "capacity"] {
+            let q = request("m/v1");
+            let mut r = router(if kind == "capacity" { 1 } else { 2 });
+            if kind == "capacity" {
+                r.update_snapshot(&json!([replica("a", 1, vec![], vec![])]).to_string())
+                    .unwrap();
+            } else {
+                let mut cached =
+                    replica("cached", 2, vec![], vec![format!("{:032x}", q.hashes[14])]);
+                let mut spare = replica("spare", 0, vec![], vec![]);
+                for row in [&mut cached, &mut spare] {
+                    row["work"]["waiting_requests"] = json!(1);
+                }
+                r.update_snapshot(&json!([cached, spare]).to_string())
+                    .unwrap();
+            }
             let mut admission = fresh();
             let waiting = r
                 .select_destination(&q, "1".into(), &mut admission)
                 .unwrap();
-            assert_eq!((waiting.status, waiting.reason), ("wait", reason));
+            if kind == "capacity" {
+                assert_eq!((waiting.status, waiting.reason), ("wait", "capacity"));
+                assert!(admission.affinity_started.is_none());
+                continue;
+            }
+            assert_eq!(
+                (waiting.status, waiting.reason),
+                ("wait", "cached_saturated")
+            );
             assert!(admission.affinity_started.is_some());
             admission.affinity_started = Some(Instant::now() - Duration::from_secs(2));
-            let routed = r
-                .select_destination(&q, "1".into(), &mut admission)
-                .unwrap();
-            assert_eq!(routed.replica.as_deref(), Some("spare"));
-        }
-    }
-
-    #[test]
-    fn capacity_waits_do_not_start_the_affinity_budget() {
-        let mut r = router(1);
-        let q = request("m/v1");
-        r.update_snapshot(&json!([replica("a", 1, vec![], vec![])]).to_string())
-            .unwrap();
-        let mut admission = fresh();
-        let waiting = r
-            .select_destination(&q, "1".into(), &mut admission)
-            .unwrap();
-        assert_eq!((waiting.status, waiting.reason), ("wait", "capacity"));
-        assert!(admission.affinity_started.is_none());
-    }
-
-    #[test]
-    fn kv_use_above_capacity_counts_as_full() {
-        let mut r = swe_router();
-        let q = Request::new("m/v1".into(), "conversation".into(), vec![42; 884], 16384).unwrap();
-        let mut a = replica(
-            "cached",
-            125,
-            vec!["m/v1"],
-            vec![format!("{:032x}", q.hashes[11])],
-        );
-        let mut b = replica("spare", 100, vec!["m/v1"], vec![]);
-        a["work"]["kv_used_tokens"] = json!(1_000_001);
-        a["work"]["kv_capacity_tokens"] = json!(1_000_000);
-        b["work"]["kv_used_tokens"] = json!(500_000);
-        b["work"]["kv_capacity_tokens"] = json!(1_000_000);
-        r.update_snapshot(&json!([a, b]).to_string()).unwrap();
-        assert_eq!(
-            r.select_destination(&q, "1".into(), &mut fresh())
-                .unwrap()
-                .replica
-                .as_deref(),
-            Some("spare")
-        );
-    }
-
-    #[test]
-    fn stale_or_full_spare_cannot_force_migration() {
-        for restriction in ["stale", "full"] {
-            let mut r = swe_router();
-            let q = request("m/v1");
-            let mut a = replica(
-                "cached",
-                125,
-                vec![],
-                vec![format!("{:032x}", q.hashes[14])],
-            );
-            let mut b = replica("spare", 100, vec![], vec![]);
-            a["work"]["kv_used_tokens"] = json!(950_000);
-            a["work"]["kv_capacity_tokens"] = json!(1_000_000);
-            b["work"]["kv_used_tokens"] = json!(500_000);
-            b["work"]["kv_capacity_tokens"] = json!(1_000_000);
-            if restriction == "stale" {
-                b["work"]["age_seconds"] = json!(4);
-            } else {
-                b["active"] = json!(136);
-            }
-            r.update_snapshot(&json!([a, b]).to_string()).unwrap();
             assert_eq!(
-                r.select_destination(&q, "1".into(), &mut fresh())
+                r.select_destination(&q, "1".into(), &mut admission)
                     .unwrap()
                     .replica
                     .as_deref(),
-                Some("cached")
+                Some("spare")
             );
         }
     }
