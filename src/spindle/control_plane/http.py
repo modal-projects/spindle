@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from spindle.deployments import DeploymentConfig
 from spindle.engine.api import JSON_OPERATIONS, OperationKind, submit_json_operation
 from spindle.errors import (
     EngineSaturated,
@@ -173,32 +174,46 @@ def _training_envelope(
     return body, identity
 
 
+def _deployment_summary(definition) -> dict[str, object]:
+    return {
+        "name": definition.name,
+        "definition_id": definition.definition_id,
+        "base_model": definition.model,
+        "weights_repo": definition.weights_repo,
+        "parameterization": definition.parameterization,
+        "max_context_length": definition.max_context_length,
+    }
+
+
 def create_control_plane_app(
     control_plane: ControlPlane,
-    definitions: Iterable[Any],
+    definitions: DeploymentRoutes | Iterable[Any],
     *,
     api_key: str | None = None,
     retrieve_window: float = 30.0,
     checkpoint_volume: str = "spindle-checkpoints",
 ) -> FastAPI:
-    definitions = tuple(definitions)
+    routes = (
+        definitions
+        if isinstance(definitions, DeploymentRoutes)
+        else DeploymentRoutes(definitions)
+    )
 
-    routes = DeploymentRoutes(definitions)
-
-    def definition_for(model_name, parameterization):
-        selected = routes.select(model_name, parameterization)
+    async def definition_for(model_name, parameterization):
+        selected = await routes.find(model_name, parameterization)
         return selected.definition_id if selected else None
 
-    def supports_model(model_name: str) -> bool:
-        return any(definition.model == model_name for definition in definitions) or any(
-            definition.definition_id == model_name for definition in definitions
-        )
+    async def supports_model(model_name: str) -> bool:
+        return await routes.find(model_name) is not None
 
     async def authorize(request: Request) -> None:
         if api_key is not None and request.headers.get("x-api-key") != api_key:
             raise HTTPException(status_code=401, detail="unauthorized")
 
-    app = FastAPI(dependencies=[Depends(authorize)])
+    async def refresh_routes() -> None:
+        await routes.refresh()
+
+    app = FastAPI(dependencies=[Depends(authorize), Depends(refresh_routes)])
 
     app.add_middleware(CommandMiddleware)
 
@@ -287,19 +302,12 @@ def create_control_plane_app(
 
     @app.get("/api/v1/spindle/deployments")
     async def list_deployments():
-        return {
-            "deployments": [
-                {
-                    "name": d.name,
-                    "definition_id": d.definition_id,
-                    "base_model": d.model,
-                    "weights_repo": d.weights_repo,
-                    "parameterization": d.parameterization,
-                    "max_context_length": d.max_context_length,
-                }
-                for d in definitions
-            ]
-        }
+        return {"deployments": [_deployment_summary(d) for d in routes.definitions]}
+
+    @app.post("/api/v1/spindle/deployments")
+    async def add_deployment(body: dict[str, Any]):
+        deployment = await routes.add(DeploymentConfig.model_validate(body))
+        return {"deployment": _deployment_summary(deployment)}
 
     @app.post("/api/v1/client/config")
     async def client_config() -> dict[str, object]:
@@ -337,7 +345,7 @@ def create_control_plane_app(
 
     @app.post("/api/v1/create_model")
     async def create_model(body: CreateModelBody) -> dict[str, object]:
-        if not supports_model(body.base_model):
+        if not await supports_model(body.base_model):
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported base_model: {body.base_model}",
@@ -370,7 +378,7 @@ def create_control_plane_app(
             raise ValueError("lora parameterization is configured through lora_config")
         if body.rollout is not None and parameterization != "full":
             raise ValueError("rollout is only configurable for full parameterization")
-        definition_id = definition_for(body.base_model, parameterization)
+        definition_id = await definition_for(body.base_model, parameterization)
         if definition_id is None:
             raise HTTPException(
                 status_code=400,
@@ -384,9 +392,7 @@ def create_control_plane_app(
             model_seq_id=body.model_seq_id,
             definition_id=definition_id,
             spec={
-                "base_model": next(
-                    d.model for d in definitions if d.definition_id == definition_id
-                ),
+                "base_model": routes.get(definition_id).model,
                 "lora_config": body.lora_config,
                 "parameterization": {"type": parameterization},
                 "rollout": body.rollout and body.rollout.model_dump(exclude_none=True),
@@ -407,7 +413,7 @@ def create_control_plane_app(
                 status_code=400,
                 detail="base_model or model_path is required",
             )
-        selected = routes.select(body.base_model) if body.base_model else None
+        selected = await routes.find(body.base_model) if body.base_model else None
         definition_id = selected.definition_id if selected else None
         if body.model_path is None and definition_id is None:
             raise HTTPException(
@@ -418,14 +424,12 @@ def create_control_plane_app(
             session_id=body.session_id,
             sampling_session_seq_id=body.sampling_session_seq_id,
             base_model=(
-                next(d.model for d in definitions if d.definition_id == definition_id)
-                if definition_id
-                else body.base_model
+                routes.get(definition_id).model if definition_id else body.base_model
             ),
             model_path=body.model_path,
             engine_definition_id=definition_id,
         )
-        if not supports_model(session.base_model):
+        if not await supports_model(session.base_model):
             raise HTTPException(
                 status_code=400,
                 detail=f"unsupported base_model: {session.base_model}",
@@ -518,6 +522,7 @@ def create_control_plane_app(
                 raise ValueError(
                     "session_id and model_seq_id must be provided without model_id and seq_id"
                 )
+            await routes.refresh(max_age=0)
             creation = await control_plane.create_model_from_checkpoint(
                 session_id=body.session_id,
                 model_seq_id=body.model_seq_id,
@@ -525,7 +530,7 @@ def create_control_plane_app(
                 base_model=body.base_model,
                 user_metadata=body.user_metadata,
                 optimizer=body.optimizer,
-                definition_ids={d.definition_id for d in definitions},
+                definition_ids={d.definition_id for d in routes.definitions},
             )
             return {
                 "request_id": creation.request_id,

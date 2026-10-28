@@ -46,7 +46,7 @@ def weights_ready(monkeypatch, *definitions):
 
 def test_definitions_come_only_from_the_configured_records() -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    assert {definition.definition_id for definition in modal_app.DEFINITIONS} == {
+    assert {definition.definition_id for definition in modal_app.DEPLOYMENTS.base} == {
         FULL_DEFINITION,
         LORA_DEFINITION,
     }

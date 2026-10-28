@@ -152,6 +152,37 @@ All configs deployed together must share platform settings. Use a shared parent 
 
 One frontend serves all models through Tinker’s `base_model`. When recipes share a model, the first matching recipe in the `spindle deploy` argument list is used. Training also matches the requested LoRA/FFT mode; base sampling uses the first recipe regardless of training mode. To select a specific recipe, pass its name from `/api/v1/spindle/deployments` as `base_model`. The frontend lists the current config set only.
 
+## Add a config to a running deployment
+
+`spindle deploy --add` adds a config to a frontend that is already running. It does not redeploy the frontend, and it leaves the other configs and their running jobs alone. Use it to serve a variant of a live config, such as the same model on another GPU type.
+
+Write the variant as a config file with a new `name`:
+
+```python
+from spindle.configs.qwen35_9b_lora_16k import Config as Parent
+
+
+class Config(Parent):
+    name = "qwen35-9b-lora-16k-h200"
+    trainer_gpu = "H200"
+
+
+config = Config()
+```
+
+Then add it with the frontend's API key:
+
+~~~bash
+export TINKER_API_KEY=...
+spindle deploy --add my_variant.py --app my-spindle --env dev
+~~~
+
+The command deploys the variant's trainer and inference apps. It then registers the variant with `POST /api/v1/spindle/deployments` and starts the weight download. The variant takes the frontend's platform settings, so it does not need its own `platform` overrides. It must match the frontend's lifecycle settings.
+
+Train on the variant by passing its name as `base_model`. A plain model ID such as `Qwen/Qwen3.5-9B` keeps going to the config that already served it, so adding a variant does not move anyone else's jobs.
+
+`--add` only adds new names. Running it again with the same file changes nothing. A different config under an existing name is rejected. Added configs stay registered when the frontend is redeployed. If the `spindle deploy` set has a config with the same name, that config takes its place.
+
 ## Update isolation
 
 Trainer apps are named `spindle-trainer-{name}` and inference apps `spindle-inference-{name}`. An inference-only change reuses the trainer app. A trainer-only change reuses the inference app. Source-only upgrades use `--refresh-trainer` / `--refresh-inference`. Updating inference settings also redeploys existing pools for that recipe before publishing the new frontend configuration. An interrupted pool update can be retried with the same command. Changes to region, storage, or secrets refresh both worker apps.

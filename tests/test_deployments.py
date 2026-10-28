@@ -304,6 +304,92 @@ def test_multiple_models_same_http_service_and_old_binding_survives_switch():
     asyncio.run(run())
 
 
+class AddedStore:
+    def __init__(self):
+        self.rows = {}
+
+    async def list(self):
+        return list(self.rows.values())
+
+    async def add(self, deployment):
+        return self.rows.setdefault(deployment.name, deployment)
+
+
+def test_added_deployment_reaches_every_server_without_redeploy():
+    async def run():
+        store = InMemoryKeyValueStore()
+        added = AddedStore()
+        base = resolved()
+        variant = resolved(recipe(name="variant", trainer_gpu="H200"))
+        apps = [
+            create_control_plane_app(
+                ControlPlane(store, SimpleNamespace()),
+                DeploymentRoutes([base], added),
+                api_key="test",
+            )
+            for _ in range(2)
+        ]
+        first, second = (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://frontend",
+                headers={"x-api-key": "test"},
+            )
+            for app in apps
+        )
+        async with first, second:
+            assert (
+                len(
+                    (await second.get("/api/v1/spindle/deployments")).json()[
+                        "deployments"
+                    ]
+                )
+                == 1
+            )
+            body = variant.model_dump(mode="json")
+            response = await first.post("/api/v1/spindle/deployments", json=body)
+            assert response.json()["deployment"]["name"] == variant.name
+            assert (
+                await first.post("/api/v1/spindle/deployments", json=body)
+            ).status_code == 200
+            changed = resolved(recipe(name=variant.name))
+            response = await first.post(
+                "/api/v1/spindle/deployments", json=changed.model_dump(mode="json")
+            )
+            assert response.status_code == 400
+            assert "different settings" in response.json()["message"]
+            session = (await second.post("/api/v1/create_session", json={})).json()[
+                "session_id"
+            ]
+            for seq, (base_model, definition_id) in enumerate(
+                [(variant.name, variant.name), (base.model, base.name)]
+            ):
+                response = await second.post(
+                    "/api/v1/create_model",
+                    json={
+                        "session_id": session,
+                        "model_seq_id": seq,
+                        "base_model": base_model,
+                        "lora_config": {"rank": 32},
+                    },
+                )
+                assert response.status_code == 200, response.text
+                record = await store.get(model_key(response.json()["model_id"]))
+                assert record["engine_definition_id"] == definition_id
+
+    asyncio.run(run())
+
+
+def test_added_deployment_must_share_frontend_settings():
+    async def run():
+        routes = DeploymentRoutes([resolved()], AddedStore())
+        with pytest.raises(ValueError, match="lifecycle"):
+            await routes.add(resolved(recipe(name="other", sweep_interval_s=1)))
+        assert len(routes.definitions) == 1
+
+    asyncio.run(run())
+
+
 def test_native_boolean_opposite_flags_and_optional_value():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bias", dest="bias", action="store_true")

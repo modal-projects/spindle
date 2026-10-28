@@ -11,9 +11,10 @@ from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.control_plane.deployments import DeploymentRoutes
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
-from spindle.deployments import validate_frontend
+from spindle.deployments import DeploymentConfig, validate_frontend
 from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
@@ -53,6 +54,7 @@ from .image_dependencies import (
 from .kv import (
     ModalSessionKeyValueStores,
     current_app_id,
+    deployment_kv,
     fft_pool_kv,
     shared_kv,
 )
@@ -79,9 +81,36 @@ from .trainer_reconciler import (
     request_reconcile,
 )
 
-DEFINITIONS = tuple(configs_from_env())
-validate_frontend([definition.recipe for definition in DEFINITIONS])
-SETTINGS = DEFINITIONS[0]
+
+class AddedDeployments:
+    """Recipes added with `spindle deploy --add`, stored per frontend."""
+
+    async def list(self):
+        rows = sorted(
+            (value for _, value in await deployment_kv().list_items("")),
+            key=lambda row: row["added_at"],
+        )
+        return [DeploymentConfig.model_validate(row["config"]) for row in rows]
+
+    async def add(self, deployment):
+        environment = PLATFORM["modal"]["environment"]
+        for app_name in (deployment.trainer_app_name, deployment.inference_app_name):
+            try:
+                await modal.App.lookup.aio(app_name, environment_name=environment)
+            except modal.exception.NotFoundError:
+                raise ValueError(
+                    f"{app_name} is not deployed; add deployments with spindle deploy --add"
+                ) from None
+        inserted = await deployment_kv().put_if_absent(
+            deployment.name,
+            {"config": deployment.model_dump(mode="json"), "added_at": time.time()},
+        )
+        return DeploymentConfig.model_validate(inserted.value["config"])
+
+
+DEPLOYMENTS = DeploymentRoutes(configs_from_env(), AddedDeployments())
+validate_frontend([definition.recipe for definition in DEPLOYMENTS.base])
+SETTINGS = DEPLOYMENTS.base[0]
 PLATFORM = platform_from_env()
 APP_NAME = PLATFORM["frontend"]
 ROUTING_REGION = PLATFORM["modal"]["region"]
@@ -141,8 +170,9 @@ image = (
 
 
 @app.function(image=image)
-def deployed_configs():
-    return [row.model_dump(mode="json") for row in configs_from_env()]
+async def deployed_configs():
+    await DEPLOYMENTS.refresh(max_age=0)
+    return [row.model_dump(mode="json") for row in DEPLOYMENTS.definitions]
 
 
 @app.function(image=image)
@@ -183,6 +213,7 @@ proxy_secret = modal.Secret.from_name(
     retries=2,
 )
 async def prepare_model_assets(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     definition = module_for(definition_id)
     checkpoint = os.path.normpath(definition.asset_path)
     if (
@@ -207,6 +238,7 @@ async def prepare_model_assets(definition_id: str) -> None:
 @app.function(image=image)
 async def start_weights_download(definition_id: str) -> bool:
     """Start the base-weight download for `spindle deploy`; True while it runs."""
+    await DEPLOYMENTS.load(definition_id)
     module_for(definition_id)
     return await _start_weights_download(definition_id) is not None
 
@@ -300,6 +332,7 @@ async def _call_running(call_id: str) -> bool:
 
 async def _weights_download(definition_id: str) -> float | None:
     """When the running base-weight download started, or None if none is running."""
+    await DEPLOYMENTS.load(definition_id)
     if await _weights_are_ready(definition_id):
         return None
     record = await shared_kv().get(_weights_call_key(definition_id))
@@ -418,6 +451,7 @@ async def execute_sample(task: dict) -> dict:
 
 async def _execute_sample(task: dict, stats: dict) -> dict:
     definition_id = str(task["engine_definition_id"])
+    await DEPLOYMENTS.load(definition_id)
     parameterization = parameterization_for(definition_id)
     if parameterization not in {"full", "lora"}:
         raise ValueError(f"unsupported sampling definition: {definition_id}")
@@ -493,10 +527,10 @@ async def _model_record(kv, model_id: str):
 
 
 def module_for(definition_id: str):
-    for definition in DEFINITIONS:
-        if definition.definition_id == definition_id:
-            return definition
-    raise KeyError(definition_id)
+    definition = DEPLOYMENTS.get(definition_id)
+    if definition is None:
+        raise KeyError(definition_id)
+    return definition
 
 
 def parameterization_for(definition_id: str) -> Parameterization | None:
@@ -522,6 +556,7 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
     call_id = modal.current_function_call_id()
 
     async def run(definition_id: str, token: str) -> None:
+        await DEPLOYMENTS.load(definition_id)
         parameterization = parameterization_for(definition_id)
         if (
             parameterization is None
@@ -563,6 +598,7 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
 
 
 async def kick_trainer_reconciler(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     if parameterization_for(definition_id) is None:
         return
 
@@ -611,6 +647,7 @@ async def deployment_error(definition_id: str) -> str | None:
 
 @app.function(image=image)
 async def clear_deployment_failure(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     module_for(definition_id)
     await shared_kv().delete(f"deployment_failure:{definition_id}")
     await kick_trainer_reconciler(definition_id)
@@ -626,6 +663,7 @@ def _plane():
         return call.object_id
 
     async def prepare_model(model) -> None:
+        await DEPLOYMENTS.load(model.engine_definition_id)
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
@@ -641,6 +679,7 @@ def _plane():
 
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
+        await DEPLOYMENTS.load(definition_id)
         parameterization = parameterization_for(definition_id)
         if parameterization is None:
             return
@@ -720,7 +759,7 @@ def _plane():
 def server():
     return create_control_plane_app(
         _plane(),
-        DEFINITIONS,
+        DEPLOYMENTS,
         api_key=os.environ["TINKER_API_KEY"],
         checkpoint_volume=CHECKPOINT_VOLUME_NAME,
     )
@@ -817,6 +856,7 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
 @app.function(image=image, schedule=SWEEP_PERIOD)
 def cleaner():
     async def run() -> None:
+        await DEPLOYMENTS.refresh(max_age=0)
         plane = _plane()
         await plane.sweep_idle_sessions(SESSION_IDLE_TIMEOUT)
         await plane.sweep_idle_models(SESSION_IDLE_TIMEOUT)

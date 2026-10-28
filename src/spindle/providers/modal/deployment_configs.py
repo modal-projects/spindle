@@ -8,6 +8,8 @@ import modal
 
 from spindle.deployments import DeploymentConfig
 
+from .kv import deployment_kv
+
 CONFIGS_FILE_ENV = "SPINDLE_DEPLOYMENT_CONFIGS_FILE"
 CONFIGS_IMAGE_PATH = "/root/spindle_deployment_configs.json"
 PLATFORM_ENV = "SPINDLE_PLATFORM"
@@ -78,7 +80,8 @@ def pool_config(definition_id):
     for deployment in configs_from_env():
         if deployment.definition_id == definition_id:
             return deployment
-    return None
+    added = deployment_kv().dictionary.get(definition_id)
+    return None if added is None else DeploymentConfig.model_validate(added["config"])
 
 
 def provision_pool(deployment, pool, platform):

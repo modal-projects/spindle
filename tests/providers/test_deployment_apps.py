@@ -203,8 +203,19 @@ def test_pool_lookup_uses_definition_name(monkeypatch, tmp_path):
     monkeypatch.setenv(
         deployment_configs.CONFIGS_FILE_ENV, write_configs(tmp_path, [row])
     )
+    added = deployment("qwen3-8b-lora-32k")
+    monkeypatch.setattr(
+        deployment_configs,
+        "deployment_kv",
+        lambda: SimpleNamespace(
+            dictionary={added.name: {"config": added.model_dump(mode="json")}}
+        ),
+    )
     saved = deployment_configs.pool_config(row.definition_id)
     assert saved.definition_id == row.definition_id
+    assert deployment_configs.pool_config(added.definition_id).model_dump(
+        mode="json"
+    ) == added.model_dump(mode="json")
     assert deployment_configs.pool_config("missing") is None
 
 
@@ -241,14 +252,15 @@ def test_real_modal_app_constructs_from_configs_without_legacy_catalog(tmp_path)
             sys.executable,
             "-c",
             """
-import importlib, sys, modal
+import asyncio, importlib, sys, modal
 from spindle.providers.modal import deployment_apps, deployment_configs
 deployment_apps.image_for = lambda backend, name="": modal.Image.debian_slim()
 app = importlib.import_module('spindle.providers.modal.app')
-assert len(app.DEFINITIONS) == 1
+assert len(app.DEPLOYMENTS.base) == 1
 assert app.APP_NAME == 'spindle'
-assert app.deployed_configs.local() == [d.model_dump(mode='json') for d in app.configs_from_env()]
-assert app.DEFINITIONS[0].trainer_app_name
+app.DEPLOYMENTS.added_store = None
+assert asyncio.run(app.deployed_configs.local()) == [d.model_dump(mode='json') for d in app.configs_from_env()]
+assert app.DEPLOYMENTS.base[0].trainer_app_name
 assert not any(name.startswith('spindle.providers.modal.definitions.') for name in sys.modules)
 print('constructed')
 """,
@@ -282,7 +294,7 @@ import importlib, modal
 from spindle.providers.modal import deployment_apps
 deployment_apps.image_for = lambda backend: modal.Image.debian_slim()
 app = importlib.import_module('spindle.providers.modal.app')
-print(len(app.DEFINITIONS), max(len(value) for value in app.TRAINER_DEPLOYMENT_ENV.values()))
+print(len(app.DEPLOYMENTS.base), max(len(value) for value in app.TRAINER_DEPLOYMENT_ENV.values()))
 """,
         ],
         env=env,

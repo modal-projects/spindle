@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -13,6 +14,7 @@ from concurrent.futures import Future
 from functools import partial
 from pathlib import Path
 
+import httpx
 import modal
 from rich.console import Console
 
@@ -215,6 +217,77 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
             )
 
 
+def add(configs, frontend, environment):
+    """Deploy each config's trainer and inference apps, then add it to the running frontend."""
+    platform = deployed_platform(frontend, environment)
+    if platform is None:
+        raise ValueError(
+            f"No Spindle frontend {frontend!r} is deployed; run spindle deploy first."
+        )
+    api_key = os.environ.get("TINKER_API_KEY")
+    if not api_key:
+        raise ValueError("Set TINKER_API_KEY to the frontend's API key.")
+    current = {
+        row.name: row
+        for row in map(
+            DeploymentConfig.model_validate, deployed_configs(frontend, environment)
+        )
+    }
+    for deployment in configs:
+        deployment.recipe.platform = copy.deepcopy(platform)
+        existing = current.get(deployment.name)
+        if existing is not None and existing.model_dump(
+            mode="json"
+        ) != deployment.model_dump(mode="json"):
+            raise ValueError(
+                f"{deployment.name} is already deployed with different settings; "
+                "give the new config its own name."
+            )
+    validate_frontend(
+        [deployment.recipe for deployment in current.values()]
+        + [
+            deployment.recipe
+            for deployment in configs
+            if deployment.name not in current
+        ]
+    )
+    trainers, inference = apps_to_publish(
+        configs, list(current.values()), environment, set(), set()
+    )
+    url = modal.Function.from_name(
+        frontend, "server", environment_name=environment
+    ).get_web_url()
+    with modal.enable_output():
+        for deployment in configs:
+            if deployment.name in trainers:
+                build_trainer_app(deployment, platform)[0].deploy(
+                    environment_name=environment
+                )
+            if deployment.name in inference:
+                build_inference_app(deployment, platform)[0].deploy(
+                    environment_name=environment
+                )
+            response = httpx.post(
+                f"{url}/api/v1/spindle/deployments",
+                json=deployment.model_dump(mode="json"),
+                headers={"X-API-Key": api_key},
+                timeout=60,
+            )
+            if response.status_code == 405:
+                raise ValueError(
+                    f"{frontend} predates spindle deploy --add; redeploy it once with spindle deploy."
+                )
+            if response.is_error:
+                raise ValueError(
+                    f"Adding {deployment.name} failed: {response.json().get('message', response.text)}"
+                )
+            start_weights_download(frontend, environment, deployment.definition_id)
+            print(
+                f"Added {deployment.name}. Train on it by passing "
+                f"base_model={deployment.name!r}."
+            )
+
+
 def in_background(step):
     """Run `step` on a daemon thread so a failed or interrupted deploy exits promptly."""
     future = Future()
@@ -262,6 +335,11 @@ def parser():
         help="Python config files or bundled config names (none: pick interactively)",
     )
     apply.add_argument("--all", action="store_true", help="Deploy every bundled config")
+    apply.add_argument(
+        "--add",
+        action="store_true",
+        help="Add these configs to the running frontend without redeploying it",
+    )
     apply.add_argument("--app")
     apply.add_argument("--env")
     apply.add_argument("--region")
@@ -304,6 +382,17 @@ def main(argv=None):
             frontend = args.app or BaseConfig.platform["frontend"]
             environment = args.env or os.environ.get("MODAL_ENVIRONMENT")
             chosen = []
+            if args.add:
+                if not args.files:
+                    raise ValueError("spindle deploy --add needs config files")
+                configs = compile_configs([config_file(arg) for arg in args.files])
+                platform = configs[0].recipe.platform
+                add(
+                    configs,
+                    args.app or platform["frontend"],
+                    args.env or platform["modal"]["environment"] or environment,
+                )
+                return
             if args.files:
                 paths = [config_file(arg) for arg in args.files]
             elif args.all:

@@ -17,6 +17,7 @@ SAMPLING_SESSION_KV_NAME = "spindle-sampling-sessions"
 EXPORT_KV_NAME = "spindle-exports"
 ARTIFACT_KV_NAME = "spindle-artifacts"
 FFT_POOL_KV_NAME = "spindle-fft-pools"
+DEPLOYMENT_KV_NAME = "spindle-deployments"
 LIST_ITEMS_ATTEMPTS = 3
 # A healthy scan of ~4,800 session records can take over 40 seconds.
 LIST_ITEMS_TIMEOUT_SECONDS = 120.0
@@ -216,11 +217,19 @@ def shared_kv(app_id: str | None = None) -> RoutedKeyValueStore:
     )
 
 
-def fft_pool_kv(app_id: str | None = None) -> ModalKeyValueStore:
-    app_id = app_id or current_app_id()
+def _app_kv(name: str, app_id: str | None) -> ModalKeyValueStore:
     return ModalKeyValueStore(
         modal.Dict.from_name(
-            app_store_name(FFT_POOL_KV_NAME, app_id),
+            app_store_name(name, app_id or current_app_id()),
             create_if_missing=True,
         )
     )
+
+
+def fft_pool_kv(app_id: str | None = None) -> ModalKeyValueStore:
+    return _app_kv(FFT_POOL_KV_NAME, app_id)
+
+
+def deployment_kv(app_id: str | None = None) -> ModalKeyValueStore:
+    """Recipes added to a running frontend, keyed by recipe name."""
+    return _app_kv(DEPLOYMENT_KV_NAME, app_id)
