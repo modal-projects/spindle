@@ -85,7 +85,7 @@ class Config(BaseConfig):
     inference_startup_timeout_s = 7200
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
-        "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
+        "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "per_rank",
         # Routed experts load as FP8 on every GPU; the FP4 expert kernels need Blackwell.
         "SGLANG_DSV4_FP4_EXPERTS": "1",
         "SGLANG_DSV4_FP4_DEQUANT": "1",
