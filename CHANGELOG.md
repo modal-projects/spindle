@@ -8,6 +8,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 - Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
 
+### Changed
+
+- When every datum in a batch has the same number of candidate labels (`target_tokens` shaped `[sequence_length, K]`), the Miles backend scores all K labels from one softmax over the vocabulary instead of K. For a 4B LoRA classifier with 5 labels per position on 4× H100, `forward_backward` takes 4.4 s instead of 6.6 s and peak memory falls from 55 GB to 25 GB per GPU.
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.
