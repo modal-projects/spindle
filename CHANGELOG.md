@@ -20,6 +20,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 - `forward` requests use the same binary transport and protobuf results as `forward_backward`, and queued forwards are batched into one trainer call.
 - The Miles backend prepares labels and weights with numpy instead of per-value Python loops. For 128 examples with `[seq, 5]` labels this saves about 1 s per training call.
 
+### Changed
+
+- When every datum in a batch has the same number of candidate labels (`target_tokens` shaped `[sequence_length, K]`), the Miles backend scores all K labels from one softmax over the vocabulary instead of K (#157).
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.

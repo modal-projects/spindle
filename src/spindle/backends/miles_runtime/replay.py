@@ -60,6 +60,7 @@ def install_replay_hooks(
     tinker_losses,
     fill_replay_data,
     manager,
+    math_utils=None,
 ) -> None:
     # The GPU actor imports Miles; this module also serves CPU-side mask tests.
     global _replayed_run
@@ -132,7 +133,7 @@ def install_replay_hooks(
         )["log_probs"]
 
     tinker_losses._target_logprobs = target_logprobs
-    install_multi_target_hooks(tinker_losses)
+    install_multi_target_hooks(tinker_losses, math_utils)
     original_iterator = lora_model.get_data_iterator
 
     @wraps(original_iterator)
