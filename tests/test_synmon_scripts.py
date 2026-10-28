@@ -4,7 +4,6 @@ from pathlib import Path
 
 from synthetic_monitoring.config_validation import (
     FRONTEND_NAME,
-    GPU_BUDGET,
     SCRIPTS,
     light_dapo_config,
     recipes_for,
@@ -52,7 +51,7 @@ def test_dapo_and_swe_entrypoints():
     assert swe[swe.index("--steps") + 1] == "5"
     assert swe[swe.index("--groups-per-batch") + 1] == "1"
     assert swe[swe.index("--output") + 1] == "/tmp/swe"
-    assert swe[swe.index("--hours") + 1] == "3.0"
+    assert swe[swe.index("--hours") + 1] == "6.0"
 
 
 def test_dapo_steps_override(tmp_path):
@@ -83,24 +82,41 @@ def test_light_dapo_config_shrinks_the_step():
     assert cfg["samples_per_group"] == 4
 
 
-def test_synmon_uses_two_h200_and_at_most_two_b200():
-    for script, recipe_name in (
-        ("dapo-math", "qwen38-27b-lora-16k"),
-        ("swe-gym", "qwen35-9b-lora-128k"),
-    ):
-        recipes = recipes_for(script)
-        assert len(recipes) == 1
-        recipe = recipes[0]
-        assert recipe.name == recipe_name
-        assert recipe.trainer_gpu == "H200"
-        assert recipe.trainer_nodes == 1
-        assert recipe.trainer_gpus_per_node == 2
-        assert recipe.trainer_max_instances == 1
-        assert recipe.inference_gpu == "B200"
-        assert recipe.inference_gpus_per_node * recipe.inference_max_replicas == 2
-        assert recipe.inference_min_replicas <= recipe.inference_max_replicas
-        assert recipe.miles_cfg["tensor_model_parallel_size"] == 2
-        assert recipe.miles_cfg["max_lora_slots"] == 2
-        assert recipe.max_context_length == GPU_BUDGET["max_context_length"]
-        assert recipe.sglang_cfg["tp_size"] == 1
-        assert recipe.platform["frontend"] == FRONTEND_NAME
+def _assert_inference_cap(recipe):
+    assert recipe.inference_gpu == "B200"
+    assert recipe.inference_gpus_per_node * recipe.inference_max_replicas == 2
+    assert recipe.inference_min_replicas <= recipe.inference_max_replicas
+    assert recipe.sglang_cfg["tp_size"] == 1
+    assert recipe.platform["frontend"] == FRONTEND_NAME
+
+
+def test_dapo_trainer_stays_on_two_h200():
+    recipe = recipes_for("dapo-math")[0]
+    assert recipe.name == "qwen38-27b-lora-16k"
+    assert recipe.trainer_gpu == "H200"
+    assert recipe.trainer_gpus_per_node == 2
+    assert recipe.trainer_nodes == 1
+    assert recipe.max_context_length == 8192
+    assert recipe.miles_cfg["tensor_model_parallel_size"] == 2
+    assert recipe.miles_cfg["max_tokens_per_gpu"] == 8192
+    _assert_inference_cap(recipe)
+
+
+def test_swe_trainer_fits_128k_in_32k_microbatches():
+    recipe = recipes_for("swe-gym")[0]
+    assert recipe.name == "qwen35-9b-lora-128k"
+    assert recipe.trainer_gpu == "H200"
+    assert recipe.trainer_gpus_per_node == 4
+    assert recipe.trainer_nodes == 1
+    assert recipe.max_context_length == 131_072
+    miles = recipe.miles_cfg
+    assert miles["tensor_model_parallel_size"] == 1
+    assert miles["context_parallel_size"] == 4
+    assert miles["max_tokens_per_gpu"] == 32768
+    assert (
+        miles["context_parallel_size"] * miles["max_tokens_per_gpu"]
+        >= recipe.max_context_length
+    )
+    assert miles["align_sequences_to_parallel_layout"] is True
+    assert recipe.sglang_cfg["chunked_prefill_size"] == 8192
+    _assert_inference_cap(recipe)

@@ -1,8 +1,8 @@
 """Nightly synthetic monitoring for spindle.
 
-Picks one script from SCRIPTS and deploys only that script's recipe, capped at
-2×H200 for training and 2×B200 for inference. Both scripts are existing client
-entrypoints, with the client counts and sequence lengths reduced to fit.
+Picks one script from SCRIPTS and deploys only that script's recipe. Inference
+stays at 2×B200. DAPO trains on 2×H200. SWE-Gym trains on 4×H200 so a 128k
+sequence is four 32k-token microbatches.
 
 Test it out with:
 
@@ -50,11 +50,9 @@ CONFIGS = (
     "qwen35-9b-lora-16k",
     "deepseek-v41-flash-lora-8k",
 )
-# One trainer node and at most two sampler replicas. 2×1 B200 is the inference cap.
+# Shared cap: one trainer node and at most two B200 samplers.
 GPU_BUDGET = {
-    "max_context_length": 8192,
     "trainer_gpu": "H200",
-    "trainer_gpus_per_node": 2,
     "trainer_nodes": 1,
     "trainer_max_instances": 1,
     "trainer_max_clients_per_instance": 2,
@@ -62,11 +60,22 @@ GPU_BUDGET = {
     "inference_gpus_per_node": 1,
     "inference_min_replicas": 1,
     "inference_max_replicas": 2,
-    "miles_cfg.tensor_model_parallel_size": 2,
     "miles_cfg.max_lora_slots": 2,
-    "miles_cfg.max_tokens_per_gpu": 8192,
     "sglang_cfg.tp_size": 1,
     "sglang_cfg.max_running_requests": 4,
+}
+# 4×H200 matches the long-context 9B trainer. Context parallel keeps each GPU
+# at a 32k microbatch while the script still samples a 128k window.
+SWE_TRAINER = {
+    "max_context_length": 131_072,
+    "trainer_gpus_per_node": 4,
+    "miles_cfg.tensor_model_parallel_size": 1,
+    "miles_cfg.context_parallel_size": 4,
+    "miles_cfg.max_tokens_per_gpu": 32768,
+    "miles_cfg.align_sequences_to_parallel_layout": True,
+    "miles_cfg.cli_options.cp_comm_type": ["p2p"],
+    "sglang_cfg.chunked_prefill_size": 8192,
+    "sglang_cfg.mem_fraction_static": 0.85,
 }
 # Same invocation for every entry: python <script> --clients N --steps N,
 # with TINKER_BASE_URL set to the deployed frontend.
@@ -76,6 +85,12 @@ SCRIPTS = {
         "steps": 5,
         "timeout_s": 2 * 60 * 60,
         "recipe": "qwen38-27b-lora-16k",
+        "overrides": {
+            "max_context_length": 8192,
+            "trainer_gpus_per_node": 2,
+            "miles_cfg.tensor_model_parallel_size": 2,
+            "miles_cfg.max_tokens_per_gpu": 8192,
+        },
         "argv": [
             "{python}",
             f"{DAPO_DIR}/launch_clients.py",
@@ -97,8 +112,9 @@ SCRIPTS = {
         "clients": 2,
         "steps": 5,
         "groups": 1,
-        "timeout_s": 3 * 60 * 60,
+        "timeout_s": 6 * 60 * 60,
         "recipe": "qwen35-9b-lora-128k",
+        "overrides": SWE_TRAINER,
         "argv": [
             "{python}",
             SWE_GYM,
@@ -127,9 +143,6 @@ probe_image = (
         " https://github.com/modal-labs/modal-examples.git /opt/modal-examples"
         " && git -C /opt/modal-examples sparse-checkout set 06_gpu_and_ml/swe_gym"
         f" && git -C /opt/modal-examples checkout {SWE_GYM_REV}"
-        ' && sed -i \'s/"context_tokens": 131_072/"context_tokens": 8192/\' '
-        f"{SWE_GYM}"
-        f" && grep -q '\"context_tokens\": 8192' {SWE_GYM}"
     )
     .uv_sync(uv_project_dir=str(REPO_ROOT), extra_options="--no-dev")
     .uv_pip_install(
@@ -153,7 +166,8 @@ hf_secret = modal.Secret.from_name("huggingface-secret", environment_name=MODAL_
 app = modal.App("spindle-synmon-launcher")
 
 
-def synmon_configs(names=None):
+def synmon_configs(names=None, extra_overrides=None):
+    extra = extra_overrides or {}
     recipes = []
     for name in names or CONFIGS:
         recipe = load(config_path(name))
@@ -163,6 +177,7 @@ def synmon_configs(names=None):
                     "platform.frontend": FRONTEND_NAME,
                     "platform.modal.environment": MODAL_ENV,
                     **GPU_BUDGET,
+                    **extra,
                 }
             )
         )
@@ -170,7 +185,8 @@ def synmon_configs(names=None):
 
 
 def recipes_for(script: str):
-    return synmon_configs([SCRIPTS[script]["recipe"]])
+    spec = SCRIPTS[script]
+    return synmon_configs([spec["recipe"]], spec.get("overrides"))
 
 
 def light_dapo_config(cfg: dict) -> dict:
