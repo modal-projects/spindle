@@ -99,7 +99,7 @@ class Config(BaseConfig):
         "dtype": "bfloat16",
         "trust_remote_code": True,
         "mem_fraction_static": 0.9,
-        "model_loader_extra_config": {"enable_multithread_load": False},
+        "model_loader_extra_config": {"enable_multithread_load": True},
         "weight_loader_drop_cache_after_load": True,
         "weight_loader_disable_mmap": False,
         "disable_shared_experts_fusion": True,
