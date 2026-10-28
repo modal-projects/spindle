@@ -28,13 +28,13 @@ image = (
         " && rm -rf /sgl-workspace/sglang/rust"
         " && cp -a /tmp/spindle-sglang-overlay/rust /sgl-workspace/sglang/rust"
         " && rm -rf /tmp/spindle-sglang-overlay",
-        # Build the fork's radix-tree binding once, then bundle it next to its
-        # Python module so samplers never rebuild it at startup.
+        # Bundle the fork's radix-tree binding so samplers load it in never mode.
         "python -c 'from sglang.srt.mem_cache.rust_tree_core.extension import bindings; "
         'assert hasattr(bindings.RustUnifiedTreeCoreBinding, "routing_snapshot_delta"); '
         "import pathlib, shutil; "
         'shutil.copy(bindings.__file__, "/sgl-workspace/sglang/python/sglang/srt/mem_cache/rust_tree_core/" '
-        "+ pathlib.Path(bindings.__file__).name)'",
+        "+ pathlib.Path(bindings.__file__).name)'"
+        " && rm -rf /root/.cache/sglang/rust_extensions",
         "SGLANG_RUST_BUILD_MODE=never python -c 'from sglang.srt.mem_cache.rust_tree_core.extension import bindings; "
         'assert hasattr(bindings.RustUnifiedTreeCoreBinding, "routing_snapshot_delta")\'',
     )

@@ -24,6 +24,5 @@ KERNEL_CACHE_ENV = {
     "TILELANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/tilelang",
 }
 
-# SGLang redirects every cache it owns (Triton, Inductor, TileLang, FlashInfer,
-# DeepGEMM) under this directory; kept apart from the trainer's.
+# Sampler only: the Miles trainer imports SGLang too and keeps its caches local.
 SAMPLER_KERNEL_CACHE_ENV = {"SGLANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/sglang"}

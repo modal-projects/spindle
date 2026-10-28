@@ -642,15 +642,16 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
 
 def test_samplers_keep_their_kernel_cache_on_the_shared_volume(builders):
     row = deployment()
-    row.recipe.inference_env = {"SGLANG_LOG_LEVEL": "warning"}
     app, _ = deployment_apps.build_rollout_app(
         row, LoraPoolSpec(row.definition_id), image="test"
     )
-    settings, _ = app.servers["Server"]
-    assert settings["env"] == {
-        **SAMPLER_KERNEL_CACHE_ENV,
-        "SGLANG_LOG_LEVEL": "warning",
-    }
+    assert app.servers["Server"][0]["env"] == SAMPLER_KERNEL_CACHE_ENV
+
+    row.recipe.inference_env = {"SGLANG_CACHE_DIR": "/tmp/sglang"}
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert app.servers["Server"][0]["env"] == {"SGLANG_CACHE_DIR": "/tmp/sglang"}
 
 
 def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
