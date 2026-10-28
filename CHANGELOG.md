@@ -9,10 +9,6 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 - Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
 - LoRA samplers can route each request to the replica with its longest cached prefix with `inference_lora_routing = "cache_wait"`, while keeping request load and pinned KV memory within bounds. The router runs in Rust inside each sampling container. It needs `inference_routing_prefill_tokens_per_second`, and `inference_routing_balance_absolute`, `inference_routing_balance_relative` and `inference_routing_cache_threshold` tune it. Modal session affinity remains the default (#121, #122, #123).
 
-### Changed
-
-- Installing Spindle from source builds its Rust routing extension, so it needs a Rust toolchain (#123).
-
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "setuptools-rust>=1.10"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -53,9 +53,3 @@ dev = [
 
 [project.scripts]
 spindle = "spindle.deployment_cli:main"
-
-[[tool.setuptools-rust.ext-modules]]
-target = "spindle_router"
-path = "rust/router/Cargo.toml"
-binding = "PyO3"
-features = ["pyo3/extension-module"]

@@ -70,7 +70,6 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
-from .router import create_router
 from .router_image import router_image
 from .trainer_reconciler import (
     TRANSIENT_POLL_ERRORS,
@@ -439,6 +438,10 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         router = None
         if policy == "cache_wait" and task.get("model_id") is not None:
             if spec.app_name not in _routers:
+                # The Rust extension exists only in the Modal image; `modal
+                # deploy` imports this module locally.
+                from .router import create_router
+
                 _routers[spec.app_name] = create_router(
                     spec.app_name,
                     gateway,
