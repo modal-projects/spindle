@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
+import sys
 import time
 from dataclasses import asdict
 
@@ -33,7 +36,9 @@ from .deployment import trainer_deployment_env
 from .deployment_configs import (
     CONFIGS_FILE_ENV,
     CONFIGS_IMAGE_PATH,
+    DEPLOYMENT_ENV,
     PLATFORM_ENV,
+    WORKER_ROLE_ENV,
     configs_from_env,
     platform_from_env,
 )
@@ -83,29 +88,29 @@ from .trainer_reconciler import (
 
 
 class AddedDeployments:
-    """Recipes added with `spindle deploy --add`, stored per frontend."""
+    """Recipes added through the deployments API, stored per frontend."""
 
     async def list(self):
-        rows = sorted(
-            (value for _, value in await deployment_kv().list_items("")),
+        return sorted(
+            (row for _, row in await deployment_kv().list_items("")),
             key=lambda row: row["added_at"],
         )
-        return [DeploymentConfig.model_validate(row["config"]) for row in rows]
 
     async def add(self, deployment):
-        environment = PLATFORM["modal"]["environment"]
-        for app_name in (deployment.trainer_app_name, deployment.inference_app_name):
-            try:
-                await modal.App.lookup.aio(app_name, environment_name=environment)
-            except modal.exception.NotFoundError:
-                raise ValueError(
-                    f"{app_name} is not deployed; add deployments with spindle deploy --add"
-                ) from None
-        inserted = await deployment_kv().put_if_absent(
-            deployment.name,
-            {"config": deployment.model_dump(mode="json"), "added_at": time.time()},
-        )
-        return DeploymentConfig.model_validate(inserted.value["config"])
+        """Record the recipe and deploy its apps, unless it is already deploying or ready."""
+        store = deployment_kv()
+        row = {
+            "config": deployment.model_dump(mode="json"),
+            "added_at": time.time(),
+            "state": "deploying",
+        }
+        inserted = await store.put_if_absent(deployment.name, row)
+        if not inserted.created:
+            if inserted.value["state"] != "failed":
+                return inserted.value
+            await store.put(deployment.name, row)
+        await deploy_added.spawn.aio(deployment.name)
+        return row
 
 
 DEPLOYMENTS = DeploymentRoutes(configs_from_env(), AddedDeployments())
@@ -171,7 +176,7 @@ image = (
 
 @app.function(image=image)
 async def deployed_configs():
-    await DEPLOYMENTS.refresh(max_age=0)
+    await DEPLOYMENTS.refresh()
     return [row.model_dump(mode="json") for row in DEPLOYMENTS.definitions]
 
 
@@ -241,6 +246,49 @@ async def start_weights_download(definition_id: str) -> bool:
     await DEPLOYMENTS.load(definition_id)
     module_for(definition_id)
     return await _start_weights_download(definition_id) is not None
+
+
+def _deploy_worker_app(deployment: DeploymentConfig, role: str) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        "spindle.providers.modal.deployment_worker_app",
+    ]
+    if environment := PLATFORM["modal"]["environment"]:
+        command += ["--env", environment]
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            DEPLOYMENT_ENV: deployment.model_dump_json(),
+            WORKER_ROLE_ENV: role,
+            PLATFORM_ENV: json.dumps(PLATFORM),
+        },
+    )
+
+
+@app.function(image=image, timeout=60 * 60)
+async def deploy_added(name: str) -> None:
+    """Deploy an added recipe's trainer and inference apps, then make it routable."""
+    store = deployment_kv()
+    row = await store.get(name)
+    deployment = DeploymentConfig.model_validate(row["config"])
+    try:
+        for role in ("trainer", "inference"):
+            await asyncio.to_thread(_deploy_worker_app, deployment, role)
+    except Exception as exc:
+        output = getattr(exc, "stderr", None) or str(exc)
+        await store.put(name, {**row, "state": "failed", "error": output[-2000:]})
+        raise
+    await store.put(name, {**row, "state": "ready"})
+    await DEPLOYMENTS.refresh()
+    await _start_weights_download(name)
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
@@ -540,6 +588,11 @@ def parameterization_for(definition_id: str) -> Parameterization | None:
         return None
 
 
+async def _loaded_parameterization(definition_id: str) -> Parameterization | None:
+    await DEPLOYMENTS.load(definition_id)
+    return parameterization_for(definition_id)
+
+
 def trainer_autoscaling(definition_id: str) -> bool:
     return parameterization_for(definition_id) is not None
 
@@ -741,7 +794,8 @@ def _plane():
         delete_checkpoint=_delete_checkpoint,
         checkpoint_root=CHECKPOINT_ROOT,
         reconcile_trainers=kick_trainers,
-        trainer_autoscaling=trainer_autoscaling,
+        # Every Modal recipe autoscales; this also covers recipes added after startup.
+        trainer_autoscaling=lambda _: True,
         trainer_gpu_wait=gpu_wait(_trainer_function, _trainer_gpus),
     )
 
@@ -770,7 +824,7 @@ async def _lose_undefined_models() -> tuple[str, ...]:
     lost = []
     for _, value in await kv.list_items("model:"):
         model = ModelRecord.model_validate(value)
-        if parameterization_for(model.engine_definition_id) is not None:
+        if await _loaded_parameterization(model.engine_definition_id) is not None:
             continue
         await kv.delete(placement_key(model.model_id))
         await kv.delete(trainer_demand_key(model.model_id))
@@ -788,7 +842,7 @@ async def _cleanup_fft_pools() -> tuple[str, ...]:
         ).app_name
         for _, value in await shared_kv().list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "full"
+        if await _loaded_parameterization(model.engine_definition_id) == "full"
     }
     stopped = []
     registry = fft_pool_kv()
@@ -832,7 +886,7 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
         LoraPoolSpec(model.engine_definition_id).app_name
         for _, value in await registry.list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "lora"
+        if await _loaded_parameterization(model.engine_definition_id) == "lora"
     }
     stopped = []
     for key, value in await registry.list_items("lora_pool:"):
@@ -856,7 +910,6 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
 @app.function(image=image, schedule=SWEEP_PERIOD)
 def cleaner():
     async def run() -> None:
-        await DEPLOYMENTS.refresh(max_age=0)
         plane = _plane()
         await plane.sweep_idle_sessions(SESSION_IDLE_TIMEOUT)
         await plane.sweep_idle_models(SESSION_IDLE_TIMEOUT)

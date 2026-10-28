@@ -826,6 +826,16 @@ def test_cleaner_loses_models_on_removed_definitions(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     kv = InMemoryKeyValueStore()
     registry = InMemoryKeyValueStore()
+    recipe = load(config_path("qwen35-9b-fft-64k"))
+    recipe.name = "added-after-startup"
+    added = DeploymentConfig.create(recipe)
+    store = SimpleNamespace(
+        list=AsyncMock(
+            return_value=[{"config": added.model_dump(mode="json"), "state": "ready"}]
+        )
+    )
+    for attribute, value in (("added_store", store), ("added", ()), ("added_rows", ())):
+        monkeypatch.setattr(modal_app.DEPLOYMENTS, attribute, value)
     stopped = []
     monkeypatch.setattr(modal_app, "shared_kv", lambda: kv)
     monkeypatch.setattr(modal_app, "fft_pool_kv", lambda: registry)
@@ -852,11 +862,13 @@ def test_cleaner_loses_models_on_removed_definitions(monkeypatch) -> None:
 
     async def run() -> None:
         await seed(FULL_DEFINITION, "live")
+        await seed(added.definition_id, "added")
         await seed("removed_definition", "orphan")
         assert await modal_app._lose_undefined_models() == ("orphan",)
         assert await modal_app._cleanup_fft_pools() == (pools["orphan"].app_name,)
-        assert await kv.get(placement_key("live")) is not None
-        assert await kv.get(trainer_demand_key("live")) is not None
+        for model_id in ("live", "added"):
+            assert await kv.get(placement_key(model_id)) is not None
+            assert await kv.get(trainer_demand_key(model_id)) is not None
         assert await kv.get(placement_key("orphan")) is None
         assert await kv.get(trainer_demand_key("orphan")) is None
 

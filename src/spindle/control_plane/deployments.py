@@ -1,69 +1,90 @@
 """Select recipes in deployment order, or explicitly by definition ID."""
 
-import time
+from spindle.configuration import BaseConfig
+from spindle.deployments import DeploymentConfig, validate_frontend
 
-from spindle.deployments import validate_frontend
 
-REFRESH_INTERVAL_S = 5.0
+def _settings(config):
+    return {**config, "spindle_version": None}
 
 
 class DeploymentRoutes:
-    """Recipes deployed with the frontend, then recipes added to it later."""
+    """Recipes deployed with the frontend, then recipes added to it later.
 
-    def __init__(self, definitions, added=None, clock=time.monotonic):
+    Added recipes are only ever inserted, so lookups reread them on a miss.
+    """
+
+    def __init__(self, definitions, added=None):
         self.base = tuple(definitions)
         self.added_store = added
+        self.added_rows = ()
         self.added = ()
-        self.refreshed_at = None
-        self.clock = clock
 
     @property
     def definitions(self):
         base_names = {d.name for d in self.base}
         return self.base + tuple(d for d in self.added if d.name not in base_names)
 
+    @property
+    def pending(self):
+        """Added recipes whose apps are still deploying or failed to deploy."""
+        return tuple(row for row in self.added_rows if row["state"] != "ready")
+
     def get(self, definition_id):
         return next(
             (d for d in self.definitions if d.definition_id == definition_id), None
         )
 
-    async def refresh(self, max_age=REFRESH_INTERVAL_S):
+    async def refresh(self):
         if self.added_store is None:
             return
-        if self.refreshed_at is not None and self.clock() - self.refreshed_at < max_age:
-            return
-        self.added = tuple(await self.added_store.list())
-        self.refreshed_at = self.clock()
+        self.added_rows = tuple(await self.added_store.list())
+        self.added = tuple(
+            DeploymentConfig.model_validate(row["config"])
+            for row in self.added_rows
+            if row["state"] == "ready"
+        )
 
     async def load(self, definition_id):
-        """The recipe for definition_id, rereading added recipes if it is unknown."""
         if self.get(definition_id) is None:
-            await self.refresh(max_age=0)
+            await self.refresh()
         return self.get(definition_id)
 
     async def find(self, model, mode=None):
         selected = self.select(model, mode)
         if selected is None:
-            await self.refresh(max_age=0)
+            await self.refresh()
             selected = self.select(model, mode)
         return selected
 
-    async def add(self, deployment):
+    async def add(self, name, overrides, base=None, recipe=None):
+        """Derive a recipe from a deployed one, or take a full recipe, and start
+        deploying it under this frontend's platform settings; returns its state."""
         if self.added_store is None:
             raise ValueError("this frontend does not accept added deployments")
-        await self.refresh(max_age=0)
-        current = self.get(deployment.name)
+        await self.refresh()
+        if recipe is None:
+            parent = self.get(base)
+            if parent is None:
+                raise ValueError(f"unknown base deployment {base!r}")
+            recipe = vars(parent.recipe)
+        recipe = {**recipe, "platform": self.base[0].recipe.platform}
+        deployment = DeploymentConfig.create(
+            BaseConfig(**recipe, overrides={**overrides, "name": name})
+        )
+        current = self.get(name)
         if current is None:
             validate_frontend(
                 [d.recipe for d in self.definitions] + [deployment.recipe]
             )
-            current = await self.added_store.add(deployment)
-            await self.refresh(max_age=0)
-        if current.model_dump(mode="json") != deployment.model_dump(mode="json"):
+            row = await self.added_store.add(deployment)
+        else:
+            row = {"config": current.model_dump(mode="json"), "state": "ready"}
+        if _settings(row["config"]) != _settings(deployment.model_dump(mode="json")):
             raise ValueError(
-                f"deployment {deployment.name!r} already exists with different settings"
+                f"deployment {name!r} already exists with different settings"
             )
-        return current
+        return deployment, row["state"]
 
     def select(self, model, mode=None):
         candidates = [

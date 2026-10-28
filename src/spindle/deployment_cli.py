@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import Future
 from functools import partial
 from pathlib import Path
@@ -217,74 +217,46 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
             )
 
 
-def add(configs, frontend, environment):
-    """Deploy each config's trainer and inference apps, then add it to the running frontend."""
-    platform = deployed_platform(frontend, environment)
-    if platform is None:
-        raise ValueError(
-            f"No Spindle frontend {frontend!r} is deployed; run spindle deploy first."
-        )
+ADD_POLL_INTERVAL_S = 10
+
+
+def add(paths):
+    """Add configs to the running frontend through its deployments API."""
+    url = os.environ.get("TINKER_BASE_URL")
     api_key = os.environ.get("TINKER_API_KEY")
-    if not api_key:
-        raise ValueError("Set TINKER_API_KEY to the frontend's API key.")
-    current = {
-        row.name: row
-        for row in map(
-            DeploymentConfig.model_validate, deployed_configs(frontend, environment)
+    if not url or not api_key:
+        raise ValueError(
+            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
         )
-    }
-    for deployment in configs:
-        deployment.recipe.platform = copy.deepcopy(platform)
-        existing = current.get(deployment.name)
-        if existing is not None and existing.model_dump(
-            mode="json"
-        ) != deployment.model_dump(mode="json"):
-            raise ValueError(
-                f"{deployment.name} is already deployed with different settings; "
-                "give the new config its own name."
+    with httpx.Client(
+        base_url=url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
+    ) as client:
+        for path in paths:
+            recipe = load(path)
+            response = client.post(
+                "/api/v1/spindle/deployments",
+                json={"name": recipe.name, "recipe": vars(recipe)},
             )
-    validate_frontend(
-        [deployment.recipe for deployment in current.values()]
-        + [
-            deployment.recipe
-            for deployment in configs
-            if deployment.name not in current
-        ]
-    )
-    trainers, inference = apps_to_publish(
-        configs, list(current.values()), environment, set(), set()
-    )
-    url = modal.Function.from_name(
-        frontend, "server", environment_name=environment
-    ).get_web_url()
-    with modal.enable_output():
-        for deployment in configs:
-            if deployment.name in trainers:
-                build_trainer_app(deployment, platform)[0].deploy(
-                    environment_name=environment
-                )
-            if deployment.name in inference:
-                build_inference_app(deployment, platform)[0].deploy(
-                    environment_name=environment
-                )
-            response = httpx.post(
-                f"{url}/api/v1/spindle/deployments",
-                json=deployment.model_dump(mode="json"),
-                headers={"X-API-Key": api_key},
-                timeout=60,
-            )
-            if response.status_code == 405:
+            if response.status_code in (404, 405):
                 raise ValueError(
-                    f"{frontend} predates spindle deploy --add; redeploy it once with spindle deploy."
+                    "This frontend predates adding configs; redeploy it once with spindle deploy."
                 )
             if response.is_error:
                 raise ValueError(
-                    f"Adding {deployment.name} failed: {response.json().get('message', response.text)}"
+                    f"Adding {recipe.name} failed: {response.json().get('message', response.text)}"
                 )
-            start_weights_download(frontend, environment, deployment.definition_id)
+            row = response.json()["deployment"]
             print(
-                f"Added {deployment.name}. Train on it by passing "
-                f"base_model={deployment.name!r}."
+                f"Deploying {recipe.name}. Building its apps can take several minutes."
+            )
+            while row["state"] == "deploying":
+                time.sleep(ADD_POLL_INTERVAL_S)
+                listed = client.get("/api/v1/spindle/deployments").json()
+                row = next(r for r in listed["deployments"] if r["name"] == recipe.name)
+            if row["state"] == "failed":
+                raise ValueError(f"Deploying {recipe.name} failed:\n{row['error']}")
+            print(
+                f"Added {recipe.name}. Train on it by passing base_model={recipe.name!r}."
             )
 
 
@@ -338,7 +310,7 @@ def parser():
     apply.add_argument(
         "--add",
         action="store_true",
-        help="Add these configs to the running frontend without redeploying it",
+        help="Add these configs to the running frontend in TINKER_BASE_URL without redeploying it",
     )
     apply.add_argument("--app")
     apply.add_argument("--env")
@@ -385,13 +357,7 @@ def main(argv=None):
             if args.add:
                 if not args.files:
                     raise ValueError("spindle deploy --add needs config files")
-                configs = compile_configs([config_file(arg) for arg in args.files])
-                platform = configs[0].recipe.platform
-                add(
-                    configs,
-                    args.app or platform["frontend"],
-                    args.env or platform["modal"]["environment"] or environment,
-                )
+                add([config_file(arg) for arg in args.files])
                 return
             if args.files:
                 paths = [config_file(arg) for arg in args.files]

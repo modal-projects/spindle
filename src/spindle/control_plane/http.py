@@ -35,6 +35,7 @@ from spindle.version import __version__, source_commit
 from .deployments import DeploymentRoutes
 from .service import ControlPlane, FutureResolutionStatus
 
+MODAL_APP_NAME_LIMIT = 64
 ERROR_STATUSES: tuple[tuple[type[Exception], int, str], ...] = (
     (ModelLost, 410, "model_lost"),
     (EngineSaturated, 429, "saturated"),
@@ -149,6 +150,24 @@ class SampleEnvelope(BaseModel):
         return self
 
 
+class AddDeploymentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9-]*$",
+        max_length=MODAL_APP_NAME_LIMIT - len("spindle-inference-"),
+    )
+    base: str | None = None
+    recipe: dict[str, Any] | None = None
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> AddDeploymentBody:
+        if (self.base is None) == (self.recipe is None):
+            raise ValueError("pass exactly one of base or recipe")
+        return self
+
+
 class SaveWeightsForSamplerBody(BaseModel):
     model_config = ConfigDict(extra="allow", protected_namespaces=())
 
@@ -174,7 +193,7 @@ def _training_envelope(
     return body, identity
 
 
-def _deployment_summary(definition) -> dict[str, object]:
+def _deployment_summary(definition, state="ready") -> dict[str, object]:
     return {
         "name": definition.name,
         "definition_id": definition.definition_id,
@@ -182,6 +201,7 @@ def _deployment_summary(definition) -> dict[str, object]:
         "weights_repo": definition.weights_repo,
         "parameterization": definition.parameterization,
         "max_context_length": definition.max_context_length,
+        "state": state,
     }
 
 
@@ -210,10 +230,7 @@ def create_control_plane_app(
         if api_key is not None and request.headers.get("x-api-key") != api_key:
             raise HTTPException(status_code=401, detail="unauthorized")
 
-    async def refresh_routes() -> None:
-        await routes.refresh()
-
-    app = FastAPI(dependencies=[Depends(authorize), Depends(refresh_routes)])
+    app = FastAPI(dependencies=[Depends(authorize)])
 
     app.add_middleware(CommandMiddleware)
 
@@ -302,12 +319,26 @@ def create_control_plane_app(
 
     @app.get("/api/v1/spindle/deployments")
     async def list_deployments():
-        return {"deployments": [_deployment_summary(d) for d in routes.definitions]}
+        await routes.refresh()
+        return {
+            "deployments": [_deployment_summary(d) for d in routes.definitions]
+            + [
+                {
+                    **_deployment_summary(
+                        DeploymentConfig.model_validate(row["config"]), row["state"]
+                    ),
+                    "error": row.get("error"),
+                }
+                for row in routes.pending
+            ]
+        }
 
-    @app.post("/api/v1/spindle/deployments")
-    async def add_deployment(body: dict[str, Any]):
-        deployment = await routes.add(DeploymentConfig.model_validate(body))
-        return {"deployment": _deployment_summary(deployment)}
+    @app.post("/api/v1/spindle/deployments", status_code=202)
+    async def add_deployment(body: AddDeploymentBody):
+        deployment, state = await routes.add(
+            body.name, body.overrides, base=body.base, recipe=body.recipe
+        )
+        return {"deployment": _deployment_summary(deployment, state)}
 
     @app.post("/api/v1/client/config")
     async def client_config() -> dict[str, object]:
@@ -522,7 +553,7 @@ def create_control_plane_app(
                 raise ValueError(
                     "session_id and model_seq_id must be provided without model_id and seq_id"
                 )
-            await routes.refresh(max_age=0)
+            await routes.refresh()
             creation = await control_plane.create_model_from_checkpoint(
                 session_id=body.session_id,
                 model_seq_id=body.model_seq_id,

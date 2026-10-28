@@ -154,9 +154,21 @@ One frontend serves all models through Tinker’s `base_model`. When recipes sha
 
 ## Add a config to a running deployment
 
-`spindle deploy --add` adds a config to a frontend that is already running. It does not redeploy the frontend, and it leaves the other configs and their running jobs alone. Use it to serve a variant of a live config, such as the same model on another GPU type.
+You can add a config to a frontend that is already running. Spindle deploys the new config's trainer and inference apps itself. It does not redeploy the frontend, and it leaves the other configs and their running jobs alone. Use this to serve a variant of a live config, such as the same model on another GPU type.
 
-Write the variant as a config file with a new `name`:
+You only need the frontend's URL and API key, the same values you train with. Send a new `name`, the deployed config to start from as `base`, and the settings to change as `overrides`:
+
+~~~bash
+curl -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "qwen35-9b-lora-16k-h200",
+       "base": "qwen35-9b-lora-16k",
+       "overrides": {"trainer_gpu": "H200", "miles_cfg.max_tokens_per_gpu": 8192}}'
+~~~
+
+`overrides` uses the same dotted keys as a config's `overrides`. The request returns at once with `"state": "deploying"`. Building the new apps can take several minutes. `GET /api/v1/spindle/deployments` shows each config's state: `deploying`, `ready`, or `failed` with an `error`. Sending a failed config again retries it.
+
+If you have the Spindle CLI, you can write the variant as a config file instead:
 
 ```python
 from spindle.configs.qwen35_9b_lora_16k import Config as Parent
@@ -170,18 +182,16 @@ class Config(Parent):
 config = Config()
 ```
 
-Then add it with the frontend's API key:
-
 ~~~bash
-export TINKER_API_KEY=...
-spindle deploy --add my_variant.py --app my-spindle --env dev
+export TINKER_BASE_URL=... TINKER_API_KEY=...
+spindle deploy --add my_variant.py
 ~~~
 
-The command deploys the variant's trainer and inference apps. It then registers the variant with `POST /api/v1/spindle/deployments` and starts the weight download. The variant takes the frontend's platform settings, so it does not need its own `platform` overrides. It must match the frontend's lifecycle settings.
+`--add` sends the config to the same endpoint and waits until it is ready. It does not need Modal credentials.
 
-Train on the variant by passing its name as `base_model`. A plain model ID such as `Qwen/Qwen3.5-9B` keeps going to the config that already served it, so adding a variant does not move anyone else's jobs.
+Either way, the new config takes the frontend's platform settings, and it must match the frontend's lifecycle settings. Once it is ready, train on it by passing its name as `base_model`. A plain model ID such as `Qwen/Qwen3.5-9B` keeps going to the config that already served it, so adding a variant does not move anyone else's jobs.
 
-`--add` only adds new names. Running it again with the same file changes nothing. A different config under an existing name is rejected. Added configs stay registered when the frontend is redeployed. If the `spindle deploy` set has a config with the same name, that config takes its place.
+Adding only creates new names. Sending the same config again changes nothing, and a different config under an existing name is rejected. Added configs stay registered when the frontend is redeployed. If the `spindle deploy` set has a config with the same name, that config takes its place.
 
 ## Update isolation
 

@@ -312,7 +312,8 @@ class AddedStore:
         return list(self.rows.values())
 
     async def add(self, deployment):
-        return self.rows.setdefault(deployment.name, deployment)
+        row = {"config": deployment.model_dump(mode="json"), "state": "deploying"}
+        return self.rows.setdefault(deployment.name, row)
 
 
 def test_added_deployment_reaches_every_server_without_redeploy():
@@ -320,72 +321,81 @@ def test_added_deployment_reaches_every_server_without_redeploy():
         store = InMemoryKeyValueStore()
         added = AddedStore()
         base = resolved()
-        variant = resolved(recipe(name="variant", trainer_gpu="H200"))
-        apps = [
-            create_control_plane_app(
-                ControlPlane(store, SimpleNamespace()),
-                DeploymentRoutes([base], added),
-                api_key="test",
-            )
-            for _ in range(2)
-        ]
+        routes = [DeploymentRoutes([base], added) for _ in range(2)]
         first, second = (
             httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app),
+                transport=httpx.ASGITransport(
+                    app=create_control_plane_app(
+                        ControlPlane(store, SimpleNamespace()), server, api_key="test"
+                    )
+                ),
                 base_url="http://frontend",
                 headers={"x-api-key": "test"},
             )
-            for app in apps
+            for server in routes
         )
+        variant = {
+            "name": "variant",
+            "base": base.name,
+            "overrides": {"trainer_gpu": "H200"},
+        }
+
+        async def create(seq, base_model):
+            return await second.post(
+                "/api/v1/create_model",
+                json={
+                    "session_id": session,
+                    "model_seq_id": seq,
+                    "base_model": base_model,
+                    "lora_config": {"rank": 32},
+                },
+            )
+
         async with first, second:
-            assert (
-                len(
-                    (await second.get("/api/v1/spindle/deployments")).json()[
-                        "deployments"
-                    ]
-                )
-                == 1
-            )
-            body = variant.model_dump(mode="json")
-            response = await first.post("/api/v1/spindle/deployments", json=body)
-            assert response.json()["deployment"]["name"] == variant.name
-            assert (
-                await first.post("/api/v1/spindle/deployments", json=body)
-            ).status_code == 200
-            changed = resolved(recipe(name=variant.name))
-            response = await first.post(
-                "/api/v1/spindle/deployments", json=changed.model_dump(mode="json")
-            )
-            assert response.status_code == 400
-            assert "different settings" in response.json()["message"]
             session = (await second.post("/api/v1/create_session", json={})).json()[
                 "session_id"
             ]
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert response.status_code == 202
+            assert response.json()["deployment"]["state"] == "deploying"
+            listed = (await second.get("/api/v1/spindle/deployments")).json()
+            assert [row["state"] for row in listed["deployments"]] == [
+                "ready",
+                "deploying",
+            ]
+            assert (await create(0, "variant")).status_code == 400
+
+            added.rows["variant"]["state"] = "ready"
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert response.json()["deployment"]["state"] == "ready"
+            variant["overrides"] = {"trainer_gpu": "B200"}
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert "different settings" in response.json()["message"]
+
             for seq, (base_model, definition_id) in enumerate(
-                [(variant.name, variant.name), (base.model, base.name)]
+                [("variant", "variant"), (base.model, base.name)], start=1
             ):
-                response = await second.post(
-                    "/api/v1/create_model",
-                    json={
-                        "session_id": session,
-                        "model_seq_id": seq,
-                        "base_model": base_model,
-                        "lora_config": {"rank": 32},
-                    },
-                )
+                response = await create(seq, base_model)
                 assert response.status_code == 200, response.text
                 record = await store.get(model_key(response.json()["model_id"]))
                 assert record["engine_definition_id"] == definition_id
+            assert routes[1].get("variant").recipe.trainer_gpu == "H200"
 
     asyncio.run(run())
 
 
-def test_added_deployment_must_share_frontend_settings():
+def test_added_deployment_takes_a_base_or_a_recipe_under_frontend_settings():
     async def run():
         routes = DeploymentRoutes([resolved()], AddedStore())
+        with pytest.raises(ValueError, match="unknown base"):
+            await routes.add("other", {}, base="missing")
         with pytest.raises(ValueError, match="lifecycle"):
-            await routes.add(resolved(recipe(name="other", sweep_interval_s=1)))
-        assert len(routes.definitions) == 1
+            await routes.add("other", {"sweep_interval_s": 1}, base=routes.base[0].name)
+        assert routes.added_store.rows == {}
+        file_recipe = {**vars(recipe()), "platform": {"frontend": "elsewhere"}}
+        deployment, state = await routes.add("from-file", {}, recipe=file_recipe)
+        assert state == "deploying"
+        assert deployment.recipe.platform == routes.base[0].recipe.platform
 
     asyncio.run(run())
 
