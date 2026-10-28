@@ -4,8 +4,13 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+## 0.1.3 - 2026-10-28
+
+Faster training for LoRA classifiers that score several candidate labels per position, and cache-aware routing for LoRA samplers.
+
 ### Added
 
+- `qwen3_4b_lora_32k`: Qwen3-4B LoRA on 4× H100 with 32K context, one model replica per GPU (#142).
 - Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
 - LoRA samplers can route each request to the replica with its longest cached prefix with `inference_lora_routing = "cache_wait"`, while keeping request load and pinned KV memory within bounds. The router runs in Rust inside each sampling container. It measures the pool's prefill rate from completed requests unless `inference_routing_prefill_tokens_per_second` sets it, and `inference_routing_balance_absolute`, `inference_routing_balance_relative` and `inference_routing_cache_threshold` tune it. Pools without routable replicas, including pools scaled to zero and pools whose SGLang cache publishes no observations, fall back to Modal's gateway routing (#121, #122, #123).
 
@@ -13,15 +18,9 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 - LoRA recipes use `cache_wait` routing by default when SGLang runs one data-parallel rank, and Modal session affinity otherwise. `inference_lora_routing = "affinity"` keeps session affinity. `inference_routing_balance_absolute` defaults to 40% of `max_running_requests`, and at least 4 (#123).
 - LoRA samplers enable SGLang's CSGMV split-K kernel. For rank-32 adapters on models with 4,096-wide hidden layers, such as Qwen3.5-9B and Qwen3-8B, it speeds up the LoRA kernels for decode-sized batches by up to 2.9× on H200 and 2.6× on B200. Set `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=0` in `inference_env` to disable it (#123).
-
-### Changed
-
-- The frontend server runs in `platform.modal.region`, or `us-east` when no region is set. Only the CPU frontend is placed; trainers and samplers stay unpinned unless the recipe sets a region. Before, frontend containers could start in any region, and one on another continent added 2 s or more to each training step.
-- `forward` requests use the same binary transport and protobuf results as `forward_backward`, and queued forwards are batched into one trainer call.
-- The Miles backend prepares labels and weights with numpy instead of per-value Python loops. For 128 examples with `[seq, 5]` labels this saves about 1 s per training call.
-
-### Changed
-
+- The frontend server runs in `platform.modal.region`, or `us-east` when no region is set. Only the CPU frontend is placed; trainers and samplers stay unpinned unless the recipe sets a region. Before, frontend containers could start in any region, and one on another continent added 2 s or more to each training step (#152).
+- `forward` requests use the same binary transport and protobuf results as `forward_backward`, and queued forwards are batched into one trainer call (#153).
+- The Miles backend prepares labels and weights with numpy instead of per-value Python loops (#154), and passes training rows and log probabilities to its GPU workers as arrays instead of Python lists (#158). Large batches spend less time between the request and the GPU work.
 - When every datum in a batch has the same number of candidate labels (`target_tokens` shaped `[sequence_length, K]`), the Miles backend scores all K labels from one softmax over the vocabulary instead of K (#157).
 
 ## 0.1.2 - 2026-10-27
@@ -30,7 +29,6 @@ DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from
 
 ### Added
 
-- `qwen3_4b_lora_32k`: Qwen3-4B LoRA on 4× H100 with 32K context, one model replica per GPU.
 - DeepSeek-V4.1-Flash-1017 LoRA recipes, `deepseek_v41_flash_1017_lora_8k` and `deepseek_v41_flash_1017_lora_32k`, which load the 1017 release (#129).
 - DeepSeek-V4.1-Flash LoRA recipe with 32K context, `deepseek_v41_flash_lora_32k`. It splits each layer across eight GPUs instead of four (#128).
 - `deepseek_v41_flash_lora_8k` falls back to B200 and H200 for the trainer and samplers (#128).
