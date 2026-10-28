@@ -84,7 +84,9 @@ validate_frontend([definition.recipe for definition in DEFINITIONS])
 SETTINGS = DEFINITIONS[0]
 PLATFORM = platform_from_env()
 APP_NAME = PLATFORM["frontend"]
-ROUTING_REGION = PLATFORM["modal"]["region"]
+# Placement for the CPU-only frontend; trainers and samplers keep their own
+# (unpinned by default) placement.
+FRONTEND_REGION = PLATFORM["modal"]["region"] or "us-east"
 MODEL_ASSET_ROOT = "/assets"
 SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
 FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
@@ -710,7 +712,8 @@ def _plane():
 @app.function(
     image=image,
     name="server",
-    routing_region=ROUTING_REGION,
+    region=FRONTEND_REGION,
+    routing_region=FRONTEND_REGION,
     timeout=20 * 60,
     volumes={CHECKPOINT_ROOT: checkpoint_volume},
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],
