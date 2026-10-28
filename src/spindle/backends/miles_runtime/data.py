@@ -6,10 +6,20 @@ from typing import Any
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.backends.contract import ForwardBatch
+
 from .replay_data import replay_row
 
 SUPPORTED_LOSSES = frozenset(
-    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+    {
+        "cross_entropy",
+        "importance_sampling",
+        "ppo",
+        "cispo",
+        "dro",
+        "mis",
+        "score_centered",
+        "score_centered_mis",
+    }
 )
 _RL_LOSSES = SUPPORTED_LOSSES - {"cross_entropy"}
 
@@ -38,6 +48,8 @@ def pad_slot_rows(
         pad["weights"] = [0.0]
     if "advantages" in last:
         pad["advantages"] = [0.0]
+    if "loss_mask" in last:
+        pad["loss_mask"] = [0]
     if "sampling_logprobs" in last:
         pad["sampling_logprobs"] = [0.0]
     if "routed_experts" in last:
@@ -50,6 +62,8 @@ def pad_slot_rows(
     if "sampling_mask_ids" in last:
         pad["sampling_mask_ids"] = []
         pad["sampling_mask_offsets"] = [0, 0]
+    if "sampling_mask_logprobs" in last:
+        pad["sampling_mask_logprobs"] = []
     n_pad = -len(slot_rows) % multiple
     return (*slot_rows, *((slot, dict(pad)) for _ in range(n_pad)))
 
@@ -61,6 +75,12 @@ def prepare_batch(
 ) -> PreparedBatch:
     if batch.loss_fn not in SUPPORTED_LOSSES:
         raise ValueError(f"Miles does not support loss {batch.loss_fn!r}")
+    if batch.loss_fn in {"mis", "score_centered", "score_centered_mis"}:
+        from spindle.backends.megatron_runtime.common.forward_backward import (
+            _loss_config,
+        )
+
+        _loss_config(batch.loss_fn, batch.loss_fn_config or {})
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
@@ -98,7 +118,7 @@ def _align_row(row: dict[str, Any], multiple: int) -> None:
     row["tokens"] = [*row["tokens"], *([filler] * pad)]
     row["target_tokens"] = [*row["target_tokens"], *([filler] * pad)]
     row["target_len"] = len(row["target_tokens"])
-    for key in ("weights", "advantages", "sampling_logprobs"):
+    for key in ("weights", "advantages", "sampling_logprobs", "loss_mask"):
         values = row.get(key)
         if values is not None:
             row[key] = [*values, *([0.0] * pad)]
@@ -133,6 +153,7 @@ def build_outputs(
         grouped[item_index][datum_index] = {
             "loss": float(output["loss"]),
             "logprobs": logprobs,
+            "diagnostics": output.get("diagnostics", {}),
         }
 
     results = []
@@ -142,6 +163,21 @@ def build_outputs(
         complete = [record for record in records if record is not None]
         loss = sum(record["loss"] for record in complete)
         tokens = sum(len(record["logprobs"]) for record in complete)
+        diagnostics = {}
+        for name in ("entropy", "sampler_trainer_kl", "mis_masked_fraction", "tokens"):
+            if any(name in record["diagnostics"] for record in complete):
+                diagnostics[name] = sum(
+                    float(record["diagnostics"].get(name, 0)) for record in complete
+                )
+        diagnostic_tokens = diagnostics.get("tokens", tokens)
+        metrics = {f"{name}:sum": value for name, value in diagnostics.items()}
+        metrics.update(
+            {
+                f"{name}:mean": value / max(diagnostic_tokens, 1)
+                for name, value in diagnostics.items()
+                if name != "tokens"
+            }
+        )
         results.append(
             ForwardBackwardOutput(
                 loss_fn_output_type="ArrayRecord",
@@ -166,6 +202,7 @@ def build_outputs(
                     "tokens:sum": float(tokens),
                     "n_sequences:sum": float(len(complete)),
                     "response_length:mean": tokens / max(len(complete), 1),
+                    **metrics,
                 },
             )
         )
@@ -226,6 +263,26 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
                 f"datum {datum_index}: {', '.join(missing)} required for {loss_fn}"
             )
     row.update(replay_row(inputs, targets))
+    if loss_fn in {"mis", "score_centered", "score_centered_mis"}:
+        weights = inputs.get("weights")
+        row["loss_mask"] = (
+            list(weights.data)
+            if weights is not None
+            else [
+                float(lp != 0 or adv != 0)
+                for lp, adv in zip(
+                    row["sampling_logprobs"], row["advantages"], strict=True
+                )
+            ]
+        )
+        if len(row["loss_mask"]) != len(targets):
+            raise ValueError("weights must match target_tokens length")
+    if loss_fn in {"score_centered", "score_centered_mis"}:
+        from spindle.backends.megatron_runtime.common.score_centering import (
+            validate_support,
+        )
+
+        validate_support(inputs, targets, row["loss_mask"], centered=True)
     return row
 
 

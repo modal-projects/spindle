@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from math import prod
+from contextvars import ContextVar
+from math import isfinite, prod
 
 import numpy as np
 
@@ -18,6 +19,18 @@ def replay_row(inputs, targets: list[int]) -> dict:
         tensor = inputs[name]
         values = list(tensor.data)
         shape = list(tensor.shape or ())
+        if name == "sampling_mask_logprobs":
+            if (
+                tensor.dtype != "float32"
+                or tensor.sparse_crow_indices is not None
+                or shape != [len(values)]
+                or any(not isfinite(v) or v > 0 for v in values)
+            ):
+                raise ValueError(
+                    "sampling_mask_logprobs must be a dense finite nonpositive float32 tensor"
+                )
+            row[name] = values
+            continue
         if (
             tensor.dtype != "int64"
             or tensor.sparse_crow_indices is not None
@@ -42,6 +55,10 @@ def replay_row(inputs, targets: list[int]) -> dict:
                 raise ValueError(f"{name} must be one-dimensional")
             row[name] = values
     ids, offsets = row.get("sampling_mask_ids"), row.get("sampling_mask_offsets")
+    if "sampling_mask_logprobs" in row and (
+        ids is None or len(row["sampling_mask_logprobs"]) != len(ids)
+    ):
+        raise ValueError("sampling_mask_logprobs must align with support IDs")
     if (ids is None) != (offsets is None):
         raise ValueError(
             "sampling_mask_ids and sampling_mask_offsets must be supplied together"
@@ -122,6 +139,11 @@ def add_replay_to_train_data(train_data: dict, datums: list[dict]) -> None:
             )
             for d in datums
         ]
+    if any("sampling_mask_logprobs" in d for d in datums):
+        train_data["rollout_sampling_mask_logprobs"] = [
+            np.asarray(d.get("sampling_mask_logprobs", []), dtype=np.float32)
+            for d in datums
+        ]
 
 
 def install_bridge_replay(runtime) -> None:
@@ -133,7 +155,45 @@ def install_bridge_replay(runtime) -> None:
     def build(slot_datums):
         result = original(slot_datums)
         add_replay_to_train_data(result, [datum for _, datum in slot_datums])
+        for index, (_, datum) in enumerate(slot_datums):
+            if "loss_mask" in datum and not datum.get("padding"):
+                result["loss_masks"][index] = datum["loss_mask"]
         return result
 
     _replay_builder = build
     runtime._build_train_data = build
+
+
+def install_diagnostic_capture(backend):
+    original_execute = backend._execute_batch
+    if getattr(original_execute, "__spindle_diagnostics__", False):
+        return
+    original_call = backend._call_trainer
+    captured = ContextVar("miles_diagnostics", default=None)
+
+    async def call(self, *args, **kwargs):
+        results = await original_call(self, *args, **kwargs)
+        diagnostics = captured.get()
+        if diagnostics is not None:
+            for result in results:
+                for output in result.get("per_datum", []):
+                    diagnostics.setdefault(
+                        int(output["sample_index"]), output.get("diagnostics", {})
+                    )
+        return results
+
+    async def execute(self, *args, **kwargs):
+        diagnostics = {}
+        token = captured.set(diagnostics)
+        try:
+            result = await original_execute(self, *args, **kwargs)
+            if isinstance(result, list):
+                for index, output in enumerate(result):
+                    output["diagnostics"] = diagnostics.get(index, {})
+            return result
+        finally:
+            captured.reset(token)
+
+    execute.__spindle_diagnostics__ = True
+    backend._call_trainer = call
+    backend._execute_batch = execute

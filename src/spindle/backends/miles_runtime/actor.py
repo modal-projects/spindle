@@ -29,7 +29,8 @@ from miles.backends.training_utils.weight_update import snapshot_publisher
 from miles.utils.replay_base import routing_replay_manager
 
 from .profiling import RankProfiler, TorchProfileConfig
-from .replay import install_replay_hooks
+from .replay import install_replay_hooks, install_support_transport
+from .score_centering import install_score_centering
 
 
 def _pad_local_shard(
@@ -172,6 +173,13 @@ def _gather_tinker_logprobs_across_cp() -> None:
 
 
 _gather_tinker_logprobs_across_cp()
+
+install_score_centering(
+    tinker_losses=tinker_losses,
+    logit_processors=logit_processors,
+    get_parallel_state=get_parallel_state,
+    pad_local_shard=_pad_local_shard,
+)
 
 install_replay_hooks(
     megatron_model=megatron_model,
@@ -387,6 +395,9 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
     """Upstream multi-LoRA actor with Qwen MTP and weights-only save support."""
 
     def init(self, args, role, **kwargs):
+        from miles.ray.rollout import train_data_conversion
+
+        install_support_transport(train_data_conversion)
         # Miles's LoRA builder inherits checkpoint MTP heads without honoring
         # enable_mtp_training. Qwen3.5 then injects an auxiliary backward loss
         # even for a client datum whose weights are all zero.

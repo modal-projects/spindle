@@ -17,7 +17,11 @@ from spindle.backends.miles_arguments import apply_config_overrides
 from spindle.backends.miles_config import MilesBackendConfig
 from spindle.errors import BackendFailed
 
-from .replay_data import install_bridge_replay, validate_routed_experts
+from .replay_data import (
+    install_bridge_replay,
+    install_diagnostic_capture,
+    validate_routed_experts,
+)
 
 # CPU-side data helpers can be imported without the optional GPU runtime.
 _runtime_import_error = None
@@ -214,6 +218,7 @@ class MilesRuntime:
         os.environ.setdefault("no_proxy", "127.0.0.1")
 
         install_bridge_replay(tinker_runtime)
+        install_diagnostic_capture(tinker_runtime.MilesBackend)
         _configure_actor_spec(train_specs)
         _allow_context_parallel_multi_lora(lora_arguments)
         architecture = (

@@ -14,6 +14,25 @@ import torch
 _replayed_run = None
 
 
+def install_support_transport(conversion):
+    original = conversion._package_shards
+    if getattr(original, "__spindle_support__", False):
+        return
+
+    @wraps(original)
+    def package(args, data, partitions):
+        shards = original(args, data, partitions)
+        if "rollout_sampling_mask_logprobs" in data:
+            for shard, partition in zip(shards, partitions, strict=True):
+                shard["rollout_sampling_mask_logprobs"] = [
+                    data["rollout_sampling_mask_logprobs"][index] for index in partition
+                ]
+        return shards
+
+    package.__spindle_support__ = True
+    conversion._package_shards = package
+
+
 class TinkerSamplingMask:
     """CSR support over target positions; empty rows leave logits unmasked."""
 
@@ -78,7 +97,11 @@ def install_replay_hooks(
 
     @wraps(original_batch)
     def get_batch(iterator, keys, *args, **kwargs):
-        for key in ("rollout_sampling_mask_ids", "rollout_sampling_mask_offsets"):
+        for key in (
+            "rollout_sampling_mask_ids",
+            "rollout_sampling_mask_offsets",
+            "rollout_sampling_mask_logprobs",
+        ):
             if key in iterator.rollout_data and key not in keys:
                 keys = [*keys, key]
         return original_batch(iterator, keys, *args, **kwargs)
@@ -106,7 +129,9 @@ def install_replay_hooks(
                 "sampling mask contains a token outside the model vocabulary"
             )
         args = Namespace(**vars(args))
-        args.rollout_temperature = batch["loss_fn_config"]["sampling_temperature"]
+        args.rollout_temperature = (batch.get("loss_fn_config") or {}).get(
+            "sampling_temperature", 1.0
+        )
         label_tokens = [
             torch.cat(
                 [
