@@ -78,15 +78,14 @@ def make_datum(length, choices, final_only):
     )
 
 
-def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
+def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only, widths):
     request = ForwardBatch(
         items=(
             ForwardItem(
                 "test",
-                (
-                    make_datum(1631, 5, final_only),
-                    make_datum(7, None, final_only),
-                    make_datum(3, 1, final_only),
+                tuple(
+                    make_datum(length, width, final_only)
+                    for length, width in zip((1631, 7, 3), widths, strict=True)
                 ),
             ),
         ),
@@ -178,11 +177,13 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
         native_loss = native_loss + column_loss
     native_loss.backward()
     torch.testing.assert_close(loss, native_loss, rtol=2e-5, atol=2e-4)
+    # Uniform label widths share one FP32 softmax, so only the native path rounds to BF16.
+    rounded = dtype == torch.bfloat16 or len(set(widths)) == 1
     torch.testing.assert_close(
         local.grad,
         native_logits.grad,
-        rtol=0.02 if dtype == torch.bfloat16 else 2e-5,
-        atol=0.008 if dtype == torch.bfloat16 else 2e-6,
+        rtol=0.02 if rounded else 2e-5,
+        atol=0.008 if rounded else 2e-6,
     )
     expected_grad = reference.grad[positions, vocab].unsqueeze(0).to(dtype)
     torch.testing.assert_close(
@@ -197,13 +198,13 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
     ]
     (result,) = build_outputs(request, prepared, raw)
     assert [record["logprobs"].shape for record in result.loss_fn_outputs] == [
-        [1631, 5],
-        [7],
-        [3, 1],
+        [length] if width is None else [length, width]
+        for length, width in zip((1631, 7, 3), widths, strict=True)
     ]
     return {
         "tp": tp,
         "cp": cp,
+        "widths": widths,
         "dtype": str(dtype),
         "final_only": final_only,
         "max_logprob_error": score_error,
@@ -230,9 +231,13 @@ def main():
         )
     try:
         for dtype in (torch.float32, torch.bfloat16):
-            for final_only in (True, False):
+            for final_only, widths in (
+                (True, (5, None, 1)),
+                (False, (5, None, 1)),
+                (False, (5, 5, 5)),
+            ):
                 result = run_case(
-                    config.tp, config.cp, tp_rank, cp_rank, dtype, final_only
+                    config.tp, config.cp, tp_rank, cp_rank, dtype, final_only, widths
                 )
                 gathered = [None] * dist.get_world_size()
                 dist.all_gather_object(gathered, result)
