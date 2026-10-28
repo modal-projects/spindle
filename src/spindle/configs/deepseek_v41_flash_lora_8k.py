@@ -22,7 +22,7 @@ class Config(BaseConfig):
     miles_cfg = {
         "model_type": "deepseek-v4.1",
         "megatron_to_hf_mode": "raw",
-        "tensor_model_parallel_size": 4,
+        "tensor_model_parallel_size": 1,
         "expert_model_parallel_size": 16,
         "expert_tensor_parallel_size": 1,
         "dynamic_batch_size": False,
