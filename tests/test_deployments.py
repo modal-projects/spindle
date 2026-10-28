@@ -153,17 +153,21 @@ def test_deepseek_v41_lora_recipe():
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
 
 
-def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
-    row = resolved(recipe("deepseek-v41-flash-lora-32k"))
+@pytest.mark.parametrize(
+    "name, tp",
+    [("deepseek-v41-flash-lora-32k", 4), ("deepseek-v41-flash-lora-32k-b300", 2)],
+)
+def test_deepseek_v41_lora_32k_recipes_keep_tensor_parallelism(name, tp):
+    row = resolved(recipe(name))
     miles = MilesBackendConfig(**row.trainer_settings["miles"])
     assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (
-        8,
+        tp,
         16,
     )
     assert row.inference_settings["context_length"] == 32768
 
 
-@pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 8)])
+@pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 4)])
 def test_deepseek_v41_1017_recipes_load_the_1017_release(context, tp):
     row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))
     miles = MilesBackendConfig(**row.trainer_settings["miles"])
