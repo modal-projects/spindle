@@ -195,7 +195,8 @@ def run_script(name: str, base_url: str) -> None:
     subprocess.run(command, check=True, env=env)
 
 
-def stop_worker_apps(names):
+def stop_worker_apps(names) -> list[str]:
+    failures = []
     for name in names:
         for prefix in WORKER_APP_PREFIXES:
             app_name = f"{prefix}{name}"
@@ -204,7 +205,9 @@ def stop_worker_apps(names):
             except modal.exception.NotFoundError:
                 continue
             except Exception as exc:
-                print(f"error: lookup {app_name} failed: {exc}")
+                message = f"lookup {app_name} failed: {exc}"
+                print(f"error: {message}")
+                failures.append(message)
                 continue
             print(f"stopping {app_name}")
             result = subprocess.run(
@@ -222,7 +225,10 @@ def stop_worker_apps(names):
                 check=False,
             )
             if result.returncode:
-                print(f"error: stopping {app_name} failed")
+                message = f"stopping {app_name} failed"
+                print(f"error: {message}")
+                failures.append(message)
+    return failures
 
 
 def _history_dict():
@@ -434,7 +440,21 @@ def launch_nightly() -> list[dict]:
             print(f"error: {script} failed: {error}")
             rows.append(_failed_row(script, started, error))
     finally:
-        stop_worker_apps([spec["recipe"]])
+        cleanup = stop_worker_apps([spec["recipe"]])
+
+    if cleanup:
+        message = "cleanup failed: " + "; ".join(cleanup)
+        print(f"error: {message}")
+        if rows and rows[-1]["status"] != "success":
+            prior = rows[-1].get("error") or ""
+            rows[-1]["error"] = f"{prior}\n{message}".strip()
+        elif rows:
+            rows[-1]["status"] = "failed"
+            rows[-1]["delta"] = "n/a"
+            rows[-1]["total_duration_s"] = None
+            rows[-1]["error"] = message
+        else:
+            rows.append(_failed_row(script, started, message))
 
     _post_report(rows)
     if any(row["status"] != "success" for row in rows):
