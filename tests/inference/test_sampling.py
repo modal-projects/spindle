@@ -699,11 +699,8 @@ def test_versioned_sessions_route_by_their_session_version(latest) -> None:
             self.keys = []
             self.bodies = []
 
-        def prepare_request(self, adapter, affinity):
+        async def dispatch(self, adapter, affinity, *, body, **_):
             self.keys.append(adapter)
-            return adapter
-
-        async def dispatch(self, prepared, *, body, **_):
             self.bodies.append(body)
             return RoutedResponse(response(7), "replica", dict(wait_s=0.0))
 

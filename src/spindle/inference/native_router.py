@@ -10,12 +10,6 @@ import httpx
 from spindle_router import NativeRuntime
 
 
-@dataclass(frozen=True)
-class RoutingKey:
-    adapter: str
-    affinity: str
-
-
 @dataclass
 class RoutedResponse:
     response: httpx.Response
@@ -24,40 +18,13 @@ class RoutedResponse:
 
 
 class NativeRouter:
-    def __init__(
-        self,
-        discover,
-        *,
-        gateway,
-        headers,
-        policy,
-        capacity,
-        prefill_tokens_per_second,
-        balance_absolute=4,
-        balance_relative=1.25,
-        cache_threshold=0.5,
-    ):
-        self.policy = policy
+    def __init__(self, discover, *, gateway, headers, **settings):
         self.discover = discover
         self.gateway = gateway.rstrip("/")
         self.runtime = NativeRuntime(
-            json.dumps(
-                dict(
-                    gateway=self.gateway,
-                    headers=headers,
-                    policy=policy,
-                    capacity=capacity,
-                    prefill_tokens_per_second=prefill_tokens_per_second,
-                    balance_absolute=balance_absolute,
-                    balance_relative=balance_relative,
-                    cache_threshold=cache_threshold,
-                )
-            )
+            json.dumps(dict(gateway=self.gateway, headers=headers, **settings))
         )
         self.poller = None
-
-    def prepare_request(self, adapter, affinity):
-        return RoutingKey(adapter, affinity)
 
     async def _discover(self):
         while True:
@@ -70,18 +37,7 @@ class NativeRouter:
                 pass
             await asyncio.sleep(5)
 
-    async def dispatch(
-        self,
-        prepared,
-        *,
-        request_id,
-        gateway,
-        body,
-        headers,
-        deadline,
-    ):
-        if gateway.rstrip("/") != self.gateway:
-            raise ValueError("Native router belongs to a different inference pool")
+    async def dispatch(self, adapter, affinity, *, request_id, body, headers, deadline):
         if self.poller is None or self.poller.done():
             self.poller = asyncio.create_task(self._discover())
         remaining = deadline - asyncio.get_running_loop().time()
@@ -97,8 +53,8 @@ class NativeRouter:
             json.dumps(
                 dict(
                     request_id=request_id,
-                    adapter=prepared.adapter,
-                    affinity=prepared.affinity,
+                    adapter=adapter,
+                    affinity=affinity,
                     body=body,
                     headers=headers,
                     timeout_seconds=remaining,
@@ -109,14 +65,12 @@ class NativeRouter:
             status,
             headers=response_headers,
             content=content,
-            request=httpx.Request("POST", gateway + "/generate"),
+            request=httpx.Request("POST", self.gateway + "/generate"),
         )
         if routing is None:
             # Sampling already handles retryable statuses within its deadline.
             return RoutedResponse(
-                response,
-                None,
-                dict(policy=self.policy, reason="router_error", wait_s=0.0),
+                response, None, dict(reason="router_error", wait_s=0.0)
             )
         return RoutedResponse(response, replica, json.loads(routing))
 

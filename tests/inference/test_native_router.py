@@ -128,18 +128,20 @@ def with_router(worker, test, *, headers=None, prefill_tokens_per_second=1000.0)
             ),
             gateway=worker["gateway"],
             headers=headers or {},
-            policy="cache_wait",
             capacity=24,
             prefill_tokens_per_second=prefill_tokens_per_second,
+            balance_absolute=4,
+            balance_relative=1.25,
+            cache_threshold=0.5,
         )
         try:
             await test(router)
             # Cancellation releases from a Rust destructor shortly after the await.
             for _ in range(50):
-                if router.runtime.health() == dict(pending=0, requests=0):
+                if router.runtime.pending() == 0:
                     break
                 await asyncio.sleep(0.01)
-            assert router.runtime.health() == dict(pending=0, requests=0)
+            assert router.runtime.pending() == 0
         finally:
             await router.aclose()
 
@@ -148,9 +150,9 @@ def with_router(worker, test, *, headers=None, prefill_tokens_per_second=1000.0)
 
 async def dispatch(router, worker, timeout=3, request_id="test", headers=None):
     return await router.dispatch(
-        router.prepare_request("adapter/v1", "session"),
+        "adapter/v1",
+        "session",
         request_id=request_id,
-        gateway=worker["gateway"],
         body=dict(input_ids=[1, 2], sampling_params=dict(max_new_tokens=4)),
         headers={"Modal-Session-ID": "session", **(headers or {})},
         deadline=asyncio.get_running_loop().time() + timeout,

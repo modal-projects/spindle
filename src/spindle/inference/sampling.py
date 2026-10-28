@@ -140,13 +140,6 @@ async def sample_task(
     # version the trainer just published for that sampling client.
     if model_id is None or version is None:
         router = None
-    routing_request = (
-        router.prepare_request(
-            VersionRef(str(model_id), int(version)).identity, routing_session_id
-        )
-        if router is not None
-        else None
-    )
     async with client_context as active_client:
         outputs = await asyncio.gather(
             *(
@@ -174,7 +167,6 @@ async def sample_task(
                     base_headers=headers,
                     request_timeout=timeout,
                     router=router,
-                    routing_request=routing_request,
                 )
                 for index in range(num_samples)
             )
@@ -243,7 +235,6 @@ async def _sample_one(
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
     router: Router | None = None,
-    routing_request=None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -333,9 +324,9 @@ async def _sample_one(
         try:
             if router is not None:
                 dispatched = await router.dispatch(
-                    routing_request,
+                    VersionRef(str(model_id), int(version)).identity,
+                    routing_session_id,
                     request_id=observation.id,
-                    gateway=gateway_url,
                     body=body,
                     headers=headers,
                     deadline=min(deadline, loop.time() + request_timeout),

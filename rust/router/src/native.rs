@@ -32,7 +32,6 @@ const AFFINITY_HEADERS: &[&str] = &["modal-session-id", "modal-routing-affinity-
 struct Config {
     gateway: String,
     headers: HashMap<String, String>,
-    policy: String,
     capacity: usize,
     prefill_tokens_per_second: Option<f64>,
     balance_absolute: usize,
@@ -55,9 +54,7 @@ struct Service {
     client: reqwest::Client,
     gateway: String,
     headers: HashMap<String, String>,
-    policy: String,
     notify: Arc<Notify>,
-    requests: Arc<Mutex<HashSet<String>>>,
     stop: CancellationToken,
 }
 #[derive(Deserialize)]
@@ -125,26 +122,10 @@ impl Drop for Reservation {
             .complete(&self.id, self.outcome);
     }
 }
-struct ActiveRequest {
-    service: Service,
-    id: String,
-}
-impl Drop for ActiveRequest {
-    fn drop(&mut self) {
-        self.service.requests.lock().unwrap().remove(&self.id);
-    }
-}
 async fn generate(s: Service, g: Generate) -> Reply {
     if !g.timeout_seconds.is_finite() || g.timeout_seconds <= 0.0 || g.timeout_seconds > 86400.0 {
         return Err(error(400, "Invalid deadline"));
     }
-    if !s.requests.lock().unwrap().insert(g.request_id.clone()) {
-        return Err(error(409, "Duplicate request ID"));
-    }
-    let _active = ActiveRequest {
-        service: s.clone(),
-        id: g.request_id.clone(),
-    };
     tokio::select! {
         _=s.stop.cancelled()=>Err(error(503,"Router stopped")),
         result=tokio::time::timeout(Duration::from_secs_f64(g.timeout_seconds),forward(&s,g))=>
@@ -204,7 +185,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             outcome: Outcome::Released,
         };
         let prefill_rate = s.scheduler.lock().unwrap().prefill_rate();
-        let route = json!({"policy":s.policy,"reason":decision.reason,"available_replicas":decision.available_replicas,
+        let route = json!({"reason":decision.reason,"available_replicas":decision.available_replicas,
             "cached_tokens":decision.cached_tokens,"best_cached_tokens":decision.best_cached_tokens,
             "wait_s":admission_seconds,"prefill_tokens_per_second":prefill_rate});
         g.body["rid"] = json!(id);
@@ -458,9 +439,7 @@ impl NativeRuntime {
             client,
             gateway: c.gateway.trim_end_matches('/').into(),
             headers: c.headers,
-            policy: c.policy,
             notify: Arc::new(Notify::new()),
-            requests: Arc::new(Mutex::new(HashSet::new())),
             stop: CancellationToken::new(),
         };
         pyo3_async_runtimes::tokio::get_runtime().spawn(observe(service.clone()));
@@ -496,14 +475,9 @@ impl NativeRuntime {
         })
     }
 
-    fn health(&self) -> HashMap<&'static str, usize> {
-        HashMap::from([
-            (
-                "pending",
-                self.service.scheduler.lock().unwrap().reservations.len(),
-            ),
-            ("requests", self.service.requests.lock().unwrap().len()),
-        ])
+    /// Admission reservations still held.
+    fn pending(&self) -> usize {
+        self.service.scheduler.lock().unwrap().reservations.len()
     }
 
     fn close(&self) {

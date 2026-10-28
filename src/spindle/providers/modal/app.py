@@ -445,25 +445,19 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
-        policy = definition.recipe.inference_lora_routing
         router = None
-        if policy == "cache_wait" and task.get("model_id") is not None:
+        if definition.recipe.inference_lora_routing == "cache_wait":
             if spec.app_name not in _routers:
                 # The Rust extension exists only in the Modal image; `modal
                 # deploy` imports this module locally.
                 from .router import create_router
 
+                settings = definition.inference_settings
                 _routers[spec.app_name] = create_router(
                     spec.app_name,
                     gateway,
-                    policy=policy,
-                    capacity=(
-                        definition.inference_settings["max_running_requests"]
-                        + (
-                            definition.inference_settings.get("max_queued_requests")
-                            or 0
-                        )
-                    ),
+                    capacity=settings["max_running_requests"]
+                    + settings["max_queued_requests"],
                     prefill_tokens_per_second=definition.recipe.inference_routing_prefill_tokens_per_second,
                     balance_absolute=definition.recipe.inference_routing_balance_absolute,
                     balance_relative=definition.recipe.inference_routing_balance_relative,
