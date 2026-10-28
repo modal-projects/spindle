@@ -49,7 +49,6 @@ class Config(Parent):
         "registration_seconds": 0.6767439374999924,
     }
     inference_env = {
-        "SGLANG_ENABLE_LORA_CSGMV_SPLIT_K": "1",
         "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
         "SGLANG_SPINDLE_MODEL_ROUTING": "1",
     }

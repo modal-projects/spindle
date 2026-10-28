@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Changed
+
+- LoRA samplers enable SGLang's CSGMV split-K shrink by default. SGLang applies it only to BF16 rank-32 adapters on the shapes it was measured on, such as Qwen3.5-9B, and never in deterministic mode. The `qwen35_9b_instruct_lora_256k` recipe previously set the flag's old name, `SGLANG_CSGMV_SPLIT_K`, so split-K never ran.
+
 ## 0.1.2 - 2026-10-27
 
 DeepSeek-V4.1-Flash LoRA recipes for the original and 1017 releases, loaded from DeepSeek's own weights, and multi-LoRA trainer scheduling for clients that train independently.
