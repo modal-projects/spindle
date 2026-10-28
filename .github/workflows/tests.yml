@@ -39,5 +39,7 @@ jobs:
           esac
           test -n "$requirement"
           uv pip install --python .venv/bin/python "$requirement" --upgrade-package tinker
+      # The router extension runs only in the Modal image; its tests need it locally.
+      - run: uv pip install --python .venv/bin/python ./rust/router
       - run: uv run --no-sync pytest -q
       - run: uv build

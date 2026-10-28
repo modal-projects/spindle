@@ -20,7 +20,7 @@ def test_datum_row_owns_converted_values(sparse):
     original_targets = list(datum.loss_fn_inputs["target_tokens"].data)
     original_weights = list(datum.loss_fn_inputs["weights"].data)
     row = _datum_row(datum, "cross_entropy", 0)
-    assert row["weights"] == [0.25, 0.0, 0.75]
+    assert row["weights"].tolist() == [0.25, 0.0, 0.75]
     row["target_tokens"][0] = 999
     row["weights"][0] = 999
     assert datum.loss_fn_inputs["target_tokens"].data == original_targets

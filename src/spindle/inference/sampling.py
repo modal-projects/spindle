@@ -6,10 +6,14 @@ import random
 import socket
 from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from stitch.publish import constrain_request
+from stitch.types import VersionRef
+
+if TYPE_CHECKING:
+    from .native_router import NativeRouter as Router
 
 from spindle.telemetry.sample_stats import SampleAttempt, event_sink, timing_metadata
 from spindle.telemetry.http_trace import HTTPTrace
@@ -53,6 +57,7 @@ async def sample_task(
     stats: dict[str, Any] | None = None,
     session_id: str | None = None,
     on_event: Callable[[dict], None] | None = None,
+    router: Router | None = None,
 ) -> dict[str, Any]:
     request = task["payload"]
     prompt = _prompt_tokens(request["prompt"])
@@ -131,6 +136,10 @@ async def sample_task(
             headers=headers,
         )
     )
+    # Latest sessions route by the version they were created at: the
+    # version the trainer just published for that sampling client.
+    if model_id is None or version is None:
+        router = None
     async with client_context as active_client:
         outputs = await asyncio.gather(
             *(
@@ -157,6 +166,7 @@ async def sample_task(
                     trace_attrs=trace_attrs,
                     base_headers=headers,
                     request_timeout=timeout,
+                    router=router,
                 )
                 for index in range(num_samples)
             )
@@ -224,6 +234,7 @@ async def _sample_one(
     trace_attrs: dict | None = None,
     base_headers: dict | None = None,
     request_timeout: float = 3000.0,
+    router: Router | None = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
         "input_ids": prompt,
@@ -311,13 +322,31 @@ async def _sample_one(
         body["rid"] = observation.id
         attempt_result = observation.attrs
         try:
-            response = await client.post(
-                f"{gateway_url}/generate",
-                json=body,
-                headers=headers,
-                timeout=request_timeout,
-                extensions={"trace": HTTPTrace(attempt_result).record},
-            )
+            if router is not None:
+                dispatched = await router.dispatch(
+                    VersionRef(str(model_id), int(version)).identity,
+                    routing_session_id,
+                    request_id=observation.id,
+                    body=body,
+                    headers=headers,
+                    deadline=min(deadline, loop.time() + request_timeout),
+                )
+                response = dispatched.response
+                observation.attrs["selected_replica"] = dispatched.replica
+                observation.attrs["routing"] = dispatched.routing
+                observation.attrs["routing_wait_s"] = dispatched.routing["wait_s"]
+                if stats is not None:
+                    stats["wait_s"] = (
+                        stats.get("wait_s", 0.0) + dispatched.routing["wait_s"]
+                    )
+            else:
+                response = await client.post(
+                    f"{gateway_url}/generate",
+                    json=body,
+                    headers=headers,
+                    timeout=request_timeout,
+                    extensions={"trace": HTTPTrace(attempt_result).record},
+                )
         except httpx.TransportError as exc:
             attempt_result["error_type"] = type(exc).__name__
             cause = exc
@@ -338,7 +367,10 @@ async def _sample_one(
             retryable = (
                 response.status_code == 409
                 or response.status_code >= 500
-                or (response.status_code == 404 and not isinstance(gateway, str))
+                or (
+                    response.status_code == 404
+                    and (router is not None or not isinstance(gateway, str))
+                )
             )
             if not retryable:
                 if response.is_error:

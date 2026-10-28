@@ -18,6 +18,8 @@ class OperationKind(StrEnum):
     SKIP = "skip"
 
 
+BATCHED_OPERATIONS = frozenset({OperationKind.FORWARD, OperationKind.FORWARD_BACKWARD})
+
 JSON_OPERATIONS = (
     OperationKind.FORWARD,
     OperationKind.OPTIM_STEP,

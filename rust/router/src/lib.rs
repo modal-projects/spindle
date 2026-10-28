@@ -1,7 +1,9 @@
 //! One scheduler per sampling process (`_execute_sample`'s container) and
 //! inference pool. The policy does no I/O; its caller owns transport.
 mod cache_wait;
+mod native;
 
+use pyo3::prelude::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -10,6 +12,41 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 
 /// Observations at least this old never route.
 const MAX_OBSERVATION_AGE: f64 = 3.0;
+/// Assumed until the pool's own prefills are measured.
+const INITIAL_PREFILL_RATE: f64 = 10_000.0;
+/// Shorter prefills measure scheduling overhead more than throughput.
+const MIN_PREFILL_SAMPLE_TOKENS: usize = 1024;
+/// Weight kept by earlier samples each time a prefill is measured.
+const PREFILL_RATE_DECAY: f64 = 0.95;
+
+/// Uncached prompt tokens per second of prefill, as configured or as measured
+/// across the pool's own requests under their actual load.
+enum PrefillRate {
+    Fixed(f64),
+    Measured { tokens: f64, seconds: f64 },
+}
+impl PrefillRate {
+    fn get(&self) -> f64 {
+        match *self {
+            Self::Fixed(rate) => rate,
+            Self::Measured { tokens, seconds } if seconds > 0.0 => tokens / seconds,
+            Self::Measured { .. } => INITIAL_PREFILL_RATE,
+        }
+    }
+    fn record(&mut self, uncached_tokens: usize, seconds: f64) {
+        if let Self::Measured {
+            tokens,
+            seconds: total,
+        } = self
+        {
+            if uncached_tokens >= MIN_PREFILL_SAMPLE_TOKENS && seconds.is_finite() && seconds > 0.0
+            {
+                *tokens = *tokens * PREFILL_RATE_DECAY + uncached_tokens as f64;
+                *total = *total * PREFILL_RATE_DECAY + seconds;
+            }
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct Work {
@@ -104,6 +141,15 @@ pub struct Decision {
     pub best_cached_tokens: usize,
 }
 impl Decision {
+    /// Unpinned: Modal's gateway picks (or starts) the replica.
+    fn gateway() -> Self {
+        Self {
+            status: "route",
+            reason: "gateway_fallback",
+            retry_after: 0.0,
+            ..Self::wait("route")
+        }
+    }
     fn wait(status: &'static str) -> Self {
         Self {
             status,
@@ -178,12 +224,13 @@ pub struct Router {
     clock: Instant,
     updated: f64,
     capacity: usize,
-    prefill_rate: f64,
+    prefill_rate: PrefillRate,
 }
 impl Router {
+    /// Without a prefill rate, the router measures it from completed requests.
     fn new(
         capacity: usize,
-        prefill_rate: f64,
+        prefill_rate: Option<f64>,
         balance_absolute: usize,
         balance_relative: f64,
         cache_threshold: f64,
@@ -194,9 +241,16 @@ impl Router {
         if !cache_threshold.is_finite() || !(0.0..=1.0).contains(&cache_threshold) {
             return Err(String::from("cache_threshold must be between 0 and 1"));
         }
-        if capacity == 0 || !prefill_rate.is_finite() || prefill_rate <= 0.0 {
+        if capacity == 0 || prefill_rate.is_some_and(|r| !r.is_finite() || r <= 0.0) {
             return Err(String::from("invalid capacity or prefill rate"));
         }
+        let prefill_rate = match prefill_rate {
+            Some(rate) => PrefillRate::Fixed(rate),
+            None => PrefillRate::Measured {
+                tokens: 0.0,
+                seconds: 0.0,
+            },
+        };
         Ok(Self {
             replicas: vec![],
             wait_policy: cache_wait::CacheWait {
@@ -359,7 +413,7 @@ impl Router {
                 &all,
                 &candidates,
                 request,
-                self.prefill_rate,
+                self.prefill_rate.get(),
                 affinity_elapsed,
             ) {
                 cache_wait::Selection::Wait(why, seconds) => {
@@ -417,10 +471,23 @@ impl Router {
         }
     }
 
+    fn record_prefill(&mut self, uncached_tokens: usize, seconds: f64) {
+        self.prefill_rate.record(uncached_tokens, seconds);
+    }
+
+    fn prefill_rate(&self) -> f64 {
+        self.prefill_rate.get()
+    }
+
     #[cfg(test)]
     fn pending(&self) -> usize {
         self.reservations.len()
     }
+}
+
+#[pymodule]
+fn spindle_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<native::NativeRuntime>()
 }
 
 #[cfg(test)]
@@ -429,10 +496,10 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
     fn router(capacity: usize) -> Router {
-        Router::new(capacity, 1000., 4, 1.25, 0.5).unwrap()
+        Router::new(capacity, Some(1000.), 4, 1.25, 0.5).unwrap()
     }
     fn swe_router() -> Router {
-        Router::new(136, 10463.96, 64, 2., 0.5).unwrap()
+        Router::new(136, Some(10463.96), 64, 2., 0.5).unwrap()
     }
     fn request(adapter: &str) -> Request {
         Request::new(adapter.into(), "problem".into(), vec![42; 1024], 100).unwrap()

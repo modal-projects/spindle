@@ -30,7 +30,6 @@ class Config(Parent):
         "trainer_env.TORCHINDUCTOR_CACHE_DIR": "/tmp/swe-inductor",
         "sglang_cfg.mem_fraction_static": 0.85,
         "sglang_cfg.lora_backend": "csgmv",
-        "inference_env.SGLANG_CSGMV_SPLIT_K": "1",
         "sglang_cfg.max_running_requests": 64,
         "sglang_cfg.max_queued_requests": 128,
         "sglang_cfg.max_loaded_loras": 32,

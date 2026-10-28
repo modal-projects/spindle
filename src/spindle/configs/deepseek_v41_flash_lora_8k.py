@@ -2,7 +2,11 @@ from spindle.configuration import BaseConfig
 
 
 class Config(BaseConfig):
-    """DeepSeek-V4.1-Flash LoRA on attention and the shared expert."""
+    """DeepSeek-V4.1-Flash LoRA on attention and the shared expert.
+
+    Trains without tensor parallelism, which fits 8K rows. Longer contexts
+    need it: see the 32K recipe before raising ``max_context_length``.
+    """
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -22,7 +26,7 @@ class Config(BaseConfig):
     miles_cfg = {
         "model_type": "deepseek-v4.1",
         "megatron_to_hf_mode": "raw",
-        "tensor_model_parallel_size": 4,
+        "tensor_model_parallel_size": 1,
         "expert_model_parallel_size": 16,
         "expert_tensor_parallel_size": 1,
         "dynamic_batch_size": False,

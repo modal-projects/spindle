@@ -78,15 +78,14 @@ def make_datum(length, choices, final_only):
     )
 
 
-def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
+def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only, widths):
     request = ForwardBatch(
         items=(
             ForwardItem(
                 "test",
-                (
-                    make_datum(1631, 5, final_only),
-                    make_datum(7, None, final_only),
-                    make_datum(3, 1, final_only),
+                tuple(
+                    make_datum(length, width, final_only)
+                    for length, width in zip((1631, 7, 3), widths, strict=True)
                 ),
             ),
         ),
@@ -121,6 +120,7 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
     reference = full.detach().float().requires_grad_()
     args = argparse.Namespace(
         qkv_format="thd",
+        context_parallel_size=cp,
         true_on_policy_mode=False,
         allgather_cp=False,
         rollout_temperature=1.0,
@@ -178,18 +178,21 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
         native_loss = native_loss + column_loss
     native_loss.backward()
     torch.testing.assert_close(loss, native_loss, rtol=2e-5, atol=2e-4)
+    # Shared-softmax scoring keeps FP32 gradients; the native per-column path rounds to BF16.
+    labels = {width for width in widths if width is not None}
+    joint = len(labels) == 1 and (cp == 1 or None not in widths)
+    tight, loose = {"rtol": 2e-5, "atol": 2e-6}, {"rtol": 0.02, "atol": 0.008}
+    fp32 = dtype == torch.float32
     torch.testing.assert_close(
         local.grad,
         native_logits.grad,
-        rtol=0.02 if dtype == torch.bfloat16 else 2e-5,
-        atol=0.008 if dtype == torch.bfloat16 else 2e-6,
+        **(tight if fp32 and not joint else loose),
     )
     expected_grad = reference.grad[positions, vocab].unsqueeze(0).to(dtype)
     torch.testing.assert_close(
         local.grad,
         expected_grad,
-        rtol=0.02,
-        atol=0.008,
+        **(tight if fp32 and joint else loose),
     )
     raw = [
         {"loss": record["loss"].item(), "logprobs": record["logprobs"].tolist()}
@@ -197,13 +200,13 @@ def run_case(tp, cp, tp_rank, cp_rank, dtype, final_only):
     ]
     (result,) = build_outputs(request, prepared, raw)
     assert [record["logprobs"].shape for record in result.loss_fn_outputs] == [
-        [1631, 5],
-        [7],
-        [3, 1],
+        [length] if width is None else [length, width]
+        for length, width in zip((1631, 7, 3), widths, strict=True)
     ]
     return {
         "tp": tp,
         "cp": cp,
+        "widths": widths,
         "dtype": str(dtype),
         "final_only": final_only,
         "max_logprob_error": score_error,
@@ -230,9 +233,14 @@ def main():
         )
     try:
         for dtype in (torch.float32, torch.bfloat16):
-            for final_only in (True, False):
+            for final_only, widths in (
+                (True, (5, None, 1)),
+                (False, (5, None, 1)),
+                (False, (5, 5, 5)),
+                (False, (5, None, 5)),
+            ):
                 result = run_case(
-                    config.tp, config.cp, tp_rank, cp_rank, dtype, final_only
+                    config.tp, config.cp, tp_rank, cp_rank, dtype, final_only, widths
                 )
                 gathered = [None] * dist.get_world_size()
                 dist.all_gather_object(gathered, result)

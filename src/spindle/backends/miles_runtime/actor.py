@@ -20,7 +20,11 @@ from miles_plugins.models import qwen3_vl as miles_qwen3_vl
 
 try:
     from miles.backends.training_utils.checkpoint import io as checkpoint_io
-    from miles.backends.training_utils.loss.hub import logit_processors, tinker_losses
+    from miles.backends.training_utils.loss.hub import (
+        logit_processors,
+        math_utils,
+        tinker_losses,
+    )
     from miles.backends.training_utils.replay.data import fill_replay_data
 
     tinker_cp = None
@@ -28,7 +32,11 @@ except ImportError:
     # Miles v0.1.1: older module paths, and its Tinker losses need tinker_cp to
     # gather log probabilities across context-parallel ranks (v0.1.2 does it itself).
     from miles.backends.training_utils import checkpoint_io
-    from miles.backends.training_utils.loss_hub import logit_processors, tinker_losses
+    from miles.backends.training_utils.loss_hub import (
+        logit_processors,
+        math_utils,
+        tinker_losses,
+    )
     from miles.backends.training_utils.replay_data import fill_replay_data
 
     from . import tinker_cp
@@ -50,6 +58,7 @@ install_replay_hooks(
     lora_model=lora_model,
     logit_processors=logit_processors,
     tinker_losses=tinker_losses,
+    math_utils=math_utils,
     fill_replay_data=fill_replay_data,
     manager=routing_replay_manager,
 )
