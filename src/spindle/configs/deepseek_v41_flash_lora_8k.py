@@ -89,6 +89,8 @@ class Config(BaseConfig):
         # Routed experts load as FP8 on every GPU; the FP4 expert kernels need Blackwell.
         "SGLANG_DSV4_FP4_EXPERTS": "1",
         "SGLANG_DSV4_FP4_DEQUANT": "1",
+        # Blackwell's multi-stream decode overlap races at 128 running requests.
+        "SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "0",
     }
     sglang_cfg = {
         "tp_size": 8,
