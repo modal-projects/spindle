@@ -89,6 +89,8 @@ class Config(BaseConfig):
         # Routed experts load as FP8 on every GPU; the FP4 expert kernels need Blackwell.
         "SGLANG_DSV4_FP4_EXPERTS": "1",
         "SGLANG_DSV4_FP4_DEQUANT": "1",
+        # Blackwell's multi-stream decode overlap races at 128 running requests.
+        "SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "0",
     }
     sglang_cfg = {
         "tp_size": 8,
@@ -101,7 +103,7 @@ class Config(BaseConfig):
         "weight_loader_drop_cache_after_load": True,
         "weight_loader_disable_mmap": False,
         "disable_shared_experts_fusion": True,
-        "max_running_requests": 32,
+        "max_running_requests": 128,
         "max_queued_requests": 128,
         "max_loaded_loras": 8,
         "max_loras_per_batch": 4,

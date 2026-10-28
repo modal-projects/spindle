@@ -22,6 +22,7 @@ from spindle.providers.modal import (
     lora_pool,
 )
 from spindle.providers.modal.fft_pool import FFTPoolSpec
+from spindle.providers.modal.kernel_cache import SAMPLER_KERNEL_CACHE_ENV
 from spindle.providers.modal.lora_pool import LoraPoolSpec
 
 LINUX_ENV_VALUE_LIMIT = 131_072
@@ -637,6 +638,20 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     deployment_apps.run_trainer(row, "worker")
     assert len(calls) == 1
     assert len(warmed) == 1
+
+
+def test_samplers_keep_their_kernel_cache_on_the_shared_volume(builders):
+    row = deployment()
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert SAMPLER_KERNEL_CACHE_ENV.items() <= app.servers["Server"][0]["env"].items()
+
+    row.recipe.inference_env = {"SGLANG_CACHE_DIR": "/tmp/sglang"}
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert app.servers["Server"][0]["env"]["SGLANG_CACHE_DIR"] == "/tmp/sglang"
 
 
 def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):

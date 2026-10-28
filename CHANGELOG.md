@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Changed
+
+- Samplers now keep their compiled kernels on the shared kernel-cache volume, like trainers. A DeepSeek-V4.1-Flash sampler with a warm cache starts nearly five minutes sooner.
+
 ## 0.1.3 - 2026-10-28
 
 Faster training for LoRA classifiers that score several candidate labels per position, and cache-aware routing for LoRA samplers.

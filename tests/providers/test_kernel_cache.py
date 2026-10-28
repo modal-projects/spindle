@@ -62,3 +62,4 @@ def test_configured_trainers_point_compilers_at_the_kernel_cache() -> None:
         env = run.call_args.kwargs["backend_env"]
         for key, value in KERNEL_CACHE_ENV.items():
             assert env[key] == value
+        assert "SGLANG_CACHE_DIR" not in env
