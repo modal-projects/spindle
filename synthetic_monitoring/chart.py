@@ -37,15 +37,15 @@ def render_timing_history_chart(
     config_name: str,
 ) -> bytes | None:
     cutoff = time.time() - LOOKBACK_S
-    points = [
-        p
-        for p in history
-        if p.status == "success"
-        and p.ts >= cutoff
-        and STAGES.keys() <= p.timings.keys()
-    ]
+    recent = [p for p in history if p.status == "success" and p.ts >= cutoff]
+    points = [p for p in recent if STAGES.keys() <= p.timings.keys()] or recent
     if not points:
         return None
+    stages = (
+        STAGES
+        if STAGES.keys() <= points[0].timings.keys()
+        else {"total runtime": "#6ac345"}
+    )
 
     from matplotlib import pyplot
 
@@ -54,7 +54,12 @@ def render_timing_history_chart(
         for p in points
     ]
     xs = list(range(len(points)))
-    fig, axes = pyplot.subplots(2, 3, figsize=(14, 10.4), layout="constrained")
+    fig, axes = pyplot.subplots(
+        1 if len(stages) == 1 else 2,
+        1 if len(stages) == 1 else 3,
+        figsize=(8, 4) if len(stages) == 1 else (14, 10.4),
+        layout="constrained",
+    )
     fig.patch.set_facecolor(_GRAY_00)
     fig.suptitle(
         f"{config_name} (n={len(points)} runs)",
@@ -63,9 +68,15 @@ def render_timing_history_chart(
         fontweight="medium",
     )
 
-    for ax, (stage, color) in zip(axes.flat, STAGES.items()):
+    panels = axes.flat if len(stages) > 1 else (axes,)
+    for ax, (stage, color) in zip(panels, stages.items()):
         for x, point in enumerate(points):
-            ax.bar(x, point.timings[stage], color=color, width=0.72, zorder=2)
+            height = (
+                point.total_duration_s
+                if stage == "total runtime"
+                else point.timings[stage]
+            )
+            ax.bar(x, height, color=color, width=0.72, zorder=2)
         ax.set_title(stage, fontsize=10, pad=10)
         ax.set_ylabel("seconds")
         ax.set_xticks(xs)
@@ -85,7 +96,7 @@ def render_timing_history_chart(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    for ax in axes[-1]:
+    for ax in (panels[-1],) if len(stages) == 1 else axes[-1]:
         ax.set_xlabel("time (UTC)")
 
     fig.get_layout_engine().set(h_pad=0.18, hspace=0.18)
