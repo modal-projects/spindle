@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import secrets
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -15,7 +14,6 @@ from spindle_router import NativeRuntime
 class RoutingKey:
     adapter: str
     affinity: str
-    group: str
 
 
 @dataclass
@@ -59,7 +57,7 @@ class NativeRouter:
         self.poller = None
 
     def prepare_request(self, adapter, affinity):
-        return RoutingKey(adapter, affinity, secrets.token_hex(16))
+        return RoutingKey(adapter, affinity)
 
     async def _discover(self):
         while True:
@@ -99,7 +97,6 @@ class NativeRouter:
             json.dumps(
                 dict(
                     request_id=request_id,
-                    group=prepared.group,
                     adapter=prepared.adapter,
                     affinity=prepared.affinity,
                     body=body,

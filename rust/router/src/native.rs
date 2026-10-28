@@ -52,8 +52,6 @@ struct Service {
 #[derive(Deserialize)]
 struct Generate {
     request_id: String,
-    #[serde(default)]
-    group: Option<String>,
     adapter: String,
     affinity: String,
     body: Value,
@@ -124,12 +122,6 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         .ok_or_else(|| error(400, "Missing output token budget"))? as usize;
     let request = Request::new(g.adapter, g.affinity, tokens, budget)
         .map_err(|_| error(400, "Invalid routing request"))?;
-    let request = s
-        .scheduler
-        .lock()
-        .unwrap()
-        .prepare_group(g.group.unwrap_or_else(|| g.request_id.clone()), request)
-        .map_err(|message| error(400, &message))?;
     let mut admission = Admission::default();
     let mut admission_seconds = 0.0;
     let mut attempt = 0;
