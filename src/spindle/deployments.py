@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import runpy
 import sys
@@ -64,12 +65,15 @@ class DeploymentConfig(BaseModel):
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
-        return cls(
+        deployment = cls(
             recipe=pinned,
             trainer_settings=_jsonable(trainer_settings),
             inference_settings=_jsonable(inference_settings),
             spindle_version=__version__,
         )
+        if routing == "cache_wait":
+            _validate_cache_wait(deployment)
+        return deployment
 
     @property
     def name(self) -> str:
@@ -164,9 +168,35 @@ class DeploymentConfig(BaseModel):
             recipe.inference_scaledown_window_s,
             recipe.inference_startup_timeout_s,
             recipe.inference_env,
+            # cache_wait pools publish routing observations; others do not.
+            recipe.inference_lora_routing,
             self.inference_settings,
             self.spindle_version,
         )
+
+
+def _validate_cache_wait(deployment: DeploymentConfig) -> None:
+    """Reject settings the router would refuse on every sample."""
+    recipe = deployment.recipe
+    data_parallel = deployment.inference_settings.get("dp_size", 1)
+    engines = recipe.inference_gpus_per_node // deployment.rollout_tensor_parallel_size
+    if data_parallel != 1 or engines != 1:
+        # SGLang's routing observer publishes nothing under data parallelism.
+        raise ValueError("cache_wait requires one SGLang data-parallel rank")
+    relative = recipe.inference_routing_balance_relative
+    if (
+        not (isinstance(relative, (int, float)) and math.isfinite(relative))
+        or relative < 1
+    ):
+        raise ValueError("inference_routing_balance_relative must be finite and >= 1")
+    absolute = recipe.inference_routing_balance_absolute
+    if not isinstance(absolute, int) or isinstance(absolute, bool) or absolute < 0:
+        raise ValueError(
+            "inference_routing_balance_absolute must be a non-negative integer"
+        )
+    threshold = recipe.inference_routing_cache_threshold
+    if not (isinstance(threshold, (int, float)) and 0 <= threshold <= 1):
+        raise ValueError("inference_routing_cache_threshold must be between 0 and 1")
 
 
 def config_path(name: str) -> Path:

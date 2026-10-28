@@ -1,13 +1,17 @@
 //! PyO3 hands each request to this runtime as one awaitable. Admission,
 //! observations, retries and worker HTTP live in Rust.
-use crate::{Admission, Outcome, Replica, Request, Router, Snapshot};
+use crate::{Admission, Decision, Outcome, Replica, Request, Router, Snapshot};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Notify;
@@ -15,11 +19,12 @@ use tokio_util::sync::CancellationToken;
 
 const DELIVERIES_PER_ATTEMPT: u32 = 2;
 const MAX_TRANSPORT_FAILURES: u32 = 8;
-const ROUTER_OWNED_HEADERS: &[&str] = &[
-    "modal-session-id",
-    "modal-routing-affinity-key",
-    "modal-flash-upstream",
-];
+/// With nothing routable this long, Modal's gateway routes (and cold-starts)
+/// instead, so a pool without fresh observations degrades rather than hangs.
+const GATEWAY_FALLBACK: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Gateway stickiness headers; a pinned upstream replaces them.
+const AFFINITY_HEADERS: &[&str] = &["modal-session-id", "modal-routing-affinity-key"];
 
 #[derive(Deserialize)]
 struct Config {
@@ -41,6 +46,7 @@ struct Worker {
 struct Service {
     scheduler: Arc<Mutex<Router>>,
     workers: Arc<Mutex<Vec<Worker>>>,
+    discovered: Arc<AtomicBool>,
     client: reqwest::Client,
     gateway: String,
     headers: HashMap<String, String>,
@@ -126,10 +132,12 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
     let mut admission_seconds = 0.0;
     let mut attempt = 0;
     let mut failures: u32 = 0;
+    let mut last: Option<Routed> = None;
     loop {
         let id = format!("{}:{attempt}", g.request_id);
         attempt += 1;
         let admission_started = Instant::now();
+        let mut unavailable_since = None;
         let decision = loop {
             let d = s
                 .scheduler
@@ -139,6 +147,16 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                 .map_err(|_| error(500, "Scheduler failed"))?;
             if d.status == "route" {
                 break d;
+            }
+            if d.status == "unavailable" {
+                let since = *unavailable_since.get_or_insert_with(Instant::now);
+                let no_workers =
+                    s.discovered.load(Ordering::Acquire) && s.workers.lock().unwrap().is_empty();
+                if no_workers || since.elapsed() >= GATEWAY_FALLBACK {
+                    break Decision::gateway();
+                }
+            } else {
+                unavailable_since = None;
             }
             tokio::time::sleep(Duration::from_secs_f64(d.retry_after.clamp(0.01, 0.1))).await;
         };
@@ -152,24 +170,33 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             "cached_tokens":decision.cached_tokens,"best_cached_tokens":decision.best_cached_tokens,
             "wait_s":admission_seconds});
         g.body["rid"] = json!(id);
-        let mut http = s
-            .client
-            .post(format!("{}/generate", s.gateway))
-            .json(&g.body);
+        let mut headers = HeaderMap::new();
         for (k, v) in s.headers.iter().chain(g.headers.iter()) {
-            if ROUTER_OWNED_HEADERS
-                .iter()
-                .any(|owned| k.eq_ignore_ascii_case(owned))
-            {
+            let owned = k.eq_ignore_ascii_case("modal-flash-upstream")
+                || (decision.upstream.is_some()
+                    && AFFINITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h)));
+            if owned {
                 continue;
             }
-            http = http.header(k, v);
+            // Per-request values replace the runtime's, never duplicate them.
+            let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(k.as_bytes()),
+                HeaderValue::from_str(v),
+            ) else {
+                return Err(error(400, "Invalid worker request"));
+            };
+            headers.insert(name, value);
         }
-        http = http.header(
-            "Modal-Flash-Upstream",
-            decision.upstream.as_deref().unwrap(),
-        );
-        let http = http
+        if let Some(upstream) = &decision.upstream {
+            let value = HeaderValue::from_str(upstream)
+                .map_err(|_| error(500, "Invalid worker upstream"))?;
+            headers.insert("modal-flash-upstream", value);
+        }
+        let http = s
+            .client
+            .post(format!("{}/generate", s.gateway))
+            .headers(headers)
+            .json(&g.body)
             .build()
             .map_err(|_| error(400, "Invalid worker request"))?;
         let mut busy = false;
@@ -191,13 +218,14 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                             v.to_str().ok().map(|v| (k.to_string(), v.to_string()))
                         })
                         .collect();
-                    if let Some(actual) = response_headers.get("x-spindle-replica") {
-                        if Some(actual) != decision.replica.as_ref() {
+                    let actual = response_headers.get("x-spindle-replica").cloned();
+                    if let (Some(actual), Some(expected)) = (&actual, &decision.replica) {
+                        if actual != expected {
                             reservation.outcome = Outcome::Failed;
                             return Err(error(502, "Worker identity mismatch"));
                         }
                     }
-                    let identified = response_headers.contains_key("x-spindle-replica");
+                    let identified = actual.is_some();
                     let lost_upstream = !identified && (status == 408 || status >= 500);
                     let cancelled = status == 409
                         && identified
@@ -207,15 +235,16 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                                 .map(String::as_str),
                             Some("cancelled" | "cancelling")
                         );
-                    // Logical/version errors return to the caller; do not replay them blindly.
-                    let retry = matches!(status, 408 | 429) || status >= 500 || cancelled;
                     if lost_upstream && delivery == 0 {
                         continue;
                     }
                     busy = status == 429 || (status == 503 && identified);
+                    // Any other identified status, 5xx included, is that worker's
+                    // answer: return it rather than cool the replica down.
+                    let retry = busy || cancelled || lost_upstream;
                     reservation.outcome = if busy {
                         Outcome::Busy
-                    } else if retry {
+                    } else if lost_upstream {
                         Outcome::Failed
                     } else {
                         Outcome::Released
@@ -233,15 +262,17 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                             break;
                         }
                     };
+                    let routed = Routed {
+                        status,
+                        headers: response_headers,
+                        body: bytes.to_vec(),
+                        replica: actual.or(decision.replica.clone()),
+                        routing: Some(route.to_string()),
+                    };
                     if !retry {
-                        return Ok(Routed {
-                            status,
-                            headers: response_headers,
-                            body: bytes.to_vec(),
-                            replica: decision.replica,
-                            routing: Some(route.to_string()),
-                        });
+                        return Ok(routed);
                     }
+                    last = Some(routed);
                 }
                 Err(err) => {
                     reservation.outcome = Outcome::Failed;
@@ -258,7 +289,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         if !busy {
             failures += 1;
             if failures >= MAX_TRANSPORT_FAILURES {
-                return Err(error(502, "Worker retry budget exhausted"));
+                return last.ok_or_else(|| error(502, "Worker retry budget exhausted"));
             }
         }
         let delay_ms = if busy {
@@ -269,56 +300,66 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
+async fn poll(s: Service, worker: Worker) -> Option<Replica> {
+    let started = Instant::now();
+    let mut req = s
+        .client
+        .get(format!("{}/routing-state", s.gateway))
+        .header("Modal-Flash-Upstream", &worker.upstream)
+        .timeout(Duration::from_secs(2));
+    for (k, v) in &s.headers {
+        req = req.header(k, v);
+    }
+    let response = req.send().await.ok()?.error_for_status().ok()?;
+    let bytes = response.bytes().await.ok()?;
+    let mut row: Replica = tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
+        .await
+        .ok()?
+        .ok()?;
+    if row.replica != worker.replica {
+        return None;
+    }
+    row.work.age_seconds += started.elapsed().as_secs_f64();
+    row.upstream = worker.upstream;
+    Some(row)
+}
+/// Each worker is polled on its own cadence and its row installed on arrival,
+/// so a slow or unreachable worker never ages the others' observations.
 async fn observe(s: Service) {
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut polling: HashMap<tokio::task::Id, String> = HashMap::new();
+    let mut tick = tokio::time::interval(POLL_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let workers = s.workers.lock().unwrap().clone();
-        let mut tasks = tokio::task::JoinSet::new();
-        for worker in workers {
-            let s = s.clone();
-            tasks.spawn(async move {
-                let started = Instant::now();
-                let mut req = s
-                    .client
-                    .get(format!("{}/routing-state", s.gateway))
-                    .header("Modal-Flash-Upstream", &worker.upstream)
-                    .timeout(Duration::from_secs(2));
-                for (k, v) in &s.headers {
-                    req = req.header(k, v);
+        tokio::select! {
+            _ = s.stop.cancelled() => break,
+            _ = s.notify.notified() => {}
+            _ = tick.tick() => {}
+            Some(done) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let (id, row) = match done {
+                    Ok((id, row)) => (id, row),
+                    Err(e) => (e.id(), None),
+                };
+                polling.remove(&id);
+                if let Some(row) = row {
+                    let snapshot = Snapshot::new(vec![row], Instant::now());
+                    s.scheduler.lock().unwrap().install_snapshot(snapshot);
                 }
-                let response = req.send().await.ok()?.error_for_status().ok()?;
-                let bytes = response.bytes().await.ok()?;
-                let mut row: Replica =
-                    tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
-                        .await
-                        .ok()?
-                        .ok()?;
-                if row.replica != worker.replica {
-                    return None;
-                }
-                let received = Instant::now();
-                row.work.age_seconds += received.duration_since(started).as_secs_f64();
-                row.upstream = worker.upstream;
-                Some((row, received))
-            });
-        }
-        let mut rows = Vec::new();
-        while let Some(result) = tasks.join_next().await {
-            if let Ok(Some(row)) = result {
-                rows.push(row);
+                continue;
             }
         }
-        // Fast responses continue aging while slower workers finish or time out.
-        let observed = Instant::now();
-        let rows = rows
-            .into_iter()
-            .map(|(mut row, received)| {
-                row.work.age_seconds += observed.duration_since(received).as_secs_f64();
-                row
-            })
-            .collect();
-        let snapshot = Snapshot::new(rows, observed);
-        s.scheduler.lock().unwrap().install_snapshot(snapshot);
-        tokio::select! { _=s.stop.cancelled()=>break, _=s.notify.notified()=>{}, _=tokio::time::sleep(Duration::from_millis(500))=>{} }
+        let workers = s.workers.lock().unwrap().clone();
+        for worker in workers {
+            if polling
+                .values()
+                .any(|upstream| *upstream == worker.upstream)
+            {
+                continue;
+            }
+            let upstream = worker.upstream.clone();
+            let handle = tasks.spawn(poll(s.clone(), worker));
+            polling.insert(handle.id(), upstream);
+        }
     }
 }
 #[pyclass]
@@ -347,6 +388,7 @@ impl NativeRuntime {
         let service = Service {
             scheduler: Arc::new(Mutex::new(scheduler)),
             workers: Arc::new(Mutex::new(vec![])),
+            discovered: Arc::new(AtomicBool::new(false)),
             client,
             gateway: c.gateway.trim_end_matches('/').into(),
             headers: c.headers,
@@ -363,6 +405,7 @@ impl NativeRuntime {
     fn set_workers(&self, workers: &str) -> PyResult<()> {
         *self.service.workers.lock().unwrap() =
             serde_json::from_str(workers).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        self.service.discovered.store(true, Ordering::Release);
         self.service.notify.notify_one();
         Ok(())
     }

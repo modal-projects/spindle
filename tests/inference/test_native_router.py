@@ -15,7 +15,9 @@ from spindle.inference.native_router import NativeRouter
 
 @pytest.fixture
 def worker():
-    state = dict(active=0, requests=[], statuses=[], faults=[], delay=0)
+    state = dict(
+        active=0, requests=[], header_items=[], statuses=[], faults=[], delay=0
+    )
     state["arrived"] = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -64,6 +66,7 @@ def worker():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
             state["requests"].append((dict(self.headers), body))
+            state["header_items"].append(self.headers.items())
             state["arrived"].set()
             time.sleep(state["delay"])
             fault = state["faults"].pop(0) if state["faults"] else None
@@ -108,7 +111,7 @@ def worker():
     thread.join()
 
 
-def with_router(worker, test):
+def with_router(worker, test, *, headers=None):
     """Run `test(router)`, then require every reservation to be released."""
 
     async def run():
@@ -120,7 +123,7 @@ def with_router(worker, test):
                 ]
             ),
             gateway=worker["gateway"],
-            headers={},
+            headers=headers or {},
             policy="cache_wait",
             capacity=24,
             prefill_tokens_per_second=1000.0,
@@ -139,13 +142,13 @@ def with_router(worker, test):
     asyncio.run(run())
 
 
-async def dispatch(router, worker, timeout=3):
+async def dispatch(router, worker, timeout=3, request_id="test", headers=None):
     return await router.dispatch(
         router.prepare_request("adapter/v1", "session"),
-        request_id="test",
+        request_id=request_id,
         gateway=worker["gateway"],
         body=dict(input_ids=[1, 2], sampling_params=dict(max_new_tokens=4)),
-        headers={"Modal-Session-ID": "must-be-removed"},
+        headers={"Modal-Session-ID": "session", **(headers or {})},
         deadline=asyncio.get_running_loop().time() + timeout,
     )
 
@@ -154,20 +157,33 @@ def rids(worker):
     return [body["rid"] for _, body in worker["requests"]]
 
 
-def test_routes_to_observed_worker_and_retries_server_errors(worker):
+def test_a_worker_error_is_returned_without_cooling_the_replica(worker):
     worker["statuses"] = [500, 200]
 
     async def test(router):
-        result = await dispatch(router, worker)
+        failed = await dispatch(router, worker, request_id="first")
+        assert failed.response.status_code == 500
+        assert failed.replica == "worker"
+        started = time.monotonic()
+        result = await dispatch(router, worker, request_id="second", timeout=1)
         assert result.response.status_code == 200
-        assert result.replica == "worker"
-        assert len(set(rids(worker))) == 2
+        assert time.monotonic() - started < 0.5
+        assert len(worker["requests"]) == 2
         for headers, _ in worker["requests"]:
             headers = {k.lower(): v for k, v in headers.items()}
             assert headers["modal-flash-upstream"] == "worker:8000"
             assert "modal-session-id" not in headers
 
     with_router(worker, test)
+
+
+def test_caller_headers_replace_runtime_headers(worker):
+    async def test(router):
+        await dispatch(router, worker, headers={"Modal-Key": "caller"})
+        [items] = worker["header_items"]
+        assert [v for k, v in items if k.lower() == "modal-key"] == ["caller"]
+
+    with_router(worker, test, headers={"Modal-Key": "runtime"})
 
 
 @pytest.mark.parametrize("fault", ["headers", "body", "proxy"])
@@ -181,13 +197,18 @@ def test_lost_response_is_redelivered_with_the_same_rid(worker, fault):
     with_router(worker, test)
 
 
-def test_transport_failures_have_a_retry_limit(worker):
-    worker["faults"] = ["headers"] * 30
+@pytest.mark.parametrize("fault", ["headers", "proxy"])
+def test_transport_failures_have_a_retry_limit(worker, fault):
+    worker["faults"] = [fault] * 30
 
     async def test(router):
         result = await dispatch(router, worker, timeout=30)
         assert result.response.status_code == 502
-        assert result.routing["reason"] == "router_error"
+        if fault == "proxy":
+            # The last upstream response, not a router-made error.
+            assert "upstream reset" in result.response.text
+        else:
+            assert result.routing["reason"] == "router_error"
         # Eight attempts, each delivered twice with one RID.
         ids = rids(worker)
         assert len(ids) == 16 and len(set(ids)) == 8
@@ -267,13 +288,33 @@ def test_cancellation_releases_queued_and_in_flight_requests(worker, active, del
     with_router(worker, test)
 
 
-def test_observations_keep_aging_while_a_slow_peer_is_polled(worker):
-    # Fast's row is fresh when received but stale once the slow poll finishes.
-    worker["observations"] = {"fast": {"age": 2.4}, "slow": {"age": 100, "delay": 1.7}}
+def test_a_slow_peer_does_not_stale_a_fast_replica(worker):
+    # Fast's row stays routable only if installed before the slow poll times out.
+    worker["observations"] = {"fast": {"age": 1.5}, "slow": {"delay": 2.5}}
 
     async def test(router):
-        result = await dispatch(router, worker, timeout=2.8)
-        assert result.response.status_code == 504
-        assert not worker["requests"]
+        result = await dispatch(router, worker, timeout=2)
+        assert result.response.status_code == 200
+        assert result.replica == "fast"
+
+    with_router(worker, test)
+
+
+@pytest.mark.parametrize("observations", [{}, {"stale": {"age": 100}}])
+def test_unroutable_pools_fall_back_to_the_gateway(worker, observations):
+    # No workers (a pool at zero replicas) or no fresh observations (a pool
+    # without an observer): Modal's gateway picks or cold-starts a replica.
+    worker["observations"] = observations
+
+    async def test(router):
+        started = time.monotonic()
+        result = await dispatch(router, worker, timeout=10)
+        assert result.response.status_code == 200
+        assert result.routing["reason"] == "gateway_fallback"
+        assert time.monotonic() - started < (1 if not observations else 7)
+        [(headers, _)] = worker["requests"]
+        headers = {k.lower(): v for k, v in headers.items()}
+        assert "modal-flash-upstream" not in headers
+        assert headers["modal-session-id"] == "session"
 
     with_router(worker, test)

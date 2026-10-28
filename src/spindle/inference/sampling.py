@@ -136,7 +136,9 @@ async def sample_task(
             headers=headers,
         )
     )
-    if model_id is None or latest:
+    # Latest sessions route by the version they were created at: the
+    # version the trainer just published for that sampling client.
+    if model_id is None or version is None:
         router = None
     routing_request = (
         router.prepare_request(

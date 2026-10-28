@@ -70,7 +70,7 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
-from .router_image import router_image
+from .router_image import with_router
 from .trainer_reconciler import (
     TRANSIENT_POLL_ERRORS,
     complete_reconcile,
@@ -131,14 +131,25 @@ async def _delete_checkpoint(uri: str) -> None:
     ).delete(uri)
 
 
-image = (
-    router_image()
+base_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .apt_install("git")
     .pip_install(*CORE_PACKAGES, TINKER_PACKAGE)
     .pip_install(STITCH_PACKAGE, "huggingface-hub")
-    .add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
-    .env(TRAINER_DEPLOYMENT_ENV)
-    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+
+
+def _frontend_image(base):
+    # The configs file changes on every deploy; keep it above slower layers.
+    return (
+        base.add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
+        .env(TRAINER_DEPLOYMENT_ENV)
+        .add_local_python_source("spindle", ignore=ignore_config_source)
+    )
+
+
+image = _frontend_image(base_image)
+sample_image = _frontend_image(with_router(base_image))
 
 
 @app.function(image=image)
@@ -403,7 +414,7 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
 
 
 @app.function(
-    image=image,
+    image=sample_image,
     min_containers=0,
     timeout=60 * 60,
     retries=2,

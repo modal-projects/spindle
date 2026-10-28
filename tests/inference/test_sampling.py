@@ -688,3 +688,32 @@ def test_tokenizerless_sampler_accepts_stop_token_ids():
         )
     )
     assert seen[0]["stop_token_ids"] == [7, 9]
+
+
+@pytest.mark.parametrize("latest", [False, True])
+def test_versioned_sessions_route_by_their_session_version(latest) -> None:
+    from spindle.inference.native_router import RoutedResponse
+
+    class Router:
+        def __init__(self):
+            self.keys = []
+            self.bodies = []
+
+        def prepare_request(self, adapter, affinity):
+            self.keys.append(adapter)
+            return adapter
+
+        async def dispatch(self, prepared, *, body, **_):
+            self.bodies.append(body)
+            return RoutedResponse(response(7), "replica", dict(wait_s=0.0))
+
+    router = Router()
+    asyncio.run(sample_task(task(latest=latest), "http://rollout", router=router))
+
+    assert router.keys == [sampling.VersionRef("model-a", 7).identity]
+    expected = (
+        {"min_version": 7, "exact_version": None}
+        if latest
+        else {"min_version": None, "exact_version": 7}
+    )
+    assert router.bodies[0]["weight_version"] == expected

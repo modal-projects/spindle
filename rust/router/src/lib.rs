@@ -106,6 +106,15 @@ pub struct Decision {
     pub best_cached_tokens: usize,
 }
 impl Decision {
+    /// Unpinned: Modal's gateway picks (or starts) the replica.
+    fn gateway() -> Self {
+        Self {
+            status: "route",
+            reason: "gateway_fallback",
+            retry_after: 0.0,
+            ..Self::wait("route")
+        }
+    }
     fn wait(status: &'static str) -> Self {
         Self {
             status,

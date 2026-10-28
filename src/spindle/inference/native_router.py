@@ -64,7 +64,7 @@ class NativeRouter:
             try:
                 workers = await asyncio.wait_for(self.discover(), timeout=5)
                 self.runtime.set_workers(json.dumps(workers))
-            except TimeoutError:
+            except Exception:
                 # Failed discovery must not permanently kill address refresh.
                 # Rust independently enforces fresh observations and deadlines.
                 pass

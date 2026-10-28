@@ -207,6 +207,22 @@ def test_model_weights_override_assets_but_not_the_served_model():
             ),
             "prefill_tokens_per_second",
         ),
+        *(
+            (
+                dict(
+                    inference_lora_routing="cache_wait",
+                    inference_routing_prefill_tokens_per_second=10_000.0,
+                    **change,
+                ),
+                match,
+            )
+            for change, match in [
+                (dict(sglang_cfg__dp_size=2), "data-parallel"),
+                (dict(inference_routing_balance_relative=0.5), "balance_relative"),
+                (dict(inference_routing_balance_absolute=-1), "balance_absolute"),
+                (dict(inference_routing_cache_threshold=1.5), "cache_threshold"),
+            ]
+        ),
     ],
 )
 def test_invalid_routing_fails_at_deploy(changes, match):
@@ -220,6 +236,8 @@ def test_cache_wait_routing_with_a_prefill_rate_deploys():
         inference_routing_prefill_tokens_per_second=10_000.0,
     )
     assert row.recipe.inference_lora_routing == "cache_wait"
+    # Only cache_wait pools run the observer, so switching must redeploy the pool.
+    assert row.inference_identity() != resolved().inference_identity()
 
 
 def test_trainer_image_is_part_of_trainer_identity():
