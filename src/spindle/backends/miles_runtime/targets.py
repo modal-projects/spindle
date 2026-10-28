@@ -66,7 +66,8 @@ def install_multi_target_hooks(tinker_losses, math_utils=None) -> None:
             math_utils is not None
             and shared == {width}
             and width > 1
-            # Under CP a short 1-D row (DP padding) can leave a rank with no rows to score.
+            # A CP rank may own no rows of a short 1-D padding row; Miles hands back that
+            # shard as 1-D and the v0.1.1 CP gather would all-reduce mismatched shapes.
             and (
                 args.context_parallel_size == 1
                 or all(target.ndim == 2 for target in targets)
@@ -85,6 +86,7 @@ def install_multi_target_hooks(tinker_losses, math_utils=None) -> None:
                 for target in targets
             ]
             scores = original_target(args, joint_batch, logits)
+            # An empty CP shard comes back 1-D.
             return [
                 score.reshape(-1, width)
                 if target.ndim == 2

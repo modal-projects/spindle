@@ -157,57 +157,76 @@ def test_candidate_scores_and_gradients_share_logits(nested):
     assert len(calls) == (2 if nested else 1)
 
 
-def test_candidate_columns_share_one_softmax_pass():
+@pytest.mark.parametrize("context_parallel_size", [1, 2])
+def test_candidate_columns_share_one_softmax_pass(context_parallel_size):
     torch.manual_seed(5)
-    prompts = [torch.tensor([9, 9]), torch.tensor([9])]
     targets = [
         torch.tensor([[1, 4, 6], [2, 5, 0]]),
         torch.tensor([[3, 3, 7], [6, 1, 2]]),
+        torch.tensor([5, 2]),  # DP padding adds a 1-D row
     ]
-    logits = torch.randn(2, 2, 8, requires_grad=True)
+    logits = torch.randn(3, 2, 8, requires_grad=True)
     reference_logits = logits.detach().clone().requires_grad_()
     calls = []
 
     def single_target(args, batch, supplied_logits):
         # Miles splices targets after the prompt and scores the response rows.
         calls.append(batch["target_tokens"])
-        return [
-            math_utils.compute_log_probs(
-                row.float().clone(), labels[-len(target) :], None
+        scores = []
+        for row, tokens, target in zip(
+            supplied_logits,
+            batch["unconcat_tokens"],
+            batch["target_tokens"],
+            strict=True,
+        ):
+            labels = torch.cat([tokens[: len(tokens) - len(target)], target])
+            scores.append(
+                math_utils.compute_log_probs(
+                    row.float().clone(), labels[-len(target) :], None
+                )
             )
-            for row, labels, target in zip(
-                supplied_logits,
-                [
-                    torch.cat([tokens[: len(tokens) - len(target)], target])
-                    for tokens, target in zip(
-                        batch["unconcat_tokens"], batch["target_tokens"], strict=True
-                    )
-                ],
-                batch["target_tokens"],
-                strict=True,
-            )
-        ]
+        return scores
 
-    math_utils = SimpleNamespace(compute_log_probs=lambda *args, **kwargs: None)
+    def single_label_log_probs(logits, tokens, group):
+        return logits.log_softmax(-1).gather(-1, tokens[:, None]).squeeze(-1)
+
+    math_utils = SimpleNamespace(compute_log_probs=single_label_log_probs)
     losses = SimpleNamespace(
         _target_logprobs=single_target,
         _response_masks=lambda batch, _: batch["loss_masks"],
     )
     install_multi_target_hooks(losses, math_utils)
     args = SimpleNamespace(
-        context_parallel_size=1, allgather_cp=False, true_on_policy_mode=False
+        context_parallel_size=context_parallel_size,
+        allgather_cp=False,
+        true_on_policy_mode=False,
     )
     batch = {
-        "unconcat_tokens": [torch.cat([p, t[:, 0]]) for p, t in zip(prompts, targets)],
+        "unconcat_tokens": [
+            torch.cat([torch.tensor([9]), t[:, 0] if t.ndim == 2 else t])
+            for t in targets
+        ],
         "target_tokens": targets,
     }
     scores = losses._target_logprobs(args, batch, logits)
-    assert len(calls) == 1
-    weights = torch.randn(2, 2, 3)
-    sum((score * weight).sum() for score, weight in zip(scores, weights)).backward()
-    expected = reference_logits.log_softmax(-1).gather(-1, torch.stack(targets))
-    torch.testing.assert_close(torch.stack(scores), expected)
-    (expected * weights).sum().backward()
+    # One shared pass under CP=1; a 1-D row under CP keeps the per-column path.
+    assert len(calls) == (1 if context_parallel_size == 1 else 3)
+    weights = [torch.randn(target.shape) for target in targets]
+    sum(
+        (score * weight).sum() for score, weight in zip(scores, weights, strict=True)
+    ).backward()
+    expected_loss = 0
+    for row, target, weight, score in zip(
+        reference_logits, targets, weights, scores, strict=True
+    ):
+        expected = row.log_softmax(-1).gather(
+            -1, target if target.ndim == 2 else target[:, None]
+        )
+        if target.ndim == 1:
+            expected = expected.squeeze(-1)
+        torch.testing.assert_close(score, expected)
+        expected_loss = expected_loss + (expected * weight).sum()
+    expected_loss.backward()
     torch.testing.assert_close(logits.grad, reference_logits.grad)
 
 

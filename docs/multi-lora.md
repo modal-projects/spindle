@@ -156,12 +156,11 @@ SDK are supported. The `megatron_lora` and `megatron_fft` backends do not suppor
 2D targets.
 
 The transformer evaluates each input sequence once. When every 2D datum in a
-batch has the same number of candidate columns, the trainer computes the softmax
-over the vocabulary once per position and reads every candidate from it. For a
-4B LoRA classifier with 5 candidates per position, this cut `forward_backward`
-from 6.6 s to 4.4 s and peak memory from 55 GB to 25 GB per GPU. Batches that mix
-widths score each column separately, so their vocabulary work and memory grow
-with `num_choices`.
+batch has the same number of candidate columns, the trainer takes one softmax
+over the vocabulary per position and reads every candidate from it, so scoring
+time and memory do not grow with `num_choices`. Batches that mix widths score
+each column separately, and their vocabulary work and memory grow with
+`num_choices`.
 
 # Deterministic Training (Experimental) 
 
