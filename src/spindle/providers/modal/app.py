@@ -436,8 +436,6 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
         policy = definition.recipe.inference_lora_routing
-        if policy not in {"affinity", "cache_wait"}:
-            raise ValueError(f"unknown LoRA routing policy: {policy}")
         router = None
         if policy == "cache_wait" and task.get("model_id") is not None:
             if spec.app_name not in _routers:

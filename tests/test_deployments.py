@@ -195,6 +195,33 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.inference_identity() != resolved().inference_identity()
 
 
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        (dict(inference_lora_routing="nearest"), "unknown inference_lora_routing"),
+        (dict(inference_lora_routing="cache_wait"), "prefill_tokens_per_second"),
+        (
+            dict(
+                inference_lora_routing="cache_wait",
+                inference_routing_prefill_tokens_per_second=0,
+            ),
+            "prefill_tokens_per_second",
+        ),
+    ],
+)
+def test_invalid_routing_fails_at_deploy(changes, match):
+    with pytest.raises(ValueError, match=match):
+        resolved(**changes)
+
+
+def test_cache_wait_routing_with_a_prefill_rate_deploys():
+    row = resolved(
+        inference_lora_routing="cache_wait",
+        inference_routing_prefill_tokens_per_second=10_000.0,
+    )
+    assert row.recipe.inference_lora_routing == "cache_wait"
+
+
 def test_trainer_image_is_part_of_trainer_identity():
     trainer = resolved(recipe(trainer_image="trainer-x"))
     assert trainer.trainer_identity() != resolved().trainer_identity()

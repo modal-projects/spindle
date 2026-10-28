@@ -53,6 +53,14 @@ class DeploymentConfig(BaseModel):
                 raise ValueError(
                     f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
                 )
+        routing = pinned.inference_lora_routing
+        if routing not in {"affinity", "cache_wait"}:
+            raise ValueError(f"unknown inference_lora_routing: {routing}")
+        prefill_rate = pinned.inference_routing_prefill_tokens_per_second
+        if routing == "cache_wait" and (prefill_rate is None or prefill_rate <= 0):
+            raise ValueError(
+                "cache_wait requires a positive inference_routing_prefill_tokens_per_second"
+            )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
         )
