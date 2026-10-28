@@ -143,7 +143,10 @@ def native_loss(
         )
         objective = advantage * (weight * lp - correction)
         log_probs.append(lp)
-        per_losses.append(-(objective * mask).sum())
+        loss_weight = (
+            tensor(batch["loss_weights"][i]).to(lp) if "loss_weights" in batch else 1
+        )
+        per_losses.append(-(objective * mask * loss_weight).sum())
         diagnostics.append(
             {
                 **{

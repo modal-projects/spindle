@@ -178,7 +178,17 @@ def wait_for_sampler_evidence(paths):
         )
 
 
-async def train(training, gateways, weights, args, tasks, *, cache=None):
+async def train(
+    training,
+    gateways,
+    weights,
+    args,
+    tasks,
+    *,
+    cache=None,
+    seed=SEED,
+    learning_rate=LEARNING_RATE,
+):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     events_file = (output / "events.jsonl").open("a", buffering=1)
@@ -190,7 +200,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
 
     version = 1
     completed = asyncio.Queue(maxsize=args.inflight_prompts)
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
     order = list(range(len(tasks)))
     rng.shuffle(order)
     next_task = 0
@@ -267,7 +277,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
                             group,
                             training.model_id,
                             requested_version,
-                            SEED + group_number * 10000 + index * 1000,
+                            seed + group_number * 10000 + index * 1000,
                         )
                         path.write_bytes(compressed)
                         row = pickle.loads(gzip.decompress(compressed))
@@ -371,7 +381,7 @@ async def train(training, gateways, weights, args, tasks, *, cache=None):
             optimizer = await asyncio.wait_for(
                 training.optim_step(
                     types.AdamParams(
-                        learning_rate=LEARNING_RATE,
+                        learning_rate=learning_rate,
                         beta1=0.9,
                         beta2=0.95,
                         eps=1e-8,

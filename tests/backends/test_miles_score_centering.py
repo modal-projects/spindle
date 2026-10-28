@@ -107,6 +107,7 @@ def miles_batch(req, *, alignment=1):
         "rollout_log_probs": [row["sampling_logprobs"] for row in rows],
         "advantages": [row["advantages"] for row in rows],
         "loss_masks": [row["loss_mask"] for row in rows],
+        "loss_weights": [row["weights"] for row in rows],
         "sample_indices": list(range(len(rows))),
         "loss_fn_config": req.loss_fn_config,
     }
@@ -189,6 +190,27 @@ def test_alignment_and_dummy_padding(registry, empty):
     if empty:
         assert loss == 0
         assert outputs["per_datum"][0]["diagnostics"]["tokens"] == 0
+
+
+def test_fractional_token_weights_survive_miles_integer_masks(registry):
+    req = request("score_centered")
+    req.items[0].data[0].loss_fn_inputs["weights"] = TensorData(
+        data=[0.125], dtype="float32", shape=[1]
+    )
+    _, batch = miles_batch(req)
+    assert torch.tensor(batch["loss_masks"][0], dtype=torch.int).tolist() == [1]
+    assert batch["loss_weights"] == [[0.125]]
+    logits = torch.tensor([[[2.0, 100.0, 0.0, -1.0], [0.0] * 4]], requires_grad=True)
+    weighted, outputs = run(registry, req.loss_fn, batch, logits)
+    weighted.backward()
+    grad = logits.grad.clone()
+    logits.grad = None
+    batch["loss_weights"] = [[1.0]]
+    full, _ = run(registry, req.loss_fn, batch, logits)
+    full.backward()
+    torch.testing.assert_close(weighted, full * 0.125)
+    torch.testing.assert_close(grad, logits.grad * 0.125)
+    assert outputs["per_datum"][0]["diagnostics"]["tokens"] == 1
 
 
 @pytest.mark.parametrize(

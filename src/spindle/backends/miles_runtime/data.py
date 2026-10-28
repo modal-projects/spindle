@@ -265,7 +265,7 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     row.update(replay_row(inputs, targets))
     if loss_fn in {"mis", "score_centered", "score_centered_mis"}:
         weights = inputs.get("weights")
-        row["loss_mask"] = (
+        row["weights"] = (
             list(weights.data)
             if weights is not None
             else [
@@ -275,8 +275,9 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
                 )
             ]
         )
-        if len(row["loss_mask"]) != len(targets):
+        if len(row["weights"]) != len(targets):
             raise ValueError("weights must match target_tokens length")
+        row["loss_mask"] = [int(weight != 0) for weight in row["weights"]]
     if loss_fn in {"score_centered", "score_centered_mis"}:
         from spindle.backends.megatron_runtime.common.score_centering import (
             validate_support,
