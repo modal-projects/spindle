@@ -34,13 +34,13 @@ def test_context_parallel_alignment_preserves_routes_and_supports():
     )
     row = prepared.slot_rows[0][1]
     assert prepared.target_lengths == (4,)
-    assert row["tokens"] == [1, 2, 3, 5, 6, 6, 6, 6]
+    assert row["tokens"].tolist() == [1, 2, 3, 5, 6, 6, 6, 6]
     assert row["target_len"] == 7
     assert row["routed_experts"]["shape"] == [7, 2, 1]
     assert row["routed_experts"]["values"] == [*range(8), *([-1] * 6)]
     assert row["sampling_mask_offsets"] == [0, 0, 0, 2, 5, 5, 5, 5]
     assert row["sampling_mask_ids"] == [5, 7, 6, 8, 9]
-    assert row["advantages"] == [0, 0, 1, 1, 0, 0, 0]
+    assert row["advantages"].tolist() == [0, 0, 1, 1, 0, 0, 0]
 
 
 def test_router_requests_not_coalesced_with_ordinary_requests():

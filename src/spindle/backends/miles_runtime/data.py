@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import gc
-from contextlib import contextmanager
 from dataclasses import dataclass
 from math import prod
 from typing import Any
@@ -38,12 +36,9 @@ def pad_slot_rows(
         "target_len": 1,
         "target_tokens": last["tokens"][1:2],
     }
-    if "weights" in last:
-        pad["weights"] = [0.0]
-    if "advantages" in last:
-        pad["advantages"] = [0.0]
-    if "sampling_logprobs" in last:
-        pad["sampling_logprobs"] = [0.0]
+    for key in ("weights", "advantages", "sampling_logprobs"):
+        if key in last:
+            pad[key] = np.zeros(1, dtype=np.float32)
     if "routed_experts" in last:
         route = last["routed_experts"]
         width = route["shape"][1] * route["shape"][2]
@@ -68,21 +63,18 @@ def prepare_batch(
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
-    with _gc_paused():
-        for item_index, item in enumerate(batch.items):
-            if item.model_id not in slots:
-                raise ValueError(f"model {item.model_id} is not loaded")
-            if not item.data:
-                raise ValueError(
-                    f"forward_backward has no data for model {item.model_id}"
-                )
-            for datum_index, datum in enumerate(item.data):
-                row = _datum_row(datum, batch.loss_fn, datum_index)
-                target_length = int(row["target_len"])
-                _align_row(row, sequence_alignment)
-                entries.append(
-                    (slots[item.model_id], item_index, datum_index, row, target_length)
-                )
+    for item_index, item in enumerate(batch.items):
+        if item.model_id not in slots:
+            raise ValueError(f"model {item.model_id} is not loaded")
+        if not item.data:
+            raise ValueError(f"forward_backward has no data for model {item.model_id}")
+        for datum_index, datum in enumerate(item.data):
+            row = _datum_row(datum, batch.loss_fn, datum_index)
+            target_length = int(row["target_len"])
+            _align_row(row, sequence_alignment)
+            entries.append(
+                (slots[item.model_id], item_index, datum_index, row, target_length)
+            )
 
     entries.sort(key=lambda entry: entry[0])
     return PreparedBatch(
@@ -94,18 +86,6 @@ def prepare_batch(
     )
 
 
-@contextmanager
-def _gc_paused():
-    # Label rows are many small lists; cyclic GC would rescan them as they are built.
-    enabled = gc.isenabled()
-    gc.disable()
-    try:
-        yield
-    finally:
-        if enabled:
-            gc.enable()
-
-
 def _align_row(row: dict[str, Any], multiple: int) -> None:
     """Pad each sequence to a multiple of ``2 * cp * tp`` so context-parallel
     chunking and tensor-parallel sharding both divide it evenly."""
@@ -114,20 +94,18 @@ def _align_row(row: dict[str, Any], multiple: int) -> None:
     if pad == 0:
         return
     filler = row["tokens"][-1]
-    row["tokens"] = [*row["tokens"], *([filler] * pad)]
-    width = (
-        len(row["target_tokens"][0])
-        if isinstance(row["target_tokens"][0], list)
-        else None
+    row["tokens"] = np.concatenate([row["tokens"], np.full(pad, filler)])
+    targets = row["target_tokens"]
+    row["target_tokens"] = np.concatenate(
+        [targets, np.full((pad, *targets.shape[1:]), filler, dtype=targets.dtype)]
     )
-    target_filler = [filler] * width if width is not None else filler
-    row["target_tokens"] = [*row["target_tokens"], *([target_filler] * pad)]
     row["target_len"] = len(row["target_tokens"])
     for key in ("weights", "advantages", "sampling_logprobs"):
         values = row.get(key)
         if values is not None:
-            zero = [0.0] * width if width is not None else 0.0
-            row[key] = [*values, *([zero] * pad)]
+            row[key] = np.concatenate(
+                [values, np.zeros((pad, *values.shape[1:]), dtype=values.dtype)]
+            )
     if "routed_experts" in row:
         route = row["routed_experts"]
         width = route["shape"][1] * route["shape"][2]
@@ -162,15 +140,10 @@ def build_outputs(
             .shape
             or [target_length]
         )
-        values = output["logprobs"][:target_length]
-        logprobs = (
-            [float(value) for row in values for value in row]
-            if len(shape) == 2
-            else [float(value) for value in values]
-        )
+        values = np.asarray(output["logprobs"], dtype=np.float32)[:target_length]
         grouped[item_index][datum_index] = {
             "loss": float(output["loss"]),
-            "logprobs": logprobs,
+            "logprobs": values.reshape(-1).tolist(),
             "shape": shape,
         }
 
@@ -213,8 +186,8 @@ def build_outputs(
 
 def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     inputs = datum.loss_fn_inputs
-    input_tokens = [int(token) for token in datum.model_input.to_ints()]
-    if not input_tokens:
+    input_tokens = np.asarray(datum.model_input.to_ints(), dtype=np.int64)
+    if not input_tokens.size:
         raise ValueError(f"datum {datum_index}: model_input cannot be empty")
     target = inputs.get("target_tokens")
     if target is None:
@@ -232,9 +205,9 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     targets = _shaped_values(target, shape, np.int64, datum_index, "target_tokens")
     # The final token is a placeholder after the last input position. Labels
     # are gathered separately and must never replace the actual model inputs.
-    final_target = targets[-1][0] if len(shape) == 2 else targets[-1]
+    final_target = targets[-1, 0] if len(shape) == 2 else targets[-1]
     row: dict[str, Any] = {
-        "tokens": [*input_tokens, final_target],
+        "tokens": np.append(input_tokens, final_target),
         "target_len": shape[0],
         "target_tokens": targets,
     }
@@ -250,12 +223,11 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
         value = inputs.get(source)
         if value is not None:
             row[destination] = _shaped_values(
-                value, shape, np.float64, datum_index, source
+                value, shape, np.float32, datum_index, source
             )
 
     if loss_fn == "cross_entropy":
-        default_weight = [1.0] * shape[1] if len(shape) == 2 else 1.0
-        row.setdefault("weights", [default_weight for _ in range(shape[0])])
+        row.setdefault("weights", np.ones(shape, dtype=np.float32))
     elif loss_fn in _RL_LOSSES:
         missing = [
             name for name in ("advantages", "sampling_logprobs") if name not in row
@@ -268,14 +240,14 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     return row
 
 
-def _shaped_values(tensor, shape, dtype, datum_index, name) -> list:
+def _shaped_values(tensor, shape, dtype, datum_index, name) -> np.ndarray:
     values = _tensor_values(tensor)
     actual_shape = list(tensor.shape or [values.size])
     if actual_shape != shape or values.size != prod(shape):
         raise ValueError(
             f"datum {datum_index}: {name} must have shape {shape} with matching data"
         )
-    return values.astype(dtype).reshape(shape).tolist()
+    return values.astype(dtype).reshape(shape)
 
 
 def _tensor_values(tensor) -> np.ndarray:

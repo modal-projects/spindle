@@ -59,7 +59,16 @@ class FakeMilesRuntime:
         loss_fn_config,
         forward_only,
     ):
-        self.last_slot_rows = tuple((slot, dict(row)) for slot, row in slot_rows)
+        self.last_slot_rows = tuple(
+            (
+                slot,
+                {
+                    key: getattr(value, "tolist", lambda: value)()
+                    for key, value in row.items()
+                },
+            )
+            for slot, row in slot_rows
+        )
         self.calls.append(
             (
                 "forward_backward",
@@ -709,8 +718,8 @@ def test_nonfinite_optimizer_skip_does_not_advance_policy(tmp_path):
 
 def test_datum_preserves_explicit_targets_for_upstream():
     row = _datum_row(_datum([1, 2, 3], 4), "cross_entropy", 0)
-    assert row["tokens"] == [1, 2, 3, 4]
-    assert row["target_tokens"] == [2, 3, 4]
+    assert row["tokens"].tolist() == [1, 2, 3, 4]
+    assert row["target_tokens"].tolist() == [2, 3, 4]
 
 
 def test_weights_only_capture_excludes_optimizer(tmp_path):
