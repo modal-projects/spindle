@@ -1,4 +1,7 @@
-"""Nightly synthetic monitoring for spindle configs.
+"""Nightly synthetic monitoring for spindle.
+
+Deploys the recipes in CONFIGS, then runs one script from SCRIPTS against
+that server. Both scripts are existing client entrypoints.
 
 Test it out with:
 
@@ -11,12 +14,11 @@ TODO: change to shared env
 
 from __future__ import annotations
 
-import contextlib
-import math
 import os
-import statistics
+import random
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -34,25 +36,94 @@ MODAL_ENV = "ajhinh-dev"
 HISTORY_DICT_NAME = "spindle-synmon-timing-baselines"
 FRONTEND_NAME = "spindle-synmon"
 WORKER_APP_PREFIXES = ("spindle-trainer-", "spindle-inference-", "spindle-lora-")
+DAPO_DIR = "/opt/dapo-math"
+SWE_GYM = "/opt/modal-examples/06_gpu_and_ml/swe_gym/swe_gym.py"
+SWE_GYM_REV = "29c7c4929286d00903339ef863041592a99a2348"
 
-CONFIGS = {
-    "qwen38-27b-lora-16k": 60 * 60,
-    "qwen35-9b-lora-128k": 60 * 60,
-    "qwen35-9b-lora-16k": 60 * 60,
-    "deepseek-v41-flash-lora-8k": 2 * 60 * 60,
+CONFIGS = (
+    "qwen38-27b-lora-16k",
+    "qwen35-9b-lora-128k",
+    "qwen35-9b-lora-16k",
+    "deepseek-v41-flash-lora-8k",
+)
+# The stock 16k recipe has six adapter slots and a 16k window. The DAPO
+# client opens eight adapters and samples inside a 32k window.
+DEPLOY_OVERRIDES = {
+    "qwen38-27b-lora-16k": {
+        "max_context_length": 32768,
+        "trainer_max_clients_per_instance": 8,
+        "miles_cfg.max_lora_slots": 8,
+        "miles_cfg.max_tokens_per_gpu": 18432,
+    },
 }
-NUM_STEPS = 5
+# Same invocation for every entry: python <script> --clients N --steps N,
+# with TINKER_BASE_URL set to the deployed frontend.
+SCRIPTS = {
+    "dapo-math-8": {
+        "clients": 8,
+        "steps": 5,
+        "timeout_s": 6 * 60 * 60,
+        "recipe": "qwen38-27b-lora-16k",
+        "argv": [
+            "{python}",
+            f"{DAPO_DIR}/launch_clients.py",
+            "--clients",
+            "{clients}",
+            "--steps",
+            "{steps}",
+            "--mode",
+            "gate",
+            "--stagger-seconds",
+            "10",
+            "--base-url",
+            "{base_url}",
+        ],
+    },
+    "swe-gym": {
+        "clients": 4,
+        "steps": 5,
+        "timeout_s": 8 * 60 * 60,
+        "recipe": "qwen35-9b-lora-128k",
+        "argv": [
+            "{python}",
+            SWE_GYM,
+            "--clients",
+            "{clients}",
+            "--steps",
+            "{steps}",
+            "--hours",
+            "{hours}",
+            "--output",
+            "{output}",
+        ],
+    },
+}
 DEPLOY_TIMEOUT_S = 30 * 60
-MONITOR_TIMEOUT_S = max(CONFIGS.values()) + 10 * 60
+MONITOR_TIMEOUT_S = max(script["timeout_s"] for script in SCRIPTS.values()) + 15 * 60
 LAUNCH_TIMEOUT_S = DEPLOY_TIMEOUT_S + MONITOR_TIMEOUT_S + 30 * 60
 
 probe_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
+    .run_commands(
+        "git clone --filter=blob:none --sparse"
+        " https://github.com/modal-labs/modal-examples.git /opt/modal-examples"
+        " && git -C /opt/modal-examples sparse-checkout set 06_gpu_and_ml/swe_gym"
+        f" && git -C /opt/modal-examples checkout {SWE_GYM_REV}"
+    )
     .uv_sync(uv_project_dir=str(REPO_ROOT), extra_options="--no-dev")
-    .uv_pip_install("slack-sdk==3.27.1", "matplotlib==3.10.1")
+    .uv_pip_install(
+        "slack-sdk==3.27.1",
+        "matplotlib==3.10.1",
+        "transformers[chat-template]==5.17.0",
+        "swegym @ git+https://github.com/SWE-Gym/SWE-Bench-Package.git@16dd480cce9b27bf111a362d280881c6def5d2a7",
+    )
     .env({"MODAL_ENVIRONMENT": MODAL_ENV})
     .add_local_python_source("spindle", "synthetic_monitoring")
+    .add_local_dir(
+        str(REPO_ROOT / "examples/dapo-27b-4h200-12b200"),
+        remote_path=DAPO_DIR,
+    )
 )
 
 slack_secret = modal.Secret.from_name("spindle-bot-slack", environment_name=MODAL_ENV)
@@ -63,16 +134,41 @@ app = modal.App("spindle-synmon-launcher")
 
 
 def synmon_configs(names=None):
-    paths = [config_path(name) for name in names or CONFIGS]
-    return [
-        type(load(path))(
-            overrides={
-                "platform.frontend": FRONTEND_NAME,
-                "platform.modal.environment": MODAL_ENV,
-            }
+    recipes = []
+    for name in names or CONFIGS:
+        recipe = load(config_path(name))
+        recipes.append(
+            type(recipe)(
+                overrides={
+                    "platform.frontend": FRONTEND_NAME,
+                    "platform.modal.environment": MODAL_ENV,
+                    **DEPLOY_OVERRIDES.get(recipe.name, {}),
+                }
+            )
         )
-        for path in paths
-    ]
+    return recipes
+
+
+def script_argv(name: str, *, base_url: str, output: str) -> list[str]:
+    spec = SCRIPTS[name]
+    fields = {
+        "python": sys.executable,
+        "clients": str(spec["clients"]),
+        "steps": str(spec["steps"]),
+        "hours": str(spec["timeout_s"] / 3600),
+        "base_url": base_url,
+        "output": output,
+    }
+    return [part.format(**fields) for part in spec["argv"]]
+
+
+def run_script(name: str, base_url: str) -> None:
+    output = tempfile.mkdtemp(prefix=f"synmon-{name}-")
+    command = script_argv(name, base_url=base_url, output=output)
+    env = os.environ.copy()
+    env["TINKER_BASE_URL"] = base_url
+    print("running", " ".join(command))
+    subprocess.run(command, check=True, env=env)
 
 
 def stop_worker_apps(names):
@@ -114,7 +210,7 @@ def slack_report_blocks(rows: list[dict]) -> list[dict]:
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     table_rows = [
         [
-            _raw_cell("Config"),
+            _raw_cell("Script"),
             _raw_cell("Total runtime"),
             _raw_cell("Delta vs previous successful run"),
         ]
@@ -133,7 +229,7 @@ def slack_report_blocks(rows: list[dict]) -> list[dict]:
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Nightly config validation - {day}",
+                "text": f"Nightly validation - {day}",
             },
         },
         {
@@ -181,7 +277,7 @@ def _post_report(rows: list[dict]) -> None:
     client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
     channel = os.environ["SLACK_CHANNEL_ID"]
 
-    header = f"Nightly config validation - {datetime.now(timezone.utc):%Y-%m-%d}"
+    header = f"Nightly validation - {datetime.now(timezone.utc):%Y-%m-%d}"
     thread_ts = client.chat_postMessage(
         channel=channel,
         text=header,
@@ -226,11 +322,10 @@ def _post_report(rows: list[dict]) -> None:
             print(f"error: reply failed for {row['config']}: {exc}")
 
 
-@contextlib.contextmanager
-def _stage(timings: dict[str, float], name: str):
-    start = time.time()
-    yield
-    timings[name] = time.time() - start
+def frontend_url() -> str:
+    return modal.Function.from_name(
+        FRONTEND_NAME, "server", environment_name=MODAL_ENV
+    ).get_web_url()
 
 
 @app.function(
@@ -238,100 +333,30 @@ def _stage(timings: dict[str, float], name: str):
     timeout=MONITOR_TIMEOUT_S,
     secrets=[api_secret, hf_secret],
 )
-def monitor(config: str) -> dict:
-    import tinker
-    from tinker import types
-
-    recipe = synmon_configs(names=[config])[0]
+def monitor(script: str) -> dict:
+    recipe = SCRIPTS[script]["recipe"]
     started = time.time()
-    timings: dict[str, float] = {}
     error: str | None = None
     try:
-        with _stage(timings, "trainer ready"):
-            service = tinker.ServiceClient(
-                base_url=modal.Function.from_name(
-                    FRONTEND_NAME, "server", environment_name=MODAL_ENV
-                ).get_web_url(),
-                api_key=os.environ["TINKER_API_KEY"],
-            )
-            training = service.create_lora_training_client(base_model=recipe.name)
-            tokenizer = training.get_tokenizer()
-        prompt = tokenizer.encode(
-            "What is 2 + 2? Answer with only the number.", add_special_tokens=True
-        )
-
-        def sample(sampling) -> tuple[list[int], list[float]]:
-            sampled = sampling.sample(
-                prompt=types.ModelInput.from_ints(prompt),
-                num_samples=1,
-                sampling_params=types.SamplingParams(max_tokens=16, temperature=1.0),
-            ).result()
-            sequence = sampled.sequences[0]
-            tokens = list(sequence.tokens)
-            logprobs = list(sequence.logprobs or ())
-            if (
-                not tokens
-                or len(logprobs) != len(tokens)
-                or not all(map(math.isfinite, logprobs))
-            ):
-                raise RuntimeError("sampling returned invalid tokens or logprobs")
-            return tokens, logprobs
-
-        first_step_start = time.time()
-        sampling = training.save_weights_and_get_sampling_client()
-        step_timings: list[dict[str, float]] = []
-        for step in range(NUM_STEPS):
-            s: dict[str, float] = {}
-            with _stage(s, "sample"):
-                response_tokens, response_logprobs = sample(sampling)
-            response_text = tokenizer.decode(response_tokens)
-            reward = 1.0 if "4" in response_text else -1.0
-            prompt_targets = len(prompt) - 1
-            datum = types.Datum(
-                model_input=types.ModelInput.from_ints(prompt + response_tokens[:-1]),
-                loss_fn_inputs={
-                    "target_tokens": [0] * prompt_targets + response_tokens,
-                    "logprobs": [0.0] * prompt_targets + response_logprobs,
-                    "advantages": [0.0] * prompt_targets
-                    + [reward] * len(response_tokens),
-                },
-            )
-            with _stage(s, "forward_backward"):
-                training.forward_backward([datum], "importance_sampling").result()
-            with _stage(s, "optim_step"):
-                optim = training.optim_step(
-                    types.AdamParams(learning_rate=1e-5)
-                ).result()
-                if optim.metrics["update_successful:mean"] != 1.0:
-                    raise RuntimeError(
-                        f"optim_step skipped the update: {optim.metrics}"
-                    )
-            with _stage(s, "save weights"):
-                sampling = training.save_weights_and_get_sampling_client()
-            step_timings.append(s)
-            if step == 0:
-                timings["first step"] = time.time() - first_step_start
-            else:
-                for name in s:
-                    timings[name] = statistics.mean(d[name] for d in step_timings[1:])
+        run_script(script, frontend_url())
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-        print(f"error: probe failed for {config}: {error}")
+        print(f"error: {script} failed: {error}")
 
     try:
         url = modal.App.lookup(
-            f"spindle-trainer-{recipe.name}", environment_name=MODAL_ENV
+            f"spindle-trainer-{recipe}", environment_name=MODAL_ENV
         ).get_dashboard_url()
     except Exception:
         url = None
     point = RunPoint(
         ts=started,
-        timings=timings,
+        timings={},
         total_duration_s=time.time() - started,
         status="failed" if error else "success",
         modal_app_url=url,
     )
-    return _row(config, point, _record(config, point), error)
+    return _row(script, point, _record(script, point), error)
 
 
 @app.function(
@@ -343,32 +368,32 @@ def monitor(config: str) -> dict:
 def launch_nightly() -> list[dict]:
     recipes = synmon_configs()
     names = [r.name for r in recipes]
+    script = random.choice(tuple(SCRIPTS))
+    print(f"synmon script: {script}")
     stop_worker_apps(names)
     deploy([DeploymentConfig.create(recipe) for recipe in recipes])
     rows: list[dict] = []
     try:
-        calls = {name: monitor.spawn(name) for name in CONFIGS}
+        call = monitor.spawn(script)
         start = time.time()
-        for name, call in calls.items():
-            try:
-                rows.append(
-                    call.get(timeout=max(0, start + CONFIGS[name] - time.time()))
-                )
-            except Exception as exc:
-                call.cancel()
-                error = f"{type(exc).__name__}: {str(exc) or f'did not finish within {CONFIGS[name]}s'}"
-                print(f"error: probe failed for {name}: {error}")
-                point = RunPoint(
-                    ts=start,
-                    timings={},
-                    total_duration_s=time.time() - start,
-                    status="failed",
-                )
-                rows.append(_row(name, point, _record(name, point), error))
+        timeout_s = SCRIPTS[script]["timeout_s"]
+        try:
+            rows.append(call.get(timeout=timeout_s))
+        except Exception as exc:
+            call.cancel()
+            error = f"{type(exc).__name__}: {str(exc) or f'did not finish within {timeout_s}s'}"
+            print(f"error: {script} failed: {error}")
+            point = RunPoint(
+                ts=start,
+                timings={},
+                total_duration_s=time.time() - start,
+                status="failed",
+            )
+            rows.append(_row(script, point, _record(script, point), error))
     finally:
         stop_worker_apps(names)
 
     _post_report(rows)
     if any(row["status"] != "success" for row in rows):
-        raise RuntimeError("synmon fan-out finished with failures")
+        raise RuntimeError("synmon finished with failures")
     return rows
