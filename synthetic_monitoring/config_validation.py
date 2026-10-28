@@ -1,7 +1,8 @@
 """Nightly synthetic monitoring for spindle.
 
-Deploys the recipes in CONFIGS, then runs one script from SCRIPTS against
-that server. Both scripts are existing client entrypoints.
+Picks one script from SCRIPTS and deploys only that script's recipe, capped at
+2×H200 for training and 2×B200 for inference. Both scripts are existing client
+entrypoints, with the client counts and sequence lengths reduced to fit.
 
 Test it out with:
 
@@ -14,6 +15,7 @@ TODO: change to shared env
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import subprocess
@@ -40,29 +42,39 @@ DAPO_DIR = "/opt/dapo-math"
 SWE_GYM = "/opt/modal-examples/06_gpu_and_ml/swe_gym/swe_gym.py"
 SWE_GYM_REV = "29c7c4929286d00903339ef863041592a99a2348"
 
+# Stopped at the start of a run so an older nightly cannot leave its pools up.
+# Only the chosen script's recipe is deployed.
 CONFIGS = (
     "qwen38-27b-lora-16k",
     "qwen35-9b-lora-128k",
     "qwen35-9b-lora-16k",
     "deepseek-v41-flash-lora-8k",
 )
-# The stock 16k recipe has six adapter slots and a 16k window. The DAPO
-# client opens eight adapters and samples inside a 32k window.
-DEPLOY_OVERRIDES = {
-    "qwen38-27b-lora-16k": {
-        "max_context_length": 32768,
-        "trainer_max_clients_per_instance": 8,
-        "miles_cfg.max_lora_slots": 8,
-        "miles_cfg.max_tokens_per_gpu": 18432,
-    },
+# One trainer node and at most two sampler replicas. 2×1 B200 is the inference cap.
+GPU_BUDGET = {
+    "max_context_length": 8192,
+    "trainer_gpu": "H200",
+    "trainer_gpus_per_node": 2,
+    "trainer_nodes": 1,
+    "trainer_max_instances": 1,
+    "trainer_max_clients_per_instance": 2,
+    "inference_gpu": "B200",
+    "inference_gpus_per_node": 1,
+    "inference_min_replicas": 1,
+    "inference_max_replicas": 2,
+    "miles_cfg.tensor_model_parallel_size": 2,
+    "miles_cfg.max_lora_slots": 2,
+    "miles_cfg.max_tokens_per_gpu": 8192,
+    "sglang_cfg.tp_size": 1,
+    "sglang_cfg.max_running_requests": 4,
 }
 # Same invocation for every entry: python <script> --clients N --steps N,
 # with TINKER_BASE_URL set to the deployed frontend.
 SCRIPTS = {
-    "dapo-math-8": {
-        "clients": 8,
+    "dapo-math": {
+        "clients": 2,
         "steps": 5,
-        "timeout_s": 6 * 60 * 60,
+        "timeout_s": 2 * 60 * 60,
         "recipe": "qwen38-27b-lora-16k",
         "argv": [
             "{python}",
@@ -75,14 +87,17 @@ SCRIPTS = {
             "gate",
             "--stagger-seconds",
             "10",
+            "--config",
+            "{config}",
             "--base-url",
             "{base_url}",
         ],
     },
     "swe-gym": {
-        "clients": 4,
+        "clients": 2,
         "steps": 5,
-        "timeout_s": 8 * 60 * 60,
+        "groups": 1,
+        "timeout_s": 3 * 60 * 60,
         "recipe": "qwen35-9b-lora-128k",
         "argv": [
             "{python}",
@@ -91,6 +106,8 @@ SCRIPTS = {
             "{clients}",
             "--steps",
             "{steps}",
+            "--groups-per-batch",
+            "{groups}",
             "--hours",
             "{hours}",
             "--output",
@@ -110,6 +127,9 @@ probe_image = (
         " https://github.com/modal-labs/modal-examples.git /opt/modal-examples"
         " && git -C /opt/modal-examples sparse-checkout set 06_gpu_and_ml/swe_gym"
         f" && git -C /opt/modal-examples checkout {SWE_GYM_REV}"
+        ' && sed -i \'s/"context_tokens": 131_072/"context_tokens": 8192/\' '
+        f"{SWE_GYM}"
+        f" && grep -q '\"context_tokens\": 8192' {SWE_GYM}"
     )
     .uv_sync(uv_project_dir=str(REPO_ROOT), extra_options="--no-dev")
     .uv_pip_install(
@@ -142,29 +162,57 @@ def synmon_configs(names=None):
                 overrides={
                     "platform.frontend": FRONTEND_NAME,
                     "platform.modal.environment": MODAL_ENV,
-                    **DEPLOY_OVERRIDES.get(recipe.name, {}),
+                    **GPU_BUDGET,
                 }
             )
         )
     return recipes
 
 
-def script_argv(name: str, *, base_url: str, output: str) -> list[str]:
+def recipes_for(script: str):
+    return synmon_configs([SCRIPTS[script]["recipe"]])
+
+
+def light_dapo_config(cfg: dict) -> dict:
+    """Short generations so a 27B step fits in the two-GPU trainer."""
+    updated = dict(cfg)
+    updated.update(
+        context_tokens=8192,
+        max_tokens=1024,
+        groups_per_update=1,
+        samples_per_group=4,
+        max_candidate_groups=4,
+        warmup_samples=1,
+    )
+    return updated
+
+
+def script_argv(
+    name: str, *, base_url: str, output: str, config: str = ""
+) -> list[str]:
     spec = SCRIPTS[name]
     fields = {
         "python": sys.executable,
         "clients": str(spec["clients"]),
         "steps": str(spec["steps"]),
+        "groups": str(spec.get("groups", 1)),
         "hours": str(spec["timeout_s"] / 3600),
         "base_url": base_url,
         "output": output,
+        "config": config,
     }
     return [part.format(**fields) for part in spec["argv"]]
 
 
 def run_script(name: str, base_url: str) -> None:
     output = tempfile.mkdtemp(prefix=f"synmon-{name}-")
-    command = script_argv(name, base_url=base_url, output=output)
+    config = ""
+    if name == "dapo-math":
+        source = json.loads((Path(DAPO_DIR) / "config.json").read_text())
+        dest = Path(output) / "config.json"
+        dest.write_text(json.dumps(light_dapo_config(source)))
+        config = str(dest)
+    command = script_argv(name, base_url=base_url, output=output, config=config)
     env = os.environ.copy()
     env["TINKER_BASE_URL"] = base_url
     print("running", " ".join(command))
@@ -366,11 +414,11 @@ def monitor(script: str) -> dict:
     secrets=[slack_secret],
 )
 def launch_nightly() -> list[dict]:
-    recipes = synmon_configs()
-    names = [r.name for r in recipes]
     script = random.choice(tuple(SCRIPTS))
     print(f"synmon script: {script}")
-    stop_worker_apps(names)
+    recipes = recipes_for(script)
+    # Drop pools from earlier nightlies that deployed every recipe.
+    stop_worker_apps(CONFIGS)
     deploy([DeploymentConfig.create(recipe) for recipe in recipes])
     rows: list[dict] = []
     try:
@@ -391,7 +439,7 @@ def launch_nightly() -> list[dict]:
             )
             rows.append(_row(script, point, _record(script, point), error))
     finally:
-        stop_worker_apps(names)
+        stop_worker_apps(CONFIGS)
 
     _post_report(rows)
     if any(row["status"] != "success" for row in rows):
