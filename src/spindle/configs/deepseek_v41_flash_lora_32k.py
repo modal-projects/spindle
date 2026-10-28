@@ -7,7 +7,7 @@ class Config(Parent):
     name = "deepseek-v41-flash-lora-32k"
     max_context_length = 32768
     overrides = {
-        "miles_cfg.tensor_model_parallel_size": 8,
+        "miles_cfg.tensor_model_parallel_size": 4,
         "miles_cfg.cli_options.make_vocab_size_divisible_by": 32,
     }
 
