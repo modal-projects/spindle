@@ -55,12 +55,16 @@ class DeploymentConfig(BaseModel):
                     f"{field} must be 0 or at least {MIN_EPHEMERAL_DISK_MIB}"
                 )
         routing = pinned.inference_lora_routing
-        if routing not in {"affinity", "cache_wait"}:
+        if routing not in {None, "affinity", "cache_wait"}:
             raise ValueError(f"unknown inference_lora_routing: {routing}")
         prefill_rate = pinned.inference_routing_prefill_tokens_per_second
-        if routing == "cache_wait" and (prefill_rate is None or prefill_rate <= 0):
+        if prefill_rate is not None and not (
+            isinstance(prefill_rate, (int, float))
+            and math.isfinite(prefill_rate)
+            and prefill_rate > 0
+        ):
             raise ValueError(
-                "cache_wait requires a positive inference_routing_prefill_tokens_per_second"
+                "inference_routing_prefill_tokens_per_second must be positive"
             )
         trainer_settings, inference_settings = resolve_backend_settings(
             pinned, f"/assets/{pinned.model_weights or pinned.model}"
@@ -71,7 +75,19 @@ class DeploymentConfig(BaseModel):
             inference_settings=_jsonable(inference_settings),
             spindle_version=__version__,
         )
+        recipe = deployment.recipe
+        if routing is None:
+            routing = (
+                "cache_wait"
+                if recipe.parameterization == "lora"
+                and _one_data_parallel_rank(deployment)
+                else "affinity"
+            )
+            recipe.inference_lora_routing = routing
         if routing == "cache_wait":
+            if recipe.inference_routing_balance_absolute is None:
+                running = deployment.inference_settings["max_running_requests"]
+                recipe.inference_routing_balance_absolute = max(4, round(0.4 * running))
             _validate_cache_wait(deployment)
         return deployment
 
@@ -175,13 +191,19 @@ class DeploymentConfig(BaseModel):
         )
 
 
+def _one_data_parallel_rank(deployment: DeploymentConfig) -> bool:
+    # SGLang's routing observer publishes nothing under data parallelism.
+    engines = (
+        deployment.recipe.inference_gpus_per_node
+        // deployment.rollout_tensor_parallel_size
+    )
+    return deployment.inference_settings.get("dp_size", 1) == 1 and engines == 1
+
+
 def _validate_cache_wait(deployment: DeploymentConfig) -> None:
     """Reject settings the router would refuse on every sample."""
     recipe = deployment.recipe
-    data_parallel = deployment.inference_settings.get("dp_size", 1)
-    engines = recipe.inference_gpus_per_node // deployment.rollout_tensor_parallel_size
-    if data_parallel != 1 or engines != 1:
-        # SGLang's routing observer publishes nothing under data parallelism.
+    if not _one_data_parallel_rank(deployment):
         raise ValueError("cache_wait requires one SGLang data-parallel rank")
     relative = recipe.inference_routing_balance_relative
     if (

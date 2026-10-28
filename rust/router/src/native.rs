@@ -21,6 +21,8 @@ const DELIVERIES_PER_ATTEMPT: u32 = 2;
 const MAX_TRANSPORT_FAILURES: u32 = 8;
 /// With nothing routable this long, Modal's gateway routes (and cold-starts)
 /// instead, so a pool without fresh observations degrades rather than hangs.
+/// Pools with no workers, or whose workers all publish no observations, use
+/// the gateway at once.
 const GATEWAY_FALLBACK: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Gateway stickiness headers; a pinned upstream replaces them.
@@ -32,7 +34,7 @@ struct Config {
     headers: HashMap<String, String>,
     policy: String,
     capacity: usize,
-    prefill_tokens_per_second: f64,
+    prefill_tokens_per_second: Option<f64>,
     balance_absolute: usize,
     balance_relative: f64,
     cache_threshold: f64,
@@ -47,6 +49,9 @@ struct Service {
     scheduler: Arc<Mutex<Router>>,
     workers: Arc<Mutex<Vec<Worker>>>,
     discovered: Arc<AtomicBool>,
+    /// Upstreams whose latest poll answered without observations.
+    unobservable: Arc<Mutex<HashSet<String>>>,
+    measure_prefill: bool,
     client: reqwest::Client,
     gateway: String,
     headers: HashMap<String, String>,
@@ -74,6 +79,35 @@ struct Routed {
     routing: Option<String>,
 }
 type Reply = Result<Routed, (u16, String)>;
+/// SGLang reports these per request when metrics are enabled.
+#[derive(Deserialize)]
+struct Completion {
+    meta_info: Timing,
+}
+#[derive(Deserialize)]
+struct Timing {
+    prompt_tokens: usize,
+    #[serde(default)]
+    cached_tokens: usize,
+    forward_entry_time: f64,
+    prefill_finished_time: f64,
+    #[serde(default)]
+    num_retractions: usize,
+}
+/// A retracted request restarts prefill, so its timestamps span two prefills.
+fn prefill_sample(body: &[u8]) -> Option<(usize, f64)> {
+    let t = serde_json::from_slice::<Completion>(body).ok()?.meta_info;
+    (t.num_retractions == 0).then(|| {
+        (
+            t.prompt_tokens.saturating_sub(t.cached_tokens),
+            t.prefill_finished_time - t.forward_entry_time,
+        )
+    })
+}
+enum Polled {
+    Row(Box<Replica>),
+    Unobservable,
+}
 fn error(status: u16, message: &str) -> (u16, String) {
     (status, message.into())
 }
@@ -150,9 +184,12 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             }
             if d.status == "unavailable" {
                 let since = *unavailable_since.get_or_insert_with(Instant::now);
-                let no_workers =
-                    s.discovered.load(Ordering::Acquire) && s.workers.lock().unwrap().is_empty();
-                if no_workers || since.elapsed() >= GATEWAY_FALLBACK {
+                let unobservable = s.discovered.load(Ordering::Acquire) && {
+                    let workers = s.workers.lock().unwrap();
+                    let unobservable = s.unobservable.lock().unwrap();
+                    workers.iter().all(|w| unobservable.contains(&w.upstream))
+                };
+                if unobservable || since.elapsed() >= GATEWAY_FALLBACK {
                     break Decision::gateway();
                 }
             } else {
@@ -166,9 +203,10 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             id: id.clone(),
             outcome: Outcome::Released,
         };
+        let prefill_rate = s.scheduler.lock().unwrap().prefill_rate();
         let route = json!({"policy":s.policy,"reason":decision.reason,"available_replicas":decision.available_replicas,
             "cached_tokens":decision.cached_tokens,"best_cached_tokens":decision.best_cached_tokens,
-            "wait_s":admission_seconds});
+            "wait_s":admission_seconds,"prefill_tokens_per_second":prefill_rate});
         g.body["rid"] = json!(id);
         let mut headers = HeaderMap::new();
         for (k, v) in s.headers.iter().chain(g.headers.iter()) {
@@ -270,6 +308,11 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                         routing: Some(route.to_string()),
                     };
                     if !retry {
+                        if s.measure_prefill && (200..300).contains(&status) {
+                            if let Some((tokens, seconds)) = prefill_sample(&routed.body) {
+                                s.scheduler.lock().unwrap().record_prefill(tokens, seconds);
+                            }
+                        }
                         return Ok(routed);
                     }
                     last = Some(routed);
@@ -300,7 +343,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 }
-async fn poll(s: Service, worker: Worker) -> Option<Replica> {
+async fn poll(s: Service, worker: Worker) -> Option<Polled> {
     let started = Instant::now();
     let mut req = s
         .client
@@ -312,16 +355,30 @@ async fn poll(s: Service, worker: Worker) -> Option<Replica> {
     }
     let response = req.send().await.ok()?.error_for_status().ok()?;
     let bytes = response.bytes().await.ok()?;
-    let mut row: Replica = tokio::task::spawn_blocking(move || serde_json::from_slice(&bytes))
-        .await
-        .ok()?
-        .ok()?;
-    if row.replica != worker.replica {
-        return None;
-    }
-    row.work.age_seconds += started.elapsed().as_secs_f64();
-    row.upstream = worker.upstream;
-    Some(row)
+    let expected = worker.replica.clone();
+    let polled = tokio::task::spawn_blocking(move || {
+        let value: Value = serde_json::from_slice(&bytes).ok()?;
+        if value.get("replica").and_then(Value::as_str) != Some(expected.as_str()) {
+            return None;
+        }
+        // The worker answered but its cache publishes nothing to route by.
+        if value.get("work").is_none_or(Value::is_null) {
+            return Some(Polled::Unobservable);
+        }
+        serde_json::from_value(value)
+            .ok()
+            .map(|row| Polled::Row(Box::new(row)))
+    })
+    .await
+    .ok()??;
+    Some(match polled {
+        Polled::Row(mut row) => {
+            row.work.age_seconds += started.elapsed().as_secs_f64();
+            row.upstream = worker.upstream;
+            Polled::Row(row)
+        }
+        unobservable => unobservable,
+    })
 }
 /// Each worker is polled on its own cadence and its row installed on arrival,
 /// so a slow or unreachable worker never ages the others' observations.
@@ -336,14 +393,21 @@ async fn observe(s: Service) {
             _ = s.notify.notified() => {}
             _ = tick.tick() => {}
             Some(done) = tasks.join_next_with_id(), if !tasks.is_empty() => {
-                let (id, row) = match done {
-                    Ok((id, row)) => (id, row),
+                let (id, polled) = match done {
+                    Ok((id, polled)) => (id, polled),
                     Err(e) => (e.id(), None),
                 };
-                polling.remove(&id);
-                if let Some(row) = row {
-                    let snapshot = Snapshot::new(vec![row], Instant::now());
-                    s.scheduler.lock().unwrap().install_snapshot(snapshot);
+                let Some(upstream) = polling.remove(&id) else { continue };
+                match polled {
+                    Some(Polled::Row(row)) => {
+                        s.unobservable.lock().unwrap().remove(&upstream);
+                        let snapshot = Snapshot::new(vec![*row], Instant::now());
+                        s.scheduler.lock().unwrap().install_snapshot(snapshot);
+                    }
+                    Some(Polled::Unobservable) => {
+                        s.unobservable.lock().unwrap().insert(upstream);
+                    }
+                    None => {}
                 }
                 continue;
             }
@@ -389,6 +453,8 @@ impl NativeRuntime {
             scheduler: Arc::new(Mutex::new(scheduler)),
             workers: Arc::new(Mutex::new(vec![])),
             discovered: Arc::new(AtomicBool::new(false)),
+            unobservable: Arc::new(Mutex::new(HashSet::new())),
+            measure_prefill: c.prefill_tokens_per_second.is_none(),
             client,
             gateway: c.gateway.trim_end_matches('/').into(),
             headers: c.headers,

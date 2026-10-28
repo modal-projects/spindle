@@ -46,19 +46,20 @@ def worker():
             replica = self.replica()
             observation = state.get("observations", {}).get(replica, {})
             time.sleep(observation.get("delay", 0))
+            work = dict(
+                age_seconds=observation.get("age", 0),
+                prefixes=[],
+                prefix_nodes=[],
+                cpu_adapters=["adapter/v1"],
+                gpu_adapters=["adapter/v1"],
+                pending_adapters=[],
+                request_ids=[],
+            )
             self.reply(
                 dict(
                     replica=replica,
                     active=state["active"],
-                    work=dict(
-                        age_seconds=observation.get("age", 0),
-                        prefixes=[],
-                        prefix_nodes=[],
-                        cpu_adapters=["adapter/v1"],
-                        gpu_adapters=["adapter/v1"],
-                        pending_adapters=[],
-                        request_ids=[],
-                    ),
+                    work=None if observation.get("unobservable") else work,
                 ),
                 replica=replica,
             )
@@ -96,7 +97,10 @@ def worker():
                 return
             status = state["statuses"].pop(0) if state["statuses"] else 200
             self.reply(
-                {"meta_info": {"completion_tokens": 1}, "text": "ok"},
+                {
+                    "meta_info": {"completion_tokens": 1, **state.get("meta_info", {})},
+                    "text": "ok",
+                },
                 status,
                 replica=self.replica(),
             )
@@ -111,7 +115,7 @@ def worker():
     thread.join()
 
 
-def with_router(worker, test, *, headers=None):
+def with_router(worker, test, *, headers=None, prefill_tokens_per_second=1000.0):
     """Run `test(router)`, then require every reservation to be released."""
 
     async def run():
@@ -126,7 +130,7 @@ def with_router(worker, test, *, headers=None):
             headers=headers or {},
             policy="cache_wait",
             capacity=24,
-            prefill_tokens_per_second=1000.0,
+            prefill_tokens_per_second=prefill_tokens_per_second,
         )
         try:
             await test(router)
@@ -300,10 +304,18 @@ def test_a_slow_peer_does_not_stale_a_fast_replica(worker):
     with_router(worker, test)
 
 
-@pytest.mark.parametrize("observations", [{}, {"stale": {"age": 100}}])
-def test_unroutable_pools_fall_back_to_the_gateway(worker, observations):
-    # No workers (a pool at zero replicas) or no fresh observations (a pool
-    # without an observer): Modal's gateway picks or cold-starts a replica.
+@pytest.mark.parametrize(
+    "observations,seconds",
+    [
+        ({}, 1),
+        ({"unobservable": {"unobservable": True}}, 1),
+        ({"stale": {"age": 100}}, 7),
+    ],
+)
+def test_unroutable_pools_fall_back_to_the_gateway(worker, observations, seconds):
+    # No workers (a pool at zero replicas), workers whose cache publishes
+    # nothing, or no fresh observations: Modal's gateway picks or cold-starts
+    # a replica.
     worker["observations"] = observations
 
     async def test(router):
@@ -311,10 +323,30 @@ def test_unroutable_pools_fall_back_to_the_gateway(worker, observations):
         result = await dispatch(router, worker, timeout=10)
         assert result.response.status_code == 200
         assert result.routing["reason"] == "gateway_fallback"
-        assert time.monotonic() - started < (1 if not observations else 7)
+        assert time.monotonic() - started < seconds
         [(headers, _)] = worker["requests"]
         headers = {k.lower(): v for k, v in headers.items()}
         assert "modal-flash-upstream" not in headers
         assert headers["modal-session-id"] == "session"
 
     with_router(worker, test)
+
+
+@pytest.mark.parametrize("configured,measured", [(None, 8192), (1000.0, 1000)])
+def test_an_unset_prefill_rate_is_measured_from_completed_requests(
+    worker, configured, measured
+):
+    # 4,096 uncached prompt tokens prefilled in half a second.
+    worker["meta_info"] = dict(
+        prompt_tokens=5120,
+        cached_tokens=1024,
+        forward_entry_time=100.0,
+        prefill_finished_time=100.5,
+    )
+
+    async def test(router):
+        await dispatch(router, worker, request_id="first")
+        second = await dispatch(router, worker, request_id="second")
+        assert second.routing["prefill_tokens_per_second"] == measured
+
+    with_router(worker, test, prefill_tokens_per_second=configured)

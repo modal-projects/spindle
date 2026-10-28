@@ -7,7 +7,12 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Added
 
 - Qwen3.8-27B LoRA recipe with B200 samplers, `qwen38_27b_lora_16k_b200`, which serves with the TensorRT-LLM attention backend and 64-token pages (#145).
-- LoRA samplers can route each request to the replica with its longest cached prefix with `inference_lora_routing = "cache_wait"`, while keeping request load and pinned KV memory within bounds. The router runs in Rust inside each sampling container. It needs `inference_routing_prefill_tokens_per_second`, and `inference_routing_balance_absolute`, `inference_routing_balance_relative` and `inference_routing_cache_threshold` tune it. Pools without routable replicas, including pools scaled to zero, fall back to Modal's gateway routing. Modal session affinity remains the default (#121, #122, #123).
+- LoRA samplers can route each request to the replica with its longest cached prefix with `inference_lora_routing = "cache_wait"`, while keeping request load and pinned KV memory within bounds. The router runs in Rust inside each sampling container. It measures the pool's prefill rate from completed requests unless `inference_routing_prefill_tokens_per_second` sets it, and `inference_routing_balance_absolute`, `inference_routing_balance_relative` and `inference_routing_cache_threshold` tune it. Pools without routable replicas, including pools scaled to zero and pools whose SGLang cache publishes no observations, fall back to Modal's gateway routing (#121, #122, #123).
+
+### Changed
+
+- LoRA recipes use `cache_wait` routing by default when SGLang runs one data-parallel rank, and Modal session affinity otherwise. `inference_lora_routing = "affinity"` keeps session affinity. `inference_routing_balance_absolute` defaults to 40% of `max_running_requests`, and at least 4 (#123).
+- LoRA samplers enable SGLang's CSGMV split-K kernel. For rank-32 adapters on models with 4,096-wide hidden layers, such as Qwen3.5-9B and Qwen3-8B, it speeds up the LoRA kernels for decode-sized batches by up to 2.9× on H200 and 2.6× on B200. Set `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=0` in `inference_env` to disable it (#123).
 
 ## 0.1.2 - 2026-10-27
 

@@ -298,7 +298,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         volumes=volumes_for(platform),
         secrets=secrets_for(platform),
         env=deployment_env(
-            recipe.inference_env
+            # Split-K speeds up decode-sized LoRA batches on H200 and B200.
+            ({"SGLANG_ENABLE_LORA_CSGMV_SPLIT_K": "1"} if lora else {})
+            | recipe.inference_env
             | (
                 {
                     "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
