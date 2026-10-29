@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import time
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,6 +24,18 @@ from .request_replay import RequestReplay
 
 
 ABORT_TIMEOUT_SECONDS = 2.0
+ROUTING_CATALOG_PATH = Path("/tmp/spindle-routing-work.json")
+ROUTING_CATALOG_REFRESH_SECONDS = 0.5
+
+
+def _routing_adapter(payload: dict) -> str:
+    """Exact pins are known before load; other requests use the resolved path."""
+    constraint = VersionConstraint.from_payload(payload)
+    run_id = payload.get("weight_run_id")
+    if run_id is not None and constraint.exact_version is not None:
+        return VersionRef(str(run_id), constraint.exact_version).identity
+    return payload.get("lora_path", "base")
+
 
 FETCH_METRICS_TIMEOUT_SECONDS = 2.0
 
@@ -45,6 +60,10 @@ def create_app(
         app.state.adapter_lock = asyncio.Lock()
         app.state.registered_adapters = {}
         app.state.adapter_resolutions = {}
+        app.state.routing_requests = {}
+        app.state.request_work = {}
+        app.state.routing_catalog = {}
+        app.state.routing_read_at = 0.0
         app.state.request_replay = RequestReplay()
         try:
             yield
@@ -71,6 +90,58 @@ def create_app(
             status_code=response.status_code,
             media_type=response.headers.get("content-type"),
         )
+
+    @app.get("/routing-state")
+    async def routing_state():
+        now = time.monotonic()
+        if now - app.state.routing_read_at > ROUTING_CATALOG_REFRESH_SECONDS:
+            app.state.routing_read_at = now
+            try:
+                app.state.routing_catalog = json.loads(
+                    await asyncio.to_thread(ROUTING_CATALOG_PATH.read_text)
+                )
+            except (OSError, ValueError):
+                app.state.routing_catalog = {}
+        snapshot = app.state.routing_catalog
+        pending_adapters = sorted(set(app.state.routing_requests.values()))
+        work = None
+        if snapshot:
+            rows = {
+                row["rid"]: row
+                for row in snapshot["requests"]
+                if row["rid"] in app.state.routing_requests
+            }
+            rows.update(
+                (rid, row)
+                for rid, row in app.state.request_work.items()
+                if rid not in rows
+            )
+            work = dict(
+                age_seconds=time.time() - snapshot["timestamp"],
+                prefixes=snapshot["prefixes"],
+                cpu_adapters=snapshot["cpu_adapters"],
+                gpu_adapters=snapshot["gpu_adapters"],
+                request_ids=list(rows),
+                pending_adapters=pending_adapters,
+                prefill_tokens=sum(row["prefill_tokens"] for row in rows.values()),
+                decode_tokens=sum(row["decode_tokens"] for row in rows.values()),
+                snapshot_seconds=snapshot["snapshot_seconds"],
+                cache_kind=snapshot["cache_kind"],
+                running_requests=snapshot["running_requests"],
+                waiting_requests=snapshot["waiting_requests"],
+                kv_used_tokens=snapshot.get("kv_used_tokens", 0),
+                kv_capacity_tokens=snapshot.get("kv_capacity_tokens", 0),
+            )
+        return {
+            "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "active": len(app.state.routing_requests),
+            "adapters": dict(Counter(app.state.routing_requests.values())),
+            "request_ids": list(app.state.routing_requests),
+            "pending_adapters": pending_adapters,
+            "cpu_adapters": snapshot.get("cpu_adapters", []),
+            "age_seconds": time.time() - snapshot["timestamp"] if snapshot else None,
+            "work": work,
+        }
 
     @app.get("/health")
     async def health() -> Response:
@@ -99,7 +170,36 @@ def create_app(
         response.headers["x-spindle-replica"] = os.environ.get("MODAL_TASK_ID", "local")
         return response
 
+    def remember_request(payload: dict, adapter: str | None = None) -> None:
+        rid = payload.get("rid")
+        if not isinstance(rid, str):
+            return
+        if adapter is None:
+            adapter = _routing_adapter(payload)
+        app.state.routing_requests[rid] = adapter
+        work = app.state.request_work.get(rid)
+        if work is None:
+            sampling = payload.get("sampling_params") or {}
+            app.state.request_work[rid] = dict(
+                rid=rid,
+                adapter=adapter,
+                prefill_tokens=len(payload.get("input_ids", ())),
+                decode_tokens=sampling.get("max_new_tokens", 1),
+            )
+        else:
+            work["adapter"] = adapter
+
     async def generate_once(payload: dict) -> Response:
+        rid = payload["rid"]
+        remember_request(payload)
+        try:
+            return await generate_response(payload)
+        finally:
+            if isinstance(rid, str):
+                app.state.routing_requests.pop(rid, None)
+                app.state.request_work.pop(rid, None)
+
+    async def generate_response(payload: dict) -> Response:
         run_id = payload.pop("weight_run_id", None)
         constraint = VersionConstraint.from_payload(payload)
         payload.pop("weight_version", None)
@@ -123,6 +223,7 @@ def create_app(
                     status_code=409,
                 )
 
+        remember_request(payload, payload.get("lora_path", "base"))
         response = await _post_generate(app.state.client, payload)
         try:
             body = response.json()

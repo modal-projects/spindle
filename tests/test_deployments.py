@@ -123,7 +123,7 @@ def test_deepseek_v41_lora_recipe():
         miles.context_parallel_size,
         miles.expert_model_parallel_size,
         miles.expert_tensor_parallel_size,
-    ) == (16, 4, 1, 16, 1)
+    ) == (16, 1, 1, 16, 1)
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
     assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
@@ -153,14 +153,27 @@ def test_deepseek_v41_lora_recipe():
     assert json.loads(serving["json_model_override_args"])["vision_n_layers"] == 0
 
 
-def test_deepseek_v41_lora_32k_recipe_shards_attention_across_tp8():
-    row = resolved(recipe("deepseek-v41-flash-lora-32k"))
+@pytest.mark.parametrize(
+    "name, tp",
+    [("deepseek-v41-flash-lora-32k", 4), ("deepseek-v41-flash-lora-32k-b300", 2)],
+)
+def test_deepseek_v41_lora_32k_recipes_keep_tensor_parallelism(name, tp):
+    row = resolved(recipe(name))
     miles = MilesBackendConfig(**row.trainer_settings["miles"])
     assert (miles.tensor_model_parallel_size, miles.expert_model_parallel_size) == (
-        8,
+        tp,
         16,
     )
     assert row.inference_settings["context_length"] == 32768
+
+
+@pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 4)])
+def test_deepseek_v41_1017_recipes_load_the_1017_release(context, tp):
+    row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert miles.tensor_model_parallel_size == tp
+    assert row.asset_path == "/assets/deepseek-ai/DeepSeek-V4.1-Flash-1017"
+    assert row.recipe.weights_revision == "1bae0e1088993b9b82de08f59de5be5a34e42170"
 
 
 def test_asset_paths_follow_the_model():
@@ -184,6 +197,65 @@ def test_model_weights_override_assets_but_not_the_served_model():
     assert row.trainer_settings["miles"]["hf_checkpoint"] == row.asset_path
     assert row.trainer_identity() != resolved().trainer_identity()
     assert row.inference_identity() != resolved().inference_identity()
+
+
+@pytest.mark.parametrize(
+    ("changes", "match"),
+    [
+        (dict(inference_lora_routing="nearest"), "unknown inference_lora_routing"),
+        (
+            dict(inference_routing_prefill_tokens_per_second=0),
+            "prefill_tokens_per_second",
+        ),
+        *(
+            (dict(inference_lora_routing="cache_wait", **change), match)
+            for change, match in [
+                (dict(sglang_cfg__dp_size=2), "data-parallel"),
+                (dict(inference_routing_balance_relative=0.5), "balance_relative"),
+                (dict(inference_routing_balance_absolute=-1), "balance_absolute"),
+                (dict(inference_routing_cache_threshold=1.5), "cache_threshold"),
+            ]
+        ),
+    ],
+)
+def test_invalid_routing_fails_at_deploy(changes, match):
+    with pytest.raises(ValueError, match=match):
+        resolved(**changes)
+
+
+@pytest.mark.parametrize(
+    ("preset", "changes", "routing"),
+    [
+        ("qwen35-9b-lora-16k", {}, "cache_wait"),
+        ("qwen35-9b-lora-16k", dict(sglang_cfg__dp_size=2), "affinity"),
+        ("qwen35-4b-fft-64k", {}, "affinity"),
+        ("qwen35-9b-lora-16k", dict(inference_lora_routing="affinity"), "affinity"),
+    ],
+)
+def test_lora_pools_with_one_data_parallel_rank_default_to_cache_wait(
+    preset, changes, routing
+):
+    row = resolved(recipe(preset, **changes))
+    assert row.recipe.inference_lora_routing == routing
+
+
+@pytest.mark.parametrize(
+    ("running", "absolute"), [(4, 4), (32, 13), (80, 32), (128, 51)]
+)
+def test_cache_wait_balance_scales_with_running_requests(running, absolute):
+    row = resolved(sglang_cfg__max_running_requests=running)
+    assert row.recipe.inference_routing_balance_absolute == absolute
+    assert row.recipe.inference_routing_prefill_tokens_per_second is None
+    configured = resolved(
+        sglang_cfg__max_running_requests=running, inference_routing_balance_absolute=7
+    )
+    assert configured.recipe.inference_routing_balance_absolute == 7
+
+
+def test_switching_routing_redeploys_the_pool():
+    # Only cache_wait pools run the observer.
+    affinity = resolved(inference_lora_routing="affinity")
+    assert affinity.inference_identity() != resolved().inference_identity()
 
 
 def test_trainer_image_is_part_of_trainer_identity():

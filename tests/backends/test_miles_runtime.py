@@ -1,12 +1,15 @@
 import asyncio
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 
 from spindle.backends.miles_runtime import runtime as miles_runtime
 from spindle.backends.miles_runtime.runtime import (
     MilesRuntime,
     _allow_context_parallel_multi_lora,
+    _array_bridge,
     _configure_actor_spec,
     _materialize_capture,
     _require_cluster_nodes,
@@ -200,3 +203,87 @@ def test_context_parallel_guard_restores_args_and_installs_once(fails):
         once(args)
     assert seen == [1]
     assert args.context_parallel_size == 8
+
+
+def test_array_bridge_keeps_the_miles_contract(monkeypatch):
+    """Rows go to the workers as arrays (RL fields as tensors, which Miles
+    slices per context-parallel rank) and come back ordered by sample index."""
+
+    class MilesBackend:
+        def __init__(self, trainer, router_url, dp_size=1):
+            self.trainer = trainer
+
+    def build_train_data(slot_datums):
+        rows = [row for _, row in slot_datums]
+        return {
+            "tokens": [row["tokens"] for row in rows],
+            "advantages": [row["advantages"] for row in rows],
+            "rollout_log_probs": [row["sampling_logprobs"] for row in rows],
+        }
+
+    store = SimpleNamespace(values=[], removed=[])
+    store.put = lambda value, value_spec: store.values.append(value) or 0
+    store.remove = store.removed.append
+    monkeypatch.setattr(
+        miles_runtime,
+        "tinker_runtime",
+        SimpleNamespace(
+            MilesBackend=MilesBackend,
+            _build_train_data=build_train_data,
+            ROLLOUT_DATA_VALUE_SPEC={},
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        miles_runtime,
+        "object_store",
+        SimpleNamespace(get_instance=lambda: store),
+        raising=False,
+    )
+
+    async def forward_backward(*, batch_id, data_ref):
+        per_datum = [
+            {
+                "sample_index": 1,
+                "loss": torch.tensor(2.0),
+                "logprobs": torch.full((2,), -2.0),
+            },
+            {
+                "sample_index": 0,
+                "loss": torch.tensor(1.0),
+                "logprobs": torch.full((3,), -1.0),
+            },
+        ]
+        return [{"per_datum": per_datum}, {"per_datum": per_datum}]
+
+    rows = [
+        (
+            0,
+            {
+                "tokens": np.arange(4),
+                "target_len": 3,
+                "advantages": np.ones(3, np.float32),
+                "sampling_logprobs": np.zeros(3, np.float32),
+            },
+        ),
+        (
+            1,
+            {
+                "tokens": np.arange(3),
+                "target_len": 2,
+                "advantages": np.ones(2, np.float32),
+                "sampling_logprobs": np.zeros(2, np.float32),
+            },
+        ),
+    ]
+    bridge = _array_bridge(SimpleNamespace(forward_backward=forward_backward))
+    outputs = asyncio.run(bridge._execute_batch("forward_backward", 1, rows, "ppo", {}))
+
+    (sent,) = store.values
+    assert [mask.tolist() for mask in sent["loss_masks"]] == [[1, 1, 1], [1, 1]]
+    assert all(isinstance(v, torch.Tensor) for v in sent["advantages"])
+    assert all(isinstance(v, torch.Tensor) for v in sent["rollout_log_probs"])
+    assert [o["loss"] for o in outputs] == [1.0, 2.0]
+    assert [o["logprobs"].tolist() for o in outputs] == [[-1.0] * 3, [-2.0] * 2]
+    assert outputs[0]["logprobs"].dtype == np.float32
+    assert store.removed == [0]

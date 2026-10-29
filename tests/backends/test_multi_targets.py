@@ -47,11 +47,11 @@ def test_mixed_shapes_alignment_and_outputs():
     rows = [row for _, row in prepared.slot_rows]
     assert len(rows) == 3  # Candidate labels do not duplicate model inputs.
     assert all(len(row["tokens"]) == 8 and row["target_len"] == 7 for row in rows)
-    assert rows[0]["tokens"][:3] == [1, 2, 3]
-    assert rows[1]["target_tokens"][:3] == [[2, 4], [3, 5], [4, 6]]
-    assert rows[1]["weights"] == [[1.0, 1.0]] * 3 + [[0.0, 0.0]] * 4
+    assert rows[0]["tokens"][:3].tolist() == [1, 2, 3]
+    assert rows[1]["target_tokens"][:3].tolist() == [[2, 4], [3, 5], [4, 6]]
+    assert rows[1]["weights"].tolist() == [[1.0, 1.0]] * 3 + [[0.0, 0.0]] * 4
     padded = pad_slot_rows(prepared.slot_rows, 4)
-    assert len(padded) == 4 and padded[-1][1]["weights"] == [0.0]
+    assert len(padded) == 4 and padded[-1][1]["weights"].tolist() == [0.0]
     raw = [
         {"loss": 1, "logprobs": [-1.0] * 7},
         {"loss": 2, "logprobs": [[-2.0, -3.0]] * 7},
@@ -157,6 +157,79 @@ def test_candidate_scores_and_gradients_share_logits(nested):
     assert len(calls) == (2 if nested else 1)
 
 
+@pytest.mark.parametrize("context_parallel_size", [1, 2])
+def test_candidate_columns_share_one_softmax_pass(context_parallel_size):
+    torch.manual_seed(5)
+    targets = [
+        torch.tensor([[1, 4, 6], [2, 5, 0]]),
+        torch.tensor([[3, 3, 7], [6, 1, 2]]),
+        torch.tensor([5, 2]),  # DP padding adds a 1-D row
+    ]
+    logits = torch.randn(3, 2, 8, requires_grad=True)
+    reference_logits = logits.detach().clone().requires_grad_()
+    calls = []
+
+    def single_target(args, batch, supplied_logits):
+        # Miles splices targets after the prompt and scores the response rows.
+        calls.append(batch["target_tokens"])
+        scores = []
+        for row, tokens, target in zip(
+            supplied_logits,
+            batch["unconcat_tokens"],
+            batch["target_tokens"],
+            strict=True,
+        ):
+            labels = torch.cat([tokens[: len(tokens) - len(target)], target])
+            scores.append(
+                math_utils.compute_log_probs(
+                    row.float().clone(), labels[-len(target) :], None
+                )
+            )
+        return scores
+
+    def single_label_log_probs(logits, tokens, group):
+        return logits.log_softmax(-1).gather(-1, tokens[:, None]).squeeze(-1)
+
+    math_utils = SimpleNamespace(compute_log_probs=single_label_log_probs)
+    losses = SimpleNamespace(
+        _target_logprobs=single_target,
+        _response_masks=lambda batch, _: batch["loss_masks"],
+    )
+    install_multi_target_hooks(losses, math_utils)
+    args = SimpleNamespace(
+        context_parallel_size=context_parallel_size,
+        allgather_cp=False,
+        true_on_policy_mode=False,
+    )
+    batch = {
+        "unconcat_tokens": [
+            torch.cat([torch.tensor([9]), t[:, 0] if t.ndim == 2 else t])
+            for t in targets
+        ],
+        "target_tokens": targets,
+    }
+    scores = losses._target_logprobs(args, batch, logits)
+    # One shared pass under CP=1; a 1-D row under CP keeps the per-column path.
+    assert len(calls) == (1 if context_parallel_size == 1 else 3)
+    weights = [torch.randn(target.shape) for target in targets]
+    sum(
+        (score * weight).sum() for score, weight in zip(scores, weights, strict=True)
+    ).backward()
+    expected_loss = 0
+    for row, target, weight, score in zip(
+        reference_logits, targets, weights, scores, strict=True
+    ):
+        expected = row.log_softmax(-1).gather(
+            -1, target if target.ndim == 2 else target[:, None]
+        )
+        if target.ndim == 1:
+            expected = expected.squeeze(-1)
+        torch.testing.assert_close(score, expected)
+        expected_loss = expected_loss + (expected * weight).sum()
+    expected_loss.backward()
+    torch.testing.assert_close(logits.grad, reference_logits.grad)
+
+
 def test_miles_v012_masks_and_outputs_keep_candidate_columns():
     def single_target(args, batch, logits):
         return [target.float() for target in batch["target_tokens"]]
@@ -206,7 +279,7 @@ def test_reported_1631_by_five_targets_use_one_prompt():
     _, row = prepared.slot_rows[0]
     assert len(row["tokens"]) == 1632
     assert row["target_len"] == 1631
-    assert row["target_tokens"][-1] == [2, 3, 4, 5, 6]
+    assert row["target_tokens"][-1].tolist() == [2, 3, 4, 5, 6]
 
 
 @pytest.mark.parametrize("loss_fn", ["importance_sampling", "ppo", "cispo", "dro"])
@@ -222,7 +295,7 @@ def test_multi_target_rl_inputs_keep_candidate_dimension(loss_fn):
     prepared = prepare_batch(batch, {"a": 0}, sequence_alignment=8)
     _, row = prepared.slot_rows[0]
     for name in ("advantages", "sampling_logprobs"):
-        assert row[name] == [[0.5, 0.5]] * 3 + [[0.0, 0.0]] * 4
+        assert row[name].tolist() == [[0.5, 0.5]] * 3 + [[0.0, 0.0]] * 4
 
 
 def test_sampling_support_requires_all_candidate_targets():
@@ -261,8 +334,8 @@ def test_sdk_sparse_encoding_of_mostly_zero_2d_inputs():
         items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
     )
     _, row = prepare_batch(batch, {"a": 0}).slot_rows[0]
-    assert row["target_tokens"] == targets.tolist()
-    assert row["weights"] == weights.tolist()
+    assert row["target_tokens"].tolist() == targets.tolist()
+    assert row["weights"].tolist() == weights.tolist()
 
 
 def test_sparse_row_pointers_must_cover_values():
@@ -325,4 +398,4 @@ def test_csr_duplicate_columns_follow_tensor_densification():
         items=(ForwardItem("a", (value,)),), loss_fn="cross_entropy", loss_fn_config={}
     )
     _, row = prepare_batch(batch, {"a": 0}).slot_rows[0]
-    assert row["weights"] == sparse.to_dense().tolist()
+    assert row["weights"].tolist() == sparse.to_dense().tolist()

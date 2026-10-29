@@ -28,9 +28,17 @@ image = (
         " && rm -rf /sgl-workspace/sglang/rust"
         " && cp -a /tmp/spindle-sglang-overlay/rust /sgl-workspace/sglang/rust"
         " && rm -rf /tmp/spindle-sglang-overlay",
+        # Bundle the fork's radix-tree binding so samplers load it in never mode.
         "python -c 'from sglang.srt.mem_cache.rust_tree_core.extension import bindings; "
+        'assert hasattr(bindings.RustUnifiedTreeCoreBinding, "routing_snapshot_delta"); '
+        "import pathlib, shutil; "
+        'shutil.copy(bindings.__file__, "/sgl-workspace/sglang/python/sglang/srt/mem_cache/rust_tree_core/" '
+        "+ pathlib.Path(bindings.__file__).name)'"
+        " && rm -rf /root/.cache/sglang/rust_extensions",
+        "SGLANG_RUST_BUILD_MODE=never python -c 'from sglang.srt.mem_cache.rust_tree_core.extension import bindings; "
         'assert hasattr(bindings.RustUnifiedTreeCoreBinding, "routing_snapshot_delta")\'',
     )
+    .env({"SGLANG_RUST_BUILD_MODE": "never"})
     .pip_install(*CORE_PACKAGES, STITCH_PACKAGE, TINKER_PACKAGE)
     .pip_install("huggingface-hub")
     .env(

@@ -1,16 +1,58 @@
 """Score alternative labels using the same model forward pass.
 
-Delegate each label column to Miles so its TP vocabulary reductions, CP sequence
-slicing, and sampling masks retain the same semantics as single-target scoring.
+Miles keeps its CP sequence slicing and TP vocabulary layout. When every datum has the same
+number of label columns, all columns go through Miles in one pass and share one softmax over
+the vocabulary. Otherwise each column is scored separately with single-target semantics.
 """
 
 from functools import wraps
 
 import torch
+import torch.distributed as dist
 
 
-def install_multi_target_hooks(tinker_losses) -> None:
+class CandidateLogProbs(torch.autograd.Function):
+    """Log probabilities of K label columns from vocabulary-parallel logits [T, V/TP].
+
+    Consumes ``logits`` in place, like Megatron's vocab-parallel cross entropy.
+    """
+
+    @staticmethod
+    def forward(ctx, logits, targets, group):
+        world = (
+            dist.get_world_size(group)
+            if group is not None and dist.is_initialized()
+            else 1
+        )
+        start = (dist.get_rank(group) if world > 1 else 0) * logits.size(-1)
+        logits_max = logits.max(dim=-1, keepdim=True).values
+        if world > 1:
+            dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=group)
+        logits.sub_(logits_max)
+        outside = (targets < start) | (targets >= start + logits.size(-1))
+        local = (targets - start).masked_fill(outside, 0)
+        picked = logits.gather(-1, local).masked_fill(outside, 0.0)
+        softmax = logits.exp_()
+        sum_exp = softmax.sum(dim=-1, keepdim=True)
+        if world > 1:
+            dist.all_reduce(picked, group=group)
+            dist.all_reduce(sum_exp, group=group)
+        softmax.div_(sum_exp)
+        ctx.save_for_backward(softmax, local, outside)
+        return picked - sum_exp.log()
+
+    @staticmethod
+    def backward(ctx, grad):
+        softmax, local, outside = ctx.saved_tensors
+        grad_logits = softmax.mul_(-grad.sum(dim=-1, keepdim=True))
+        grad_logits.scatter_add_(-1, local, grad.masked_fill(outside, 0.0))
+        return grad_logits, None, None
+
+
+def install_multi_target_hooks(tinker_losses, math_utils=None) -> None:
     original_target = tinker_losses._target_logprobs
+    if math_utils is not None:
+        _install_candidate_log_probs(math_utils)
 
     @wraps(original_target)
     def target_logprobs(args, batch, logits):
@@ -18,6 +60,39 @@ def install_multi_target_hooks(tinker_losses) -> None:
         if all(target.ndim == 1 for target in targets):
             return original_target(args, batch, logits)
         widths = [target.shape[1] if target.ndim == 2 else 1 for target in targets]
+        shared = {target.shape[1] for target in targets if target.ndim == 2}
+        width = max(shared)
+        if (
+            math_utils is not None
+            and shared == {width}
+            and width > 1
+            # A CP rank may own no rows of a short 1-D padding row; Miles hands back that
+            # shard as 1-D and the v0.1.1 CP gather would all-reduce mismatched shapes.
+            and (
+                args.context_parallel_size == 1
+                or all(target.ndim == 2 for target in targets)
+            )
+            and not args.allgather_cp
+            and not args.true_on_policy_mode
+            and "rollout_sampling_mask_ids" not in batch
+        ):
+            joint_batch = dict(batch)
+            joint_batch["unconcat_tokens"] = [
+                torch.as_tensor(tokens)[:, None].expand(-1, width)
+                for tokens in batch["unconcat_tokens"]
+            ]
+            joint_batch["target_tokens"] = [
+                target if target.ndim == 2 else target[:, None].expand(-1, width)
+                for target in targets
+            ]
+            scores = original_target(args, joint_batch, logits)
+            # An empty CP shard comes back 1-D.
+            return [
+                score.reshape(-1, width)
+                if target.ndim == 2
+                else score.reshape(-1, width)[:, 0]
+                for score, target in zip(scores, targets, strict=True)
+            ]
         columns = []
         for column in range(max(widths)):
             column_batch = dict(batch)
@@ -38,6 +113,24 @@ def install_multi_target_hooks(tinker_losses) -> None:
         _install_v012_hooks(tinker_losses)
     else:
         _install_v011_hooks(tinker_losses)
+
+
+def _install_candidate_log_probs(math_utils) -> None:
+    original = math_utils.compute_log_probs
+
+    @wraps(original)
+    def compute_log_probs(logits, tokens, process_group, **kwargs):
+        if tokens.ndim == 2:
+            if kwargs.get("sampling_mask") is not None or kwargs.get(
+                "true_on_policy_mode"
+            ):
+                raise ValueError(
+                    "candidate label scoring supports neither sampling masks nor true-on-policy mode"
+                )
+            return CandidateLogProbs.apply(logits, tokens, process_group)
+        return original(logits, tokens, process_group, **kwargs)
+
+    math_utils.compute_log_probs = compute_log_probs
 
 
 def _expand_masks(masks, log_probs):

@@ -639,6 +639,20 @@ def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     assert len(warmed) == 1
 
 
+def test_samplers_keep_sglang_caches_local_unless_the_recipe_moves_them(builders):
+    row = deployment()
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert "SGLANG_CACHE_DIR" not in app.servers["Server"][0]["env"]
+
+    row.recipe.inference_env = {"SGLANG_CACHE_DIR": "/tmp/sglang"}
+    app, _ = deployment_apps.build_rollout_app(
+        row, LoraPoolSpec(row.definition_id), image="test"
+    )
+    assert app.servers["Server"][0]["env"]["SGLANG_CACHE_DIR"] == "/tmp/sglang"
+
+
 def test_launchers_do_not_reparse_backend_config(builders, monkeypatch):
     row = deployment()
 

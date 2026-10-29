@@ -175,6 +175,21 @@ def record_attempt(event):
             "spindle.output_tokens": attrs.get("generated_tokens"),
             "http.response.status_code": attrs.get("http_status"),
             "error.type": attrs.get("error_type"),
+            # Only cache_wait pools dispatch through the native router.
+            "spindle.routing.policy": "cache_wait" if "routing" in attrs else None,
+            "spindle.routing.replica": attrs.get("selected_replica"),
+            "spindle.routing.wait_s": attrs.get("routing_wait_s"),
+            **{
+                f"spindle.routing.{k}": v
+                for k, v in attrs.get("routing", {}).items()
+                if k
+                in {
+                    "reason",
+                    "available_replicas",
+                    "best_cached_tokens",
+                    "cached_tokens",
+                }
+            },
             "sglang.request_id": attrs.get("sglang_request_id"),
             "sglang.queue_s": attrs.get("scheduler_queue_s"),
             "sglang.prefill_s": attrs.get("prefill_elapsed_s"),

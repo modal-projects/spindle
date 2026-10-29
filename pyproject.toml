@@ -36,6 +36,10 @@ spindle = ["skills/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.setuptools.data-files]
+"share/spindle/router" = ["rust/router/Cargo.toml", "rust/router/Cargo.lock", "rust/router/pyproject.toml"]
+"share/spindle/router/src" = ["rust/router/src/lib.rs", "rust/router/src/native.rs", "rust/router/src/cache_wait.rs"]
+
 [tool.ruff]
 extend-exclude = ["*.md", "src/spindle/proto/*_pb2.py"]
 

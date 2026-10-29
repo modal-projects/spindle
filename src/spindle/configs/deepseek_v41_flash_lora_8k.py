@@ -2,7 +2,11 @@ from spindle.configuration import BaseConfig
 
 
 class Config(BaseConfig):
-    """DeepSeek-V4.1-Flash LoRA on attention and the shared expert."""
+    """DeepSeek-V4.1-Flash LoRA on attention and the shared expert.
+
+    Trains without tensor parallelism, which fits 8K rows. Longer contexts
+    need it: see the 32K recipe before raising ``max_context_length``.
+    """
 
     name = "deepseek-v41-flash-lora-8k"
     model = "deepseek-ai/DeepSeek-V4.1-Flash"
@@ -22,7 +26,7 @@ class Config(BaseConfig):
     miles_cfg = {
         "model_type": "deepseek-v4.1",
         "megatron_to_hf_mode": "raw",
-        "tensor_model_parallel_size": 4,
+        "tensor_model_parallel_size": 1,
         "expert_model_parallel_size": 16,
         "expert_tensor_parallel_size": 1,
         "dynamic_batch_size": False,
@@ -81,10 +85,15 @@ class Config(BaseConfig):
     inference_startup_timeout_s = 7200
     inference_env = {
         "SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE": "1",
-        "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "shared",
+        "SGLANG_DSV41_ENGRAM_HOST_TABLE_LAYOUT": "per_rank",
         # Routed experts load as FP8 on every GPU; the FP4 expert kernels need Blackwell.
         "SGLANG_DSV4_FP4_EXPERTS": "1",
         "SGLANG_DSV4_FP4_DEQUANT": "1",
+        # Blackwell's multi-stream decode overlap races at 128 running requests.
+        "SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "0",
+        # Its MHC kernels take five minutes to compile, so keep them on the
+        # shared kernel-cache volume. Smaller models start faster with local caches.
+        "SGLANG_CACHE_DIR": "/root/.cache/kernel-cache/sglang",
     }
     sglang_cfg = {
         "tp_size": 8,
@@ -93,12 +102,12 @@ class Config(BaseConfig):
         "dtype": "bfloat16",
         "trust_remote_code": True,
         "mem_fraction_static": 0.9,
-        "model_loader_extra_config": {"enable_multithread_load": False},
+        "model_loader_extra_config": {"enable_multithread_load": True},
         "weight_loader_drop_cache_after_load": True,
         "weight_loader_disable_mmap": False,
         "disable_shared_experts_fusion": True,
-        "max_running_requests": 32,
-        "max_queued_requests": 8,
+        "max_running_requests": 128,
+        "max_queued_requests": 128,
         "max_loaded_loras": 8,
         "max_loras_per_batch": 4,
         "lora_strict_loading": True,

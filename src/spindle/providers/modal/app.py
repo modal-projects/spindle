@@ -70,6 +70,7 @@ from .lora_pool import (
     stop_pool as stop_lora_pool,
 )
 from .sampling import ModalSamplingTaskPlatform
+from .router_image import with_router
 from .trainer_reconciler import (
     TRANSIENT_POLL_ERRORS,
     complete_reconcile,
@@ -84,7 +85,9 @@ validate_frontend([definition.recipe for definition in DEFINITIONS])
 SETTINGS = DEFINITIONS[0]
 PLATFORM = platform_from_env()
 APP_NAME = PLATFORM["frontend"]
-ROUTING_REGION = PLATFORM["modal"]["region"]
+# Placement for the CPU-only frontend; trainers and samplers keep their own
+# (unpinned by default) placement.
+FRONTEND_REGION = PLATFORM["modal"]["region"] or "us-east"
 MODEL_ASSET_ROOT = "/assets"
 SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
 FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
@@ -97,6 +100,7 @@ _lora_pool_gateways: dict[str, tuple[float, str]] = {}
 _lora_pool_checks: dict[str, asyncio.Lock] = {}
 _weights_ready: set[str] = set()
 _weights_starts: dict[str, asyncio.Lock] = {}
+_routers = {}
 CHECKPOINT_VOLUME_NAME = PLATFORM["storage"]["checkpoints"]
 checkpoint_volume = modal.Volume.from_name(
     CHECKPOINT_VOLUME_NAME, create_if_missing=True, version=2
@@ -129,15 +133,25 @@ async def _delete_checkpoint(uri: str) -> None:
     ).delete(uri)
 
 
-image = (
+base_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .pip_install(*CORE_PACKAGES, TINKER_PACKAGE)
     .pip_install(STITCH_PACKAGE, "huggingface-hub")
-    .add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
-    .env(TRAINER_DEPLOYMENT_ENV)
-    .add_local_python_source("spindle", ignore=ignore_config_source)
 )
+
+
+def _frontend_image(base):
+    # The configs file changes on every deploy; keep it above slower layers.
+    return (
+        base.add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
+        .env(TRAINER_DEPLOYMENT_ENV)
+        .add_local_python_source("spindle", ignore=ignore_config_source)
+    )
+
+
+image = _frontend_image(base_image)
+sample_image = _frontend_image(with_router(base_image))
 
 
 @app.function(image=image)
@@ -402,7 +416,7 @@ async def _ready_lora_pool(spec: LoraPoolSpec) -> str:
 
 
 @app.function(
-    image=image,
+    image=sample_image,
     min_containers=0,
     timeout=60 * 60,
     retries=2,
@@ -433,6 +447,25 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
     if parameterization == "lora":
         spec = LoraPoolSpec(definition_id)
         gateway = await _ready_lora_pool(spec)
+        router = None
+        if definition.recipe.inference_lora_routing == "cache_wait":
+            if spec.app_name not in _routers:
+                # The Rust extension exists only in the Modal image; `modal
+                # deploy` imports this module locally.
+                from .router import create_router
+
+                settings = definition.inference_settings
+                _routers[spec.app_name] = create_router(
+                    spec.app_name,
+                    gateway,
+                    capacity=settings["max_running_requests"]
+                    + settings["max_queued_requests"],
+                    prefill_tokens_per_second=definition.recipe.inference_routing_prefill_tokens_per_second,
+                    balance_absolute=definition.recipe.inference_routing_balance_absolute,
+                    balance_relative=definition.recipe.inference_routing_balance_relative,
+                    cache_threshold=definition.recipe.inference_routing_cache_threshold,
+                )
+            router = _routers[spec.app_name]
 
         async def keep_pool_ready() -> None:
             # Retries can outlive the cached readiness check. The pool's URL
@@ -446,6 +479,7 @@ async def _execute_sample(task: dict, stats: dict) -> dict:
             headers=proxy_auth_headers(),
             context_length=definition.max_context_length,
             stop_token_ids_only=stop_token_ids_only,
+            router=router,
             on_wait=keep_pool_ready,
             stats=stats,
         )
@@ -710,7 +744,8 @@ def _plane():
 @app.function(
     image=image,
     name="server",
-    routing_region=ROUTING_REGION,
+    region=FRONTEND_REGION,
+    routing_region=FRONTEND_REGION,
     timeout=20 * 60,
     volumes={CHECKPOINT_ROOT: checkpoint_volume},
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],

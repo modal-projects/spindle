@@ -20,7 +20,7 @@ from spindle.backends.contract import (
     ModelSpec,
 )
 
-from .api import Command, OperationKind
+from .api import BATCHED_OPERATIONS, Command, OperationKind
 from .operations import (
     LoadCheckpointPayload,
     OperationPayload,
@@ -116,7 +116,7 @@ class DistributedExecutor:
         kind: OperationKind,
         payload: OperationPayload,
     ) -> object:
-        if kind == OperationKind.FORWARD_BACKWARD:
+        if kind in BATCHED_OPERATIONS:
             (result,) = await self.execute_forward_backward_batch(
                 (Command(model_id, kind, payload),)
             )
@@ -135,24 +135,6 @@ class DistributedExecutor:
                 },
             )
             return {"path": payload.uri, "type": "load_weights"}
-
-        if kind == OperationKind.FORWARD:
-            if not isinstance(payload, ForwardBackwardInput):
-                raise TypeError("forward requires a forward payload")
-            batch = ForwardBatch(
-                items=(ForwardItem(model_id, tuple(payload.data)),),
-                loss_fn=payload.loss_fn,
-                loss_fn_config=payload.loss_fn_config or {},
-                forward_only=True,
-            )
-            outputs = await asyncio.to_thread(
-                self._dispatch,
-                self.command_group,
-                "forward_backward",
-                (batch,),
-            )
-            (output,) = outputs
-            return _serialize_forward_output(output)
 
         if kind == OperationKind.OPTIM_STEP:
             if not isinstance(payload, AdamParams):
@@ -174,10 +156,11 @@ class DistributedExecutor:
     ) -> tuple[object, ...]:
         if not executions:
             raise ValueError("forward_backward batch cannot be empty")
-        if any(
-            execution.kind != OperationKind.FORWARD_BACKWARD for execution in executions
+        kind = executions[0].kind
+        if kind not in BATCHED_OPERATIONS or any(
+            execution.kind != kind for execution in executions
         ):
-            raise ValueError("batch contains a non-forward_backward operation")
+            raise ValueError("batch must contain only forward or only forward_backward")
         payloads: list[ForwardBackwardInput] = []
         for execution in executions:
             if not isinstance(execution.payload, ForwardBackwardInput):
@@ -206,6 +189,7 @@ class DistributedExecutor:
             ),
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
+            forward_only=kind == OperationKind.FORWARD,
         )
         outputs = await asyncio.to_thread(
             self._dispatch,
