@@ -199,7 +199,7 @@ async def train(
     initial_version=1,
     version_resolver=None,
     rollout_concurrency=None,
-    active_groups=None,
+    sampler_pool=None,
 ):
     rollout_worker = sample_trajectory if rollout_worker is None else rollout_worker
     output = Path(args.output)
@@ -227,9 +227,11 @@ async def train(
     rng.shuffle(order)
     next_task = 0
     sequence = 0
-    # active_groups and weights stay shared with the sampler opener. A group
-    # that becomes ready later is appended to both before the next assignment.
-    groups = list(gateways) if active_groups is None else active_groups
+
+    def assign_groups():
+        if sampler_pool is None:
+            return list(gateways), weights
+        return sampler_pool.assignment()
 
     async def producer():
         nonlocal next_task, sequence
@@ -239,9 +241,8 @@ async def train(
             group_number = sequence
             sequence += 1
             requested_version = version
-            assignments = rng.choices(
-                groups, weights=weights, k=TRAJECTORIES_PER_PROMPT
-            )
+            names, rates = assign_groups()
+            assignments = rng.choices(names, weights=rates, k=TRAJECTORIES_PER_PROMPT)
             if cache is not None and group_number in cache["prompts"]:
                 assignments = cache["prompts"][group_number]["groups"]
             event(
@@ -339,6 +340,10 @@ async def train(
     producers = [asyncio.create_task(producer()) for _ in range(args.inflight_prompts)]
     try:
         for step in range(args.start_step + 1, args.start_step + args.steps + 1):
+            if sampler_pool is not None:
+                error = sampler_join_error(sampler_pool, args, step=step)
+                if error is not None:
+                    raise RuntimeError(error)
             cycle_started = time.time()
             batch = []
             for _ in range(PROMPTS_PER_UPDATE):
@@ -491,6 +496,10 @@ async def train(
                     json.dumps({"step": step, "path": checkpoint.path})
                 )
                 event("checkpoint", step=step, path=checkpoint.path)
+        if sampler_pool is not None:
+            error = sampler_join_error(sampler_pool, args, finished=True)
+            if error is not None:
+                raise RuntimeError(error)
     finally:
         for producer in producers:
             producer.cancel()
@@ -511,18 +520,25 @@ class ReadySamplers:
     def pending_names(self):
         return [self._pending[task] for task in self._pending]
 
+    def assignment(self):
+        return list(self.groups), list(self.weights)
+
     async def open(self, measurements):
         self._pending = {
             asyncio.create_task(measurement): name
             for name, measurement in measurements.items()
         }
-        while self._pending and not self.groups:
-            done, _ = await asyncio.wait(
-                set(self._pending), return_when=asyncio.FIRST_COMPLETED
-            )
-            self._take(done)
-        if not self.groups:
-            raise RuntimeError(f"no samplers became ready: {self.failures}")
+        try:
+            while self._pending and not self.groups:
+                done, _ = await asyncio.wait(
+                    set(self._pending), return_when=asyncio.FIRST_COMPLETED
+                )
+                self._take(done)
+            if not self.groups:
+                raise RuntimeError(f"no samplers became ready: {self.failures}")
+        except BaseException:
+            await self._cancel_pending()
+            raise
 
     async def adopt(self, on_change):
         try:
@@ -533,12 +549,26 @@ class ReadySamplers:
                 if self._take(done):
                     on_change()
         finally:
-            tasks = list(self._pending)
-            for task in tasks:
-                task.cancel()
-            self._pending.clear()
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            await self._cancel_pending()
+
+    async def _cancel_pending(self):
+        tasks = list(self._pending)
+        for task in tasks:
+            task.cancel()
+        self._pending.clear()
+        if not tasks:
+            return
+        drained = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(drained)
+        except asyncio.CancelledError:
+            await drained
+            raise
+
+    def _admit(self, name, row, rate):
+        self.capacity[name] = row
+        self.groups.append(name)
+        self.weights.append(rate)
 
     def _take(self, done):
         changed = False
@@ -549,9 +579,7 @@ class ReadySamplers:
                 rate = row["tokens_per_second"]
                 if not math.isfinite(rate) or rate <= 0:
                     raise RuntimeError(f"non-positive throughput: {rate}")
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
+            except (asyncio.CancelledError, Exception) as exc:
                 self.failures[name] = repr(exc)
                 changed = True
                 print(
@@ -565,9 +593,7 @@ class ReadySamplers:
                     flush=True,
                 )
                 continue
-            self.capacity[name] = row
-            self.groups.append(name)
-            self.weights.append(rate)
+            self._admit(name, row, rate)
             changed = True
             print(
                 json.dumps(
@@ -581,6 +607,35 @@ class ReadySamplers:
                 flush=True,
             )
         return changed
+
+
+def sampler_join_error(pool, args, *, step=None, finished=False):
+    """Return why a partial sampler mix should stop this run, if it should."""
+    require_all = getattr(args, "require_all_samplers", False)
+    join_steps = getattr(args, "sampler_join_steps", None)
+    if require_all and pool.failures:
+        return f"sampler capacity checks failed: {pool.failures}"
+    pending = pool.pending_names()
+    if (
+        join_steps is not None
+        and step is not None
+        and step > args.start_step + join_steps
+        and pending
+    ):
+        return f"samplers still pending after {join_steps} updates: {pending}"
+    if finished and require_all and pending:
+        return f"samplers never joined: {pending}"
+    return None
+
+
+async def run_until_training_finishes(training, adopt):
+    """Run training without waiting for sampler measurements that are still pending."""
+    adopting = asyncio.create_task(adopt)
+    try:
+        await training
+    finally:
+        adopting.cancel()
+        await asyncio.gather(adopting, return_exceptions=True)
 
 
 async def run_with_sampler_validation(training, validation=None):
@@ -600,6 +655,22 @@ def main():
     parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--sampler-evidence", type=Path, nargs="+", default=[])
     parser.add_argument("--initial-rollout-cache", type=Path)
+    parser.add_argument(
+        "--require-all-samplers",
+        action="store_true",
+        help=(
+            "Fail the run if a sampler's capacity check fails or it never joins. "
+            "A fresh run still starts once one sampler is ready."
+        ),
+    )
+    parser.add_argument(
+        "--sampler-join-steps",
+        type=int,
+        default=None,
+        help=(
+            "Fail once this many updates have started while a sampler is still pending."
+        ),
+    )
     args = parser.parse_args()
     tasks = load_tasks()
     cache = (
@@ -728,7 +799,7 @@ def main():
                     )
 
                 record()
-                await run_with_sampler_validation(
+                await run_until_training_finishes(
                     train(
                         training,
                         gateways,
@@ -736,7 +807,7 @@ def main():
                         args,
                         tasks,
                         cache=cache,
-                        active_groups=pool.groups,
+                        sampler_pool=pool,
                     ),
                     pool.adopt(record),
                 )
