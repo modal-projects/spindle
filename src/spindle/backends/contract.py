@@ -19,6 +19,9 @@ LossFn = Literal[
     "cispo",
     "dro",
     "dppo",
+    "mis",
+    "score_centered",
+    "score_centered_mis",
 ]
 
 

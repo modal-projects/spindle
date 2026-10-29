@@ -403,8 +403,10 @@ submission, scheduling, and sampling. See [scoped runs](docs/scoped-runs.md) for
 recovery and custom engines on the full-parameter path.
 
 See the [raw Tinker RL example](scripts/rl_example.py) for sampling and a toy
-policy update. Copy examples you want to run into your project; repository
-`scripts/` are not installed with the package.
+policy update. [Score centering](examples/score-centering/README.md) is the same
+shape of script with the sampler's top-p support and `score_centered_mis`.
+Copy examples you want to run into your project; repository `scripts/` are not
+installed with the package.
 
 The [W&B RL example](scripts/wandb_rl_example.py) extends it to a multi-step
 loop that logs reward, response length, and Spindle's training metrics to Weights

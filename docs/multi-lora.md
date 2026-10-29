@@ -56,6 +56,11 @@ results = await asyncio.gather(*(
 ))
 ```
 
+Miles also accepts `mis`, `score_centered`, and `score_centered_mis` when the
+datum carries the sampler's support. Request `return_sampling_probabilities=True`
+and pass `sequence.replay.loss_fn_config()`. See `examples/score-centering` and
+[sampler replay](sampler-replay.md).
+
 ## Adapter publication via the Bulletin
 
 Unlike the FFT case, sampler publication is done with full-weights adapters, such that using the same rollout pool for both monotonic min-weight versioning and exact versioning is cheap. The entire rollout pool supports arbitrary weight-version sampling, using SGLang's LRU-based eviction mechanism per container. The amount of concurrent LoRAs cached in-container CPU and on GPU can be tuned via `ROLLOUT_MAX_LOADED_LORAS` (which corresponds to sglang's `--max-loaded-loras`) and `ROLLOUT_MAX_LORAS_PER_BATCH` (which corresponds to sglang's `--max-loras-per-batch`) respectively. 

@@ -215,3 +215,50 @@ def test_invalid_training_offsets_rejected(offsets):
     )
     with pytest.raises(ValueError, match="offsets"):
         _datum_row(datum, "ppo", 0)
+
+
+def test_support_probabilities_are_requested_as_sampling_logprobs_mode():
+    import math
+
+    sent = []
+
+    def handle(req):
+        sent.append(json.loads(req.content))
+        mask = [[5, 7], [6, 8, 9]]
+        rows = [
+            [math.log(0.4), math.log(0.6)],
+            [math.log(0.2), math.log(0.5), math.log(0.3)],
+        ]
+        meta = captured()
+        meta["output_token_sampling_mask"] = mask
+        meta["output_token_sampling_logprobs"] = rows
+        return httpx.Response(
+            200, json={"meta_info": meta, "text": "", "output_ids": [5, 6]}
+        )
+
+    result = asyncio.run(
+        sample_task(
+            {
+                "request_id": "r",
+                "payload": {
+                    "prompt": {
+                        "chunks": [{"type": "encoded_text", "tokens": [1, 2, 3]}]
+                    },
+                    "sampling_params": {"max_tokens": 2, "temperature": 0.7},
+                    "num_samples": 1,
+                    "return_sampling_probabilities": True,
+                },
+            },
+            "http://sampler",
+            transport=httpx.MockTransport(handle),
+        )
+    )
+    assert sent[0]["sampling_logprobs_mode"] == "support"
+    assert sent[0]["return_sampling_mask"] is True
+    assert "return_sampling_probabilities" not in sent[0]
+    replay = ReplaySampleResponse.model_validate(result).sequences[0].replay
+    inputs = replay.training_inputs(2)
+    assert inputs["sampling_mask_logprobs"].data == pytest.approx(
+        [math.log(0.4), math.log(0.6), math.log(0.2), math.log(0.5), math.log(0.3)]
+    )
+    assert inputs["logprobs"].data[-2:] == pytest.approx([math.log(0.4), math.log(0.2)])
