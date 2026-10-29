@@ -184,6 +184,10 @@ def test_deepseek_v41_long_context_recipes_fit_their_rows(name, layout, gpus):
     ) == layout
     assert row.recipe.trainer_gpu == gpus
     assert row.inference_settings["context_length"] == row.recipe.max_context_length
+    assert row.recipe.sglang_cfg["speculative_algorithm"] == "DSPARK"
+    assert row.recipe.sglang_cfg["mem_fraction_static"] == (
+        0.85 if name.endswith("128k") else 0.9
+    )
 
 
 @pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 4)])
