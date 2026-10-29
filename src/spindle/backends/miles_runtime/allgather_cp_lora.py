@@ -1,10 +1,6 @@
-"""Multi-LoRA batches under Miles' all-gather context parallelism with bshd rows.
-
-DeepSeek-V4.1 shards long rows across context-parallel ranks with all-gather CP.
-Miles refuses adapter slots in that mode because its packed (thd) layout has no
-per-row local lengths. With bshd and one row per micro-batch, every CP rank holds
-one contiguous chunk of each row, all the same length, so each row adds exactly
-that many tokens to its adapter's count.
+"""Miles rejects adapter slots under all-gather context parallelism. With bshd
+and one row per micro-batch, each CP rank holds one contiguous chunk of the row,
+so the row's adapter gets that chunk's length in tokens.
 """
 
 from __future__ import annotations

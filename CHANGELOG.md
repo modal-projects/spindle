@@ -7,7 +7,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Added
 
 - DeepSeek-V4.1-Flash LoRA recipes with longer context: `deepseek_v41_flash_lora_64k` trains on B300 or B200, and `deepseek_v41_flash_lora_128k` trains on B300 with each sequence split across two GPUs (context parallelism). H200 cannot hold a 64K training sequence for this model.
-- Miles LoRA trainers can use all-gather context parallelism (`allgather_cp`) with one sequence per micro-batch (`qkv_format: bshd`), which DeepSeek-V4.1 needs for long sequences.
+- LoRA trainers can split one long sequence across GPUs for models that need it, such as DeepSeek-V4.1 (Miles `allgather_cp` with `qkv_format: bshd`).
 
 ### Changed
 

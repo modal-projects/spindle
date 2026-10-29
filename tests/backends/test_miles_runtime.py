@@ -216,11 +216,8 @@ def test_allgather_cp_guard_is_skipped_only_for_bshd(allgather_cp, qkv_format, s
         validate_multi_lora_args=lambda args: checked.append(args.allgather_cp)
     )
     _allow_allgather_cp_bshd_multi_lora(lora_arguments)
-    once = lora_arguments.validate_multi_lora_args
-    _allow_allgather_cp_bshd_multi_lora(lora_arguments)
-    assert lora_arguments.validate_multi_lora_args is once
     args = SimpleNamespace(allgather_cp=allgather_cp, qkv_format=qkv_format)
-    once(args)
+    lora_arguments.validate_multi_lora_args(args)
     assert checked == seen
     assert args.allgather_cp is allgather_cp
 

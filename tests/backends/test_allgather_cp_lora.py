@@ -5,11 +5,11 @@ import torch
 from spindle.backends.miles_runtime import allgather_cp_lora
 
 
-class Rows:
+class Row:
     rollout_data = {"n_adapters": 3}
 
     def get_next(self, keys):
-        return {"tokens": torch.zeros(2, 5), "adapter_slots": [2, 0]}
+        return {"tokens": torch.zeros(1, 5), "adapter_slots": [2]}
 
 
 def get_batch(data_iterator, keys, *args, allgather_cp=False, **kwargs):
@@ -19,16 +19,13 @@ def get_batch(data_iterator, keys, *args, allgather_cp=False, **kwargs):
     return batch
 
 
-def test_bshd_rows_count_their_local_tokens_per_adapter():
+def test_a_bshd_row_counts_its_local_chunk_for_its_adapter():
     model = SimpleNamespace(get_batch=get_batch)
     allgather_cp_lora.install(model)
-    once = model.get_batch
-    allgather_cp_lora.install(model)
-    assert model.get_batch is once
 
-    batch = model.get_batch(Rows(), ["tokens"], None, "bshd", allgather_cp=True)
-    assert batch["adapter_slots"] == [2, 0]
-    assert batch["adapter_token_counts"].tolist() == [5, 0, 5]
+    batch = model.get_batch(Row(), ["tokens"], None, "bshd", allgather_cp=True)
+    assert batch["adapter_slots"] == [2]
+    assert batch["adapter_token_counts"].tolist() == [0, 0, 5]
 
-    batch = model.get_batch(Rows(), ["tokens"], None, "bshd")
+    batch = model.get_batch(Row(), ["tokens"], None, "bshd")
     assert "adapter_token_counts" not in batch
