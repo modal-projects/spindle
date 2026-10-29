@@ -63,3 +63,8 @@ def test_configured_trainers_point_compilers_at_the_kernel_cache() -> None:
         for key, value in KERNEL_CACHE_ENV.items():
             assert env[key] == value
         assert "SGLANG_CACHE_DIR" not in env
+
+
+def test_deepseek_v41_samplers_keep_sglang_caches_on_the_volume() -> None:
+    recipe = load(config_path("deepseek-v41-flash-lora-8k"))
+    assert recipe.inference_env["SGLANG_CACHE_DIR"].startswith(KERNEL_CACHE_ROOT + "/")
