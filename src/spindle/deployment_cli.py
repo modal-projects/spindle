@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 from concurrent.futures import Future
 from functools import partial
+from importlib import resources
 from pathlib import Path
 
 import modal
@@ -278,7 +280,52 @@ def parser():
     retry.add_argument("--frontend", required=True)
     retry.add_argument("--env")
     retry.add_argument("definition_id")
+    skills = commands.add_parser(
+        "skills", help="Manage the bundled agent skills"
+    ).add_subparsers(dest="action", required=True)
+    install = skills.add_parser(
+        "install", help="Install the bundled skills into a project"
+    )
+    install.add_argument(
+        "--project-dir",
+        type=Path,
+        help="Project root (default: nearest Git repository)",
+    )
+    install.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace existing skills and Claude links",
+    )
     return result
+
+
+def install_skills(project_dir: Path | None, force: bool) -> None:
+    if project_dir is None:
+        cwd = Path.cwd().resolve()
+        project_dir = next(
+            (p for p in (cwd, *cwd.parents) if (p / ".git").exists()), None
+        )
+        if project_dir is None:
+            raise ValueError("Run inside a Git repository or pass --project-dir.")
+    skills_dir = Path(resources.files("spindle") / "skills")
+    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+        source = skill_md.parent
+        destination = project_dir / ".agents" / "skills" / source.name
+        if destination.exists() and not force:
+            print(
+                f"Skipped {source.name}: {destination} exists; "
+                "use --force to replace it.",
+                file=sys.stderr,
+            )
+            continue
+        shutil.rmtree(destination, ignore_errors=True)
+        shutil.copytree(source, destination)
+        link = project_dir / ".claude" / "skills" / source.name
+        if link.is_symlink() or not link.exists():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.unlink(missing_ok=True)
+            link.symlink_to(os.path.relpath(destination, link.parent))
+        print(f"Installed {source.name} at {destination}")
 
 
 def main(argv=None):
@@ -336,6 +383,8 @@ def main(argv=None):
             )
             if chosen:
                 deploy_wizard.show_next_steps(console, chosen, frontend, environment)
+        elif args.command == "skills":
+            install_skills(args.project_dir, args.force)
         else:
             modal.Function.from_name(
                 args.frontend, "clear_deployment_failure", environment_name=args.env
