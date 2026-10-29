@@ -6,7 +6,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Changed
 
-- Samplers now keep their compiled kernels on the shared kernel-cache volume, like trainers. A DeepSeek-V4.1-Flash sampler with a warm cache starts nearly five minutes sooner.
+- DeepSeek-V4.1-Flash samplers keep their compiled kernels on the shared kernel-cache volume, like trainers, and start nearly five minutes sooner once the cache is warm. Other recipes can do the same by setting `SGLANG_CACHE_DIR` under `/root/.cache/kernel-cache` in `inference_env`.
 
 ## 0.1.3 - 2026-10-28
 

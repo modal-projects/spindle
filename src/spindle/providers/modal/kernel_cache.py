@@ -23,6 +23,3 @@ KERNEL_CACHE_ENV = {
     "TORCHINDUCTOR_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/inductor",
     "TILELANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/tilelang",
 }
-
-# Sampler only: the Miles trainer imports SGLang too and keeps its caches local.
-SAMPLER_KERNEL_CACHE_ENV = {"SGLANG_CACHE_DIR": f"{KERNEL_CACHE_ROOT}/sglang"}

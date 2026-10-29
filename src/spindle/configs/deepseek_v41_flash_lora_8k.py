@@ -91,6 +91,9 @@ class Config(BaseConfig):
         "SGLANG_DSV4_FP4_DEQUANT": "1",
         # Blackwell's multi-stream decode overlap races at 128 running requests.
         "SGLANG_OPT_USE_MULTI_STREAM_OVERLAP": "0",
+        # Its MHC kernels take five minutes to compile, so keep them on the
+        # shared kernel-cache volume. Smaller models start faster with local caches.
+        "SGLANG_CACHE_DIR": "/root/.cache/kernel-cache/sglang",
     }
     sglang_cfg = {
         "tp_size": 8,
