@@ -199,6 +199,7 @@ async def train(
     initial_version=1,
     version_resolver=None,
     rollout_concurrency=None,
+    sampler_pool=None,
 ):
     rollout_worker = sample_trajectory if rollout_worker is None else rollout_worker
     output = Path(args.output)
@@ -226,7 +227,11 @@ async def train(
     rng.shuffle(order)
     next_task = 0
     sequence = 0
-    groups = list(gateways)
+
+    def assign_groups():
+        if sampler_pool is None:
+            return list(gateways), weights
+        return sampler_pool.assignment()
 
     async def producer():
         nonlocal next_task, sequence
@@ -236,9 +241,8 @@ async def train(
             group_number = sequence
             sequence += 1
             requested_version = version
-            assignments = rng.choices(
-                groups, weights=weights, k=TRAJECTORIES_PER_PROMPT
-            )
+            names, rates = assign_groups()
+            assignments = rng.choices(names, weights=rates, k=TRAJECTORIES_PER_PROMPT)
             if cache is not None and group_number in cache["prompts"]:
                 assignments = cache["prompts"][group_number]["groups"]
             event(
@@ -336,6 +340,10 @@ async def train(
     producers = [asyncio.create_task(producer()) for _ in range(args.inflight_prompts)]
     try:
         for step in range(args.start_step + 1, args.start_step + args.steps + 1):
+            if sampler_pool is not None:
+                error = sampler_join_error(sampler_pool, args, step=step)
+                if error is not None:
+                    raise RuntimeError(error)
             cycle_started = time.time()
             batch = []
             for _ in range(PROMPTS_PER_UPDATE):
@@ -488,11 +496,146 @@ async def train(
                     json.dumps({"step": step, "path": checkpoint.path})
                 )
                 event("checkpoint", step=step, path=checkpoint.path)
+        if sampler_pool is not None:
+            error = sampler_join_error(sampler_pool, args, finished=True)
+            if error is not None:
+                raise RuntimeError(error)
     finally:
         for producer in producers:
             producer.cancel()
         await asyncio.gather(*producers, return_exceptions=True)
         events_file.close()
+
+
+class ReadySamplers:
+    """Capacity measurements that can join the rollout pool one group at a time."""
+
+    def __init__(self):
+        self.groups = []
+        self.weights = []
+        self.capacity = {}
+        self.failures = {}
+        self._pending = {}
+
+    def pending_names(self):
+        return [self._pending[task] for task in self._pending]
+
+    def assignment(self):
+        return list(self.groups), list(self.weights)
+
+    async def open(self, measurements):
+        self._pending = {
+            asyncio.create_task(measurement): name
+            for name, measurement in measurements.items()
+        }
+        try:
+            while self._pending and not self.groups:
+                done, _ = await asyncio.wait(
+                    set(self._pending), return_when=asyncio.FIRST_COMPLETED
+                )
+                self._take(done)
+            if not self.groups:
+                raise RuntimeError(f"no samplers became ready: {self.failures}")
+        except BaseException:
+            await self._cancel_pending()
+            raise
+
+    async def adopt(self, on_change):
+        try:
+            while self._pending:
+                done, _ = await asyncio.wait(
+                    set(self._pending), return_when=asyncio.FIRST_COMPLETED
+                )
+                if self._take(done):
+                    on_change()
+        finally:
+            await self._cancel_pending()
+
+    async def _cancel_pending(self):
+        tasks = list(self._pending)
+        for task in tasks:
+            task.cancel()
+        self._pending.clear()
+        if not tasks:
+            return
+        drained = asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await asyncio.shield(drained)
+        except asyncio.CancelledError:
+            await drained
+            raise
+
+    def _admit(self, name, row, rate):
+        self.capacity[name] = row
+        self.groups.append(name)
+        self.weights.append(rate)
+
+    def _take(self, done):
+        changed = False
+        for task in done:
+            name = self._pending.pop(task)
+            try:
+                row = task.result()
+                rate = row["tokens_per_second"]
+                if not math.isfinite(rate) or rate <= 0:
+                    raise RuntimeError(f"non-positive throughput: {rate}")
+            except (asyncio.CancelledError, Exception) as exc:
+                self.failures[name] = repr(exc)
+                changed = True
+                print(
+                    json.dumps(
+                        {
+                            "event": "sampler_unavailable",
+                            "group": name,
+                            "error": repr(exc),
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            self._admit(name, row, rate)
+            changed = True
+            print(
+                json.dumps(
+                    {
+                        "event": "sampler_ready",
+                        "group": name,
+                        "tokens_per_second": rate,
+                        "ready": list(self.groups),
+                    }
+                ),
+                flush=True,
+            )
+        return changed
+
+
+def sampler_join_error(pool, args, *, step=None, finished=False):
+    """Return why a partial sampler mix should stop this run, if it should."""
+    require_all = getattr(args, "require_all_samplers", False)
+    join_steps = getattr(args, "sampler_join_steps", None)
+    if require_all and pool.failures:
+        return f"sampler capacity checks failed: {pool.failures}"
+    pending = pool.pending_names()
+    if (
+        join_steps is not None
+        and step is not None
+        and step > args.start_step + join_steps
+        and pending
+    ):
+        return f"samplers still pending after {join_steps} updates: {pending}"
+    if finished and require_all and pending:
+        return f"samplers never joined: {pending}"
+    return None
+
+
+async def run_until_training_finishes(training, adopt):
+    """Run training without waiting for sampler measurements that are still pending."""
+    adopting = asyncio.create_task(adopt)
+    try:
+        await training
+    finally:
+        adopting.cancel()
+        await asyncio.gather(adopting, return_exceptions=True)
 
 
 async def run_with_sampler_validation(training, validation=None):
@@ -512,6 +655,22 @@ def main():
     parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--sampler-evidence", type=Path, nargs="+", default=[])
     parser.add_argument("--initial-rollout-cache", type=Path)
+    parser.add_argument(
+        "--require-all-samplers",
+        action="store_true",
+        help=(
+            "Fail the run if a sampler's capacity check fails or it never joins. "
+            "A fresh run still starts once one sampler is ready."
+        ),
+    )
+    parser.add_argument(
+        "--sampler-join-steps",
+        type=int,
+        default=None,
+        help=(
+            "Fail once this many updates have started while a sampler is still pending."
+        ),
+    )
     args = parser.parse_args()
     tasks = load_tasks()
     cache = (
@@ -558,66 +717,102 @@ def main():
                 stack.enter_context(app.run(environment_name="kailash-dev"))
                 gateways[group["name"]] = server.get_url()
 
-            async def capacities():
-                return await asyncio.gather(
+            def write_manifest(capacity, pending, failures):
+                manifest = {
+                    "model": config.model,
+                    "model_revision": config.model_revision,
+                    "dataset": DATASET,
+                    "dataset_revision": DATASET_REVISION,
+                    "groups": GROUPS,
+                    "capacity": capacity,
+                    "pending_samplers": pending,
+                    "unavailable_samplers": failures,
+                    "capacity_source": str(cache["path"]) if cache is not None else None,
+                    "compute_regions": {
+                        group["name"]: sampler_config(group).inference_region
+                        if sampler_config(group).inference_region is not None
+                        else config.platform["modal"]["region"]
+                        for group in GROUPS
+                    },
+                    "top_p": TOP_P,
+                    "temperature": TEMPERATURE,
+                    "lr": LEARNING_RATE,
+                    "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
+                    "model_id": training.model_id,
+                    "initial_publication": publication.path,
+                    "arguments": {
+                        k: [str(p) for p in v]
+                        if k == "sampler_evidence"
+                        else str(v)
+                        if isinstance(v, Path)
+                        else v
+                        for k, v in vars(args).items()
+                    },
+                }
+                Path(args.output).mkdir(parents=True, exist_ok=True)
+                (Path(args.output) / "manifest.json").write_text(
+                    json.dumps(manifest, indent=2)
+                )
+
+            async def validate_samplers():
+                measured = await asyncio.gather(
                     *(
                         measure_capacity.remote.aio(url, training.model_id, 1)
                         for url in gateways.values()
                     )
                 )
-
-            measured = (
-                [cache["capacity"][group] for group in gateways]
-                if cache is not None
-                else asyncio.run(capacities())
-            )
-            weights = [m["tokens_per_second"] for m in measured]
-            manifest = {
-                "model": config.model,
-                "model_revision": config.model_revision,
-                "dataset": DATASET,
-                "dataset_revision": DATASET_REVISION,
-                "groups": GROUPS,
-                "capacity": dict(zip(gateways, measured, strict=True)),
-                "capacity_source": str(cache["path"]) if cache is not None else None,
-                "compute_regions": {
-                    group["name"]: sampler_config(group).inference_region
-                    if sampler_config(group).inference_region is not None
-                    else config.platform["modal"]["region"]
-                    for group in GROUPS
-                },
-                "top_p": TOP_P,
-                "temperature": TEMPERATURE,
-                "lr": LEARNING_RATE,
-                "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
-                "model_id": training.model_id,
-                "initial_publication": publication.path,
-                "arguments": {
-                    k: [str(p) for p in v]
-                    if k == "sampler_evidence"
-                    else str(v)
-                    if isinstance(v, Path)
-                    else v
-                    for k, v in vars(args).items()
-                },
-            }
-            Path(args.output).mkdir(parents=True, exist_ok=True)
-            (Path(args.output) / "manifest.json").write_text(
-                json.dumps(manifest, indent=2)
-            )
-
-            async def validate_samplers():
-                measured = await capacities()
                 (Path(args.output) / "startup-validation.json").write_text(
                     json.dumps(dict(zip(gateways, measured, strict=True)), indent=2)
                 )
 
-            asyncio.run(
-                run_with_sampler_validation(
-                    train(training, gateways, weights, args, tasks, cache=cache),
-                    validate_samplers() if cache is not None else None,
+            async def run():
+                if cache is not None:
+                    measured = [cache["capacity"][group] for group in gateways]
+                    weights = [row["tokens_per_second"] for row in measured]
+                    write_manifest(
+                        dict(zip(gateways, measured, strict=True)),
+                        [],
+                        {},
+                    )
+                    await run_with_sampler_validation(
+                        train(
+                            training, gateways, weights, args, tasks, cache=cache
+                        ),
+                        validate_samplers(),
+                    )
+                    return
+                pool = ReadySamplers()
+                await pool.open(
+                    {
+                        name: measure_capacity.remote.aio(
+                            url, training.model_id, 1
+                        )
+                        for name, url in gateways.items()
+                    }
                 )
-            )
+
+                def record():
+                    write_manifest(
+                        dict(pool.capacity),
+                        pool.pending_names(),
+                        dict(pool.failures),
+                    )
+
+                record()
+                await run_until_training_finishes(
+                    train(
+                        training,
+                        gateways,
+                        pool.weights,
+                        args,
+                        tasks,
+                        cache=cache,
+                        sampler_pool=pool,
+                    ),
+                    pool.adopt(record),
+                )
+
+            asyncio.run(run())
     finally:
         try:
             response = httpx.post(
