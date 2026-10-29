@@ -167,6 +167,25 @@ def test_deepseek_v41_lora_32k_recipes_keep_tensor_parallelism(name, tp):
     assert row.inference_settings["context_length"] == 32768
 
 
+@pytest.mark.parametrize(
+    "name, layout, gpus",
+    [
+        ("deepseek-v41-flash-lora-64k", (8, 1, False), ["B300", "B200"]),
+        ("deepseek-v41-flash-lora-128k", (4, 2, True), "B300"),
+    ],
+)
+def test_deepseek_v41_long_context_recipes_fit_their_rows(name, layout, gpus):
+    row = resolved(recipe(name))
+    miles = MilesBackendConfig(**row.trainer_settings["miles"])
+    assert (
+        miles.tensor_model_parallel_size,
+        miles.context_parallel_size,
+        row.trainer_settings["miles"]["cli_options"].get("allgather_cp", False),
+    ) == layout
+    assert row.recipe.trainer_gpu == gpus
+    assert row.inference_settings["context_length"] == row.recipe.max_context_length
+
+
 @pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 4)])
 def test_deepseek_v41_1017_recipes_load_the_1017_release(context, tp):
     row = resolved(recipe(f"deepseek-v41-flash-1017-lora-{context}"))

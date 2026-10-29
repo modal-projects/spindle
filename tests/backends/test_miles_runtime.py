@@ -8,6 +8,7 @@ import torch
 from spindle.backends.miles_runtime import runtime as miles_runtime
 from spindle.backends.miles_runtime.runtime import (
     MilesRuntime,
+    _allow_allgather_cp_bshd_multi_lora,
     _allow_context_parallel_multi_lora,
     _array_bridge,
     _configure_actor_spec,
@@ -203,6 +204,25 @@ def test_context_parallel_guard_restores_args_and_installs_once(fails):
         once(args)
     assert seen == [1]
     assert args.context_parallel_size == 8
+
+
+@pytest.mark.parametrize(
+    "allgather_cp, qkv_format, seen",
+    [(True, "bshd", [False]), (True, "thd", [True]), (False, "bshd", [False])],
+)
+def test_allgather_cp_guard_is_skipped_only_for_bshd(allgather_cp, qkv_format, seen):
+    checked = []
+    lora_arguments = SimpleNamespace(
+        validate_multi_lora_args=lambda args: checked.append(args.allgather_cp)
+    )
+    _allow_allgather_cp_bshd_multi_lora(lora_arguments)
+    once = lora_arguments.validate_multi_lora_args
+    _allow_allgather_cp_bshd_multi_lora(lora_arguments)
+    assert lora_arguments.validate_multi_lora_args is once
+    args = SimpleNamespace(allgather_cp=allgather_cp, qkv_format=qkv_format)
+    once(args)
+    assert checked == seen
+    assert args.allgather_cp is allgather_cp
 
 
 def test_array_bridge_keeps_the_miles_contract(monkeypatch):

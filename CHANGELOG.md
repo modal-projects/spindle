@@ -4,6 +4,11 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Added
+
+- DeepSeek-V4.1-Flash LoRA recipes with longer context: `deepseek_v41_flash_lora_64k` trains on B300 or B200, and `deepseek_v41_flash_lora_128k` trains on B300 with each sequence split across two GPUs (context parallelism). H200 cannot hold a 64K training sequence for this model.
+- Miles LoRA trainers can use all-gather context parallelism (`allgather_cp`) with one sequence per micro-batch (`qkv_format: bshd`), which DeepSeek-V4.1 needs for long sequences.
+
 ### Changed
 
 - Sampler images set `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=1`. SGLang still applies split-K only to the BF16 rank-32 CSGMV shapes it measured, and never in deterministic mode. LoRA servers already set the same flag (#123); set it to `0` in `inference_env` to turn it off.
