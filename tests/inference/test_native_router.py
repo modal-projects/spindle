@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import contextmanager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,8 +14,8 @@ import pytest
 from spindle.inference.native_router import NativeRouter
 
 
-@pytest.fixture
-def worker():
+@contextmanager
+def worker_server():
     state = dict(
         active=0, requests=[], header_items=[], statuses=[], faults=[], delay=0
     )
@@ -25,7 +26,10 @@ def worker():
             pass
 
         def replica(self):
-            return self.headers.get("Modal-Flash-Upstream", "worker:8000").split(":")[0]
+            return (
+                state.get("replica")
+                or self.headers.get("Modal-Flash-Upstream", "worker:8000").split(":")[0]
+            )
 
         def reply(self, value, status=200, *, replica="worker", replay_state=None):
             data = json.dumps(value).encode()
@@ -43,6 +47,7 @@ def worker():
                 pass
 
         def do_GET(self):
+            state.setdefault("poll_headers", []).append(dict(self.headers))
             replica = self.replica()
             observation = state.get("observations", {}).get(replica, {})
             time.sleep(observation.get("delay", 0))
@@ -69,7 +74,10 @@ def worker():
             state["requests"].append((dict(self.headers), body))
             state["header_items"].append(self.headers.items())
             state["arrived"].set()
-            time.sleep(state["delay"])
+            if "barrier" in state:
+                state["barrier"].wait(timeout=3)
+            seed = body.get("sampling_params", {}).get("sampling_seed")
+            time.sleep(state.get("delays_by_seed", {}).get(seed, state["delay"]))
             fault = state["faults"].pop(0) if state["faults"] else None
             if fault in ("headers", "body"):
                 if fault == "body":
@@ -95,7 +103,9 @@ def worker():
                     replay_state=None if fault == "conflict" else fault,
                 )
                 return
-            status = state["statuses"].pop(0) if state["statuses"] else 200
+            status = state.get("statuses_by_seed", {}).get(
+                seed, state["statuses"].pop(0) if state["statuses"] else 200
+            )
             self.reply(
                 {
                     "meta_info": {"completion_tokens": 1, **state.get("meta_info", {})},
@@ -115,18 +125,28 @@ def worker():
     thread.join()
 
 
-def with_router(worker, test, *, headers=None, prefill_tokens_per_second=1000.0):
+@pytest.fixture
+def worker():
+    with worker_server() as state:
+        yield state
+
+
+def with_router(
+    worker, test, *, headers=None, prefill_tokens_per_second=1000.0, direct=False
+):
     """Run `test(router)`, then require every reservation to be released."""
 
     async def run():
         router = NativeRouter(
             AsyncMock(
                 return_value=[
-                    dict(replica=r, upstream=f"{r}:8000")
+                    dict(
+                        replica=r, upstream=worker["gateway"] if direct else f"{r}:8000"
+                    )
                     for r in worker.get("observations", {"worker": {}})
                 ]
             ),
-            gateway=worker["gateway"],
+            gateway=None if direct else worker["gateway"],
             headers=headers or {},
             capacity=24,
             prefill_tokens_per_second=prefill_tokens_per_second,
@@ -192,15 +212,16 @@ def test_caller_headers_replace_runtime_headers(worker):
     with_router(worker, test, headers={"Modal-Key": "runtime"})
 
 
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("fault", ["headers", "body", "proxy"])
-def test_lost_response_is_redelivered_with_the_same_rid(worker, fault):
+def test_lost_response_is_redelivered_with_the_same_rid(worker, fault, direct):
     worker["faults"] = [fault]
 
     async def test(router):
         assert (await dispatch(router, worker)).response.status_code == 200
         assert worker["requests"][0] == worker["requests"][1]
 
-    with_router(worker, test)
+    with_router(worker, test, direct=direct)
 
 
 @pytest.mark.parametrize("fault", ["headers", "proxy"])
@@ -276,8 +297,11 @@ def test_deadline_bounds_capacity_waits_and_busy_retries(worker, active, statuse
     with_router(worker, test)
 
 
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("active,delay", [(24, 0), (0, 2)])
-def test_cancellation_releases_queued_and_in_flight_requests(worker, active, delay):
+def test_cancellation_releases_queued_and_in_flight_requests(
+    worker, active, delay, direct
+):
     worker["active"] = active
     worker["delay"] = delay
 
@@ -291,7 +315,7 @@ def test_cancellation_releases_queued_and_in_flight_requests(worker, active, del
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    with_router(worker, test)
+    with_router(worker, test, direct=direct)
 
 
 def test_a_slow_peer_does_not_stale_a_fast_replica(worker):
@@ -352,3 +376,104 @@ def test_an_unset_prefill_rate_is_measured_from_completed_requests(
         assert second.routing["prefill_tokens_per_second"] == measured
 
     with_router(worker, test, prefill_tokens_per_second=configured)
+
+
+def test_direct_transport_authenticates_without_gateway_headers(worker):
+    async def test(router):
+        result = await dispatch(
+            router, worker, headers={"Modal-Flash-Upstream": "untrusted:8000"}
+        )
+        assert result.response.status_code == 200
+        assert result.replica == "worker"
+        assert result.routing["reason"] != "gateway_fallback"
+        for headers in [*worker["poll_headers"], *(h for h, _ in worker["requests"])]:
+            headers = {k.lower(): v for k, v in headers.items()}
+            assert headers["x-api-key"] == "test-key"
+            assert "modal-flash-upstream" not in headers
+            assert "modal-session-id" not in headers
+
+    with_router(worker, test, direct=True, headers={"x-api-key": "test-key"})
+
+
+@pytest.mark.parametrize(
+    "observations", [{}, {"worker": {"age": 100}}, {"worker": {"unobservable": True}}]
+)
+def test_direct_transport_never_falls_back_without_fresh_workers(worker, observations):
+    worker["observations"] = observations
+
+    async def test(router):
+        result = await dispatch(router, worker, timeout=0.3)
+        assert result.response.status_code == 504
+        assert not worker["requests"]
+
+    with_router(worker, test, direct=True)
+
+
+def test_direct_transport_selects_between_independent_endpoints():
+    with worker_server() as busy, worker_server() as available:
+        busy.update(replica="busy", active=24)
+        available.update(replica="available")
+
+        async def run():
+            async def discover():
+                return [
+                    dict(replica=w["replica"], upstream=w["gateway"])
+                    for w in (busy, available)
+                ]
+
+            router = NativeRouter(
+                discover,
+                headers={},
+                capacity=24,
+                prefill_tokens_per_second=1000,
+                balance_absolute=4,
+                balance_relative=1.25,
+                cache_threshold=0.5,
+            )
+            try:
+                result = await dispatch(router, available)
+                assert result.response.status_code == 200
+                assert result.replica == "available"
+                assert not busy["requests"]
+                assert len(available["requests"]) == 1
+            finally:
+                await router.aclose()
+
+        asyncio.run(run())
+
+
+def test_direct_discovery_removal_invalidates_recent_observation(worker):
+    async def test(router):
+        assert (await dispatch(router, worker)).response.is_success
+        router.discover.return_value = []
+        router.runtime.set_workers("[]")
+        result = await dispatch(router, worker, request_id="removed", timeout=0.2)
+        assert result.response.status_code == 504
+        assert len(worker["requests"]) == 1
+
+    with_router(worker, test, direct=True)
+
+
+def test_failed_native_sample_cancels_sibling_requests(worker):
+    from spindle.inference.sampling import sample_task
+
+    worker["barrier"] = threading.Barrier(2)
+    worker["delays_by_seed"] = {10: 2}
+    worker["statuses_by_seed"] = {11: 400}
+
+    async def test(router):
+        task = dict(
+            request_id="sample",
+            model_id="adapter",
+            publish_version=1,
+            payload=dict(
+                prompt={"chunks": [{"type": "encoded_text", "tokens": [1]}]},
+                num_samples=2,
+                sampling_params=dict(max_tokens=1, seed=10),
+            ),
+        )
+        with pytest.raises(RuntimeError, match="returned 400"):
+            await sample_task(task, "http://unused", router=router)
+        assert len(worker["requests"]) == 2
+
+    with_router(worker, test, direct=True)

@@ -18,9 +18,14 @@ class RoutedResponse:
 
 
 class NativeRouter:
-    def __init__(self, discover, *, gateway, headers, **settings):
+    def __init__(self, discover, *, gateway=None, headers, **settings):
+        """Omit gateway to contact discovered HTTP(S) upstream URLs directly.
+
+        Direct pools require fresh routing observations; they cannot fall back
+        to a gateway to discover or cold-start workers.
+        """
         self.discover = discover
-        self.gateway = gateway.rstrip("/")
+        self.gateway = gateway.rstrip("/") if gateway is not None else None
         self.runtime = NativeRuntime(
             json.dumps(dict(gateway=self.gateway, headers=headers, **settings))
         )
@@ -65,7 +70,9 @@ class NativeRouter:
             status,
             headers=response_headers,
             content=content,
-            request=httpx.Request("POST", self.gateway + "/generate"),
+            request=httpx.Request(
+                "POST", (self.gateway or "http://spindle-router") + "/generate"
+            ),
         )
         if routing is None:
             # Sampling already handles retryable statuses within its deadline.

@@ -30,7 +30,7 @@ const AFFINITY_HEADERS: &[&str] = &["modal-session-id", "modal-routing-affinity-
 
 #[derive(Deserialize)]
 struct Config {
-    gateway: String,
+    gateway: Option<String>,
     headers: HashMap<String, String>,
     capacity: usize,
     prefill_tokens_per_second: Option<f64>,
@@ -52,7 +52,7 @@ struct Service {
     unobservable: Arc<Mutex<HashSet<String>>>,
     measure_prefill: bool,
     client: reqwest::Client,
-    gateway: String,
+    gateway: Option<String>,
     headers: HashMap<String, String>,
     notify: Arc<Notify>,
     stop: CancellationToken,
@@ -170,7 +170,7 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
                     let unobservable = s.unobservable.lock().unwrap();
                     workers.iter().all(|w| unobservable.contains(&w.upstream))
                 };
-                if unobservable || since.elapsed() >= GATEWAY_FALLBACK {
+                if s.gateway.is_some() && (unobservable || since.elapsed() >= GATEWAY_FALLBACK) {
                     break Decision::gateway();
                 }
             } else {
@@ -206,14 +206,19 @@ async fn forward(s: &Service, mut g: Generate) -> Reply {
             };
             headers.insert(name, value);
         }
-        if let Some(upstream) = &decision.upstream {
+        if let (Some(_), Some(upstream)) = (&s.gateway, &decision.upstream) {
             let value = HeaderValue::from_str(upstream)
                 .map_err(|_| error(500, "Invalid worker upstream"))?;
             headers.insert("modal-flash-upstream", value);
         }
+        let endpoint = s
+            .gateway
+            .as_ref()
+            .or(decision.upstream.as_ref())
+            .ok_or_else(|| error(503, "No worker available"))?;
         let http = s
             .client
-            .post(format!("{}/generate", s.gateway))
+            .post(format!("{}/generate", endpoint.trim_end_matches('/')))
             .headers(headers)
             .json(&g.body)
             .build()
@@ -328,11 +333,24 @@ async fn poll(s: Service, worker: Worker) -> Option<Polled> {
     let started = Instant::now();
     let mut req = s
         .client
-        .get(format!("{}/routing-state", s.gateway))
-        .header("Modal-Flash-Upstream", &worker.upstream)
+        .get(format!(
+            "{}/routing-state",
+            s.gateway
+                .as_ref()
+                .unwrap_or(&worker.upstream)
+                .trim_end_matches('/')
+        ))
         .timeout(Duration::from_secs(2));
     for (k, v) in &s.headers {
+        if k.eq_ignore_ascii_case("modal-flash-upstream")
+            || AFFINITY_HEADERS.iter().any(|h| k.eq_ignore_ascii_case(h))
+        {
+            continue;
+        }
         req = req.header(k, v);
+    }
+    if s.gateway.is_some() {
+        req = req.header("Modal-Flash-Upstream", &worker.upstream);
     }
     let response = req.send().await.ok()?.error_for_status().ok()?;
     let bytes = response.bytes().await.ok()?;
@@ -381,6 +399,10 @@ async fn observe(s: Service) {
                 let Some(upstream) = polling.remove(&id) else { continue };
                 match polled {
                     Some(Polled::Row(row)) => {
+                        let workers = s.workers.lock().unwrap();
+                        if !workers.iter().any(|w| w.upstream == row.upstream && w.replica == row.replica) {
+                            continue;
+                        }
                         s.unobservable.lock().unwrap().remove(&upstream);
                         let snapshot = Snapshot::new(vec![*row], Instant::now());
                         s.scheduler.lock().unwrap().install_snapshot(snapshot);
@@ -437,7 +459,7 @@ impl NativeRuntime {
             unobservable: Arc::new(Mutex::new(HashSet::new())),
             measure_prefill: c.prefill_tokens_per_second.is_none(),
             client,
-            gateway: c.gateway.trim_end_matches('/').into(),
+            gateway: c.gateway.map(|url| url.trim_end_matches('/').into()),
             headers: c.headers,
             notify: Arc::new(Notify::new()),
             stop: CancellationToken::new(),
@@ -448,8 +470,35 @@ impl NativeRuntime {
 
     /// Replace the discovered workers and observe them immediately.
     fn set_workers(&self, workers: &str) -> PyResult<()> {
-        *self.service.workers.lock().unwrap() =
+        let workers: Vec<Worker> =
             serde_json::from_str(workers).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if self.service.gateway.is_none() {
+            for worker in &workers {
+                let url = reqwest::Url::parse(&worker.upstream)
+                    .map_err(|_| PyValueError::new_err("Direct workers require HTTP(S) URLs"))?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err(PyValueError::new_err("Invalid direct worker URL"));
+                }
+            }
+        }
+        let mut current = self.service.workers.lock().unwrap();
+        self.service
+            .scheduler
+            .lock()
+            .unwrap()
+            .replicas
+            .retain(|row| {
+                workers
+                    .iter()
+                    .any(|w| w.replica == row.replica && w.upstream == row.upstream)
+            });
+        *current = workers;
         self.service.discovered.store(true, Ordering::Release);
         self.service.notify.notify_one();
         Ok(())

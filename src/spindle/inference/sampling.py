@@ -141,8 +141,8 @@ async def sample_task(
     if model_id is None or version is None:
         router = None
     async with client_context as active_client:
-        outputs = await asyncio.gather(
-            *(
+        tasks = [
+            asyncio.create_task(
                 _sample_one(
                     active_client,
                     prompt,
@@ -168,9 +168,16 @@ async def sample_task(
                     request_timeout=timeout,
                     router=router,
                 )
-                for index in range(num_samples)
             )
-        )
+            for index in range(num_samples)
+        ]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            # A failed sequence must not leave native-router requests running.
+            for pending in tasks:
+                pending.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     sequences = [_sequence(output) for output in outputs]
     if any(replay_flags.values()):

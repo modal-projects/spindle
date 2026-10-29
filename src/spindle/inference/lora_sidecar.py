@@ -45,7 +45,10 @@ def create_app(
     upstream_url: str,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    replica_id: str | None = None,
 ) -> FastAPI:
+    replica_id = replica_id or os.environ.get("MODAL_TASK_ID", "local")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.client = httpx.AsyncClient(
@@ -133,7 +136,7 @@ def create_app(
                 kv_capacity_tokens=snapshot.get("kv_capacity_tokens", 0),
             )
         return {
-            "replica": os.environ.get("MODAL_TASK_ID", "local"),
+            "replica": replica_id,
             "active": len(app.state.routing_requests),
             "adapters": dict(Counter(app.state.routing_requests.values())),
             "request_ids": list(app.state.routing_requests),
@@ -167,7 +170,7 @@ def create_app(
         )
         if response is None:
             response = Response(status_code=499)
-        response.headers["x-spindle-replica"] = os.environ.get("MODAL_TASK_ID", "local")
+        response.headers["x-spindle-replica"] = replica_id
         return response
 
     def remember_request(payload: dict, adapter: str | None = None) -> None:
