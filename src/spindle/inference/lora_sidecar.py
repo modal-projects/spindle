@@ -303,6 +303,11 @@ async def _prepare_adapter(
                 )
                 if response.is_error:
                     return resolved, response
+                loaded = response.json().get("loaded_adapters")
+                if isinstance(loaded, dict):
+                    # SGLang may evict older versions while loading this one.
+                    for name in set(app.state.registered_adapters) - loaded.keys():
+                        del app.state.registered_adapters[name]
                 if not app.state.registered_adapters:
                     timeline("sampler-sidecar").mark(
                         "first_adapter_loaded", adapter=resolved.identity
@@ -331,7 +336,11 @@ async def _post_generate(
     payload: dict,
 ) -> httpx.Response:
     try:
-        return await client.post("/generate", json=payload)
+        # The caller deadline/disconnect controls generation lifetime; a long
+        # decode must not hit the control-request read timeout.
+        return await client.post(
+            "/generate", json=payload, timeout=httpx.Timeout(30, read=None)
+        )
     except asyncio.CancelledError:
         await _abort(client, payload["rid"])
         raise

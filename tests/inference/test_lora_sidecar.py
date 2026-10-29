@@ -627,3 +627,60 @@ def test_exact_version_refreshes_only_when_snapshot_is_missing(tmp_path):
             assert response.status_code == 200
             assert response.json()["meta_info"]["weight_version_start"] == 21
     assert refreshes == [True]
+
+
+def test_generation_read_timeout_does_not_apply_to_control_requests(tmp_path):
+    seen = {}
+
+    def upstream(request):
+        seen[request.url.path] = request.extensions["timeout"]
+        return httpx.Response(200, json={})
+
+    app = create_app(
+        SnapshotBulletin(tmp_path / "bulletin"),
+        "http://sglang",
+        transport=httpx.MockTransport(upstream),
+    )
+    with TestClient(app) as client:
+        assert client.post("/generate", json={"input_ids": [1]}).status_code == 200
+        assert client.get("/health").status_code == 200
+    assert seen["/generate"] == {"connect": 30, "read": None, "write": 30, "pool": 30}
+    assert seen["/health"]["read"] == 3000
+    assert app.state.client.is_closed
+
+
+def test_evicted_adapter_is_reloaded_for_a_later_exact_version_request(tmp_path):
+    bulletin = _publish(tmp_path, 1)
+    _publish(tmp_path, 2)
+    loaded = set()
+    registrations = []
+
+    def upstream(request):
+        payload = json.loads(request.content)
+        if request.url.path == "/load_lora_adapter":
+            name = payload["lora_name"]
+            registrations.append(name)
+            loaded.clear()
+            loaded.add(name)
+            return httpx.Response(
+                200, json={"success": True, "loaded_adapters": {name: {}}}
+            )
+        assert request.url.path == "/generate"
+        assert payload["lora_path"] in loaded
+        return httpx.Response(200, json={"meta_info": {}})
+
+    app = create_app(bulletin, "http://sglang", transport=httpx.MockTransport(upstream))
+    with TestClient(app) as client:
+        for version in (1, 1, 2, 1):
+            response = client.post(
+                "/generate",
+                json={
+                    "weight_run_id": "model-a",
+                    "weight_version": {"exact_version": version},
+                    "input_ids": [1],
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["meta_info"]["weight_version_start"] == version
+            assert set(app.state.registered_adapters) == loaded
+    assert registrations == [VersionRef("model-a", v).identity for v in (1, 2, 1)]
