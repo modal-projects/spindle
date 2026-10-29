@@ -1,0 +1,2 @@
+include rust/router/Cargo.toml rust/router/Cargo.lock rust/router/pyproject.toml
+recursive-include rust/router/src *.rs

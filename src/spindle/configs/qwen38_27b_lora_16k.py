@@ -38,7 +38,8 @@ class Config(BaseConfig):
     sglang_cfg = {
         "tp_size": 1,
         "ep_size": 1,
-        "mem_fraction_static": 0.8,
+        "mem_fraction_static": 0.9,
+        "mamba_full_memory_ratio": 0.6,
         "max_running_requests": 32,
         "max_queued_requests": 8,
         "max_loaded_loras": 256,

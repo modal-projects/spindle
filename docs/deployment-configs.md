@@ -129,7 +129,7 @@ The checked-in [deploy_models.sh](../scripts/deploy_models.sh) lists the complet
 ./scripts/deploy_models.sh --refresh-inference qwen35-9b-lora-16k
 ~~~
 
-Frontend, region, environment, secret names, and volume names default in `BaseConfig.platform`. `platform.modal.region` defaults to `None`, which leaves GPU placement unpinned (Modal schedules trainers and inference pools in any region); set it only to restrict placement. Set them in the same Python config using dotted overrides:
+Frontend, region, environment, secret names, and volume names default in `BaseConfig.platform`. `platform.modal.region` defaults to `None`, which leaves GPU placement unpinned (Modal schedules trainers and inference pools in any region); set it only to restrict placement. The frontend server, which runs on CPU, is placed in that region, or in `us-east` when it is unset; this never affects where GPUs are scheduled. Set them in the same Python config using dotted overrides:
 
 ```python
 from spindle.configs.gpt_oss_20b_lora_32k import Config as Parent

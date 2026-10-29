@@ -23,12 +23,13 @@ Below, we detail how to setup your own Spindle server. See [here](https://modal.
 
 ## Install Spindle
 
-Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a project and install the library:
+Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a project, install the library, and install its agent skills:
 
 ```bash
 uv init --python 3.12 my-spindle-project
 cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.2'
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.3'
+uv run spindle skills install
 ```
 
 This pins a release tag. Releases and their changes are listed in [CHANGELOG.md](CHANGELOG.md), and `uv run spindle --version` prints the installed version and commit.

@@ -38,20 +38,10 @@ class Config(Parent):
     # Blog routing policy. The GPU split and sglang_cfg limits are what deploy
     # applies; cache_wait is the policy used for that run.
     inference_lora_routing = "cache_wait"
-    inference_router_runtime = "rust"
     inference_routing_balance_absolute = 32
     inference_routing_balance_relative = 2.0
     inference_routing_cache_threshold = 0.5
-    inference_routing_work_rates = {
-        "prefill_tokens_per_second": 10463.96139191663,
-        "decode_tokens_per_second": 1290.4652700698725,
-        "gpu_lora_seconds": 0.07488066750002531,
-        "registration_seconds": 0.6767439374999924,
-    }
-    inference_env = {
-        "SGLANG_SPINDLE_ROUTING_OBSERVATIONS": "1",
-        "SGLANG_SPINDLE_MODEL_ROUTING": "1",
-    }
+    inference_routing_prefill_tokens_per_second = 10463.96139191663
     session_idle_timeout_s = 43200
     pool_idle_timeout_s = 43200
     overrides = {

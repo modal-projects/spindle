@@ -149,47 +149,29 @@ def test_optim_step_rejects_non_adam_params(payload, message, caplog) -> None:
     assert "rejected unsupported optimizer: dimuon" in caplog.text
 
 
-def test_backend_batches_cross_http() -> None:
+@pytest.mark.parametrize(
+    "kind", [OperationKind.FORWARD, OperationKind.FORWARD_BACKWARD]
+)
+def test_backend_batches_cross_http(kind) -> None:
+    def command(model_id, token):
+        payload = {
+            "data": [
+                {"model_input": {"chunks": [{"tokens": [token]}]}, "loss_fn_inputs": {}}
+            ],
+            "loss_fn": "cross_entropy",
+        }
+        return Command(model_id, kind, parse_operation_payload(kind, payload))
+
     async def run() -> None:
         executor = http_executor(EchoExecutor())
         results = await executor.execute_forward_backward_batch(
-            (
-                Command(
-                    "model-a",
-                    OperationKind.FORWARD_BACKWARD,
-                    parse_operation_payload(
-                        OperationKind.FORWARD_BACKWARD,
-                        {
-                            "data": [
-                                {
-                                    "model_input": {"chunks": [{"tokens": [1]}]},
-                                    "loss_fn_inputs": {},
-                                }
-                            ],
-                            "loss_fn": "cross_entropy",
-                        },
-                    ),
-                ),
-                Command(
-                    "model-b",
-                    OperationKind.FORWARD_BACKWARD,
-                    parse_operation_payload(
-                        OperationKind.FORWARD_BACKWARD,
-                        {
-                            "data": [
-                                {
-                                    "model_input": {"chunks": [{"tokens": [2]}]},
-                                    "loss_fn_inputs": {},
-                                }
-                            ],
-                            "loss_fn": "cross_entropy",
-                        },
-                    ),
-                ),
-            )
+            (command("model-a", 1), command("model-b", 2))
         )
 
-        assert [result["model_id"] for result in results] == ["model-a", "model-b"]
+        assert [(result["model_id"], result["kind"]) for result in results] == [
+            ("model-a", kind.value),
+            ("model-b", kind.value),
+        ]
         await executor.close()
 
     asyncio.run(run())
