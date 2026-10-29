@@ -6,6 +6,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Changed
 
+- Sampler images set `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=1`. SGLang still applies split-K only to the BF16 rank-32 CSGMV shapes it measured, and never in deterministic mode. LoRA servers already set the same flag (#123); set it to `0` in `inference_env` to turn it off.
 - DeepSeek-V4.1-Flash samplers keep their compiled kernels on the shared kernel-cache volume, like trainers, and start nearly five minutes sooner once the cache is warm. Other recipes can do the same by setting `SGLANG_CACHE_DIR` under `/root/.cache/kernel-cache` in `inference_env`.
 
 ## 0.1.3 - 2026-10-28

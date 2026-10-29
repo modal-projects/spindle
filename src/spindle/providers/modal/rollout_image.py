@@ -48,6 +48,9 @@ image = (
             "HF_MODULES_CACHE": "/tmp/huggingface/modules",
             "SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN": "1",
             "SGLANG_DISABLE_CUDNN_CHECK": "1",
+            # SGLang applies split-K only to the BF16 rank-32 CSGMV shapes it
+            # measured, and never in deterministic mode.
+            "SGLANG_ENABLE_LORA_CSGMV_SPLIT_K": "1",
         }
     )
     .add_local_python_source("spindle", ignore=ignore_config_source)
