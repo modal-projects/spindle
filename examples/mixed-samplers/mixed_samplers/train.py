@@ -199,6 +199,7 @@ async def train(
     initial_version=1,
     version_resolver=None,
     rollout_concurrency=None,
+    active_groups=None,
 ):
     rollout_worker = sample_trajectory if rollout_worker is None else rollout_worker
     output = Path(args.output)
@@ -226,7 +227,9 @@ async def train(
     rng.shuffle(order)
     next_task = 0
     sequence = 0
-    groups = list(gateways)
+    # active_groups and weights stay shared with the sampler opener. A group
+    # that becomes ready later is appended to both before the next assignment.
+    groups = list(gateways) if active_groups is None else active_groups
 
     async def producer():
         nonlocal next_task, sequence
@@ -495,6 +498,91 @@ async def train(
         events_file.close()
 
 
+class ReadySamplers:
+    """Capacity measurements that can join the rollout pool one group at a time."""
+
+    def __init__(self):
+        self.groups = []
+        self.weights = []
+        self.capacity = {}
+        self.failures = {}
+        self._pending = {}
+
+    def pending_names(self):
+        return [self._pending[task] for task in self._pending]
+
+    async def open(self, measurements):
+        self._pending = {
+            asyncio.create_task(measurement): name
+            for name, measurement in measurements.items()
+        }
+        while self._pending and not self.groups:
+            done, _ = await asyncio.wait(
+                set(self._pending), return_when=asyncio.FIRST_COMPLETED
+            )
+            self._take(done)
+        if not self.groups:
+            raise RuntimeError(f"no samplers became ready: {self.failures}")
+
+    async def adopt(self, on_change):
+        try:
+            while self._pending:
+                done, _ = await asyncio.wait(
+                    set(self._pending), return_when=asyncio.FIRST_COMPLETED
+                )
+                if self._take(done):
+                    on_change()
+        finally:
+            tasks = list(self._pending)
+            for task in tasks:
+                task.cancel()
+            self._pending.clear()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _take(self, done):
+        changed = False
+        for task in done:
+            name = self._pending.pop(task)
+            try:
+                row = task.result()
+                rate = row["tokens_per_second"]
+                if not math.isfinite(rate) or rate <= 0:
+                    raise RuntimeError(f"non-positive throughput: {rate}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.failures[name] = repr(exc)
+                changed = True
+                print(
+                    json.dumps(
+                        {
+                            "event": "sampler_unavailable",
+                            "group": name,
+                            "error": repr(exc),
+                        }
+                    ),
+                    flush=True,
+                )
+                continue
+            self.capacity[name] = row
+            self.groups.append(name)
+            self.weights.append(rate)
+            changed = True
+            print(
+                json.dumps(
+                    {
+                        "event": "sampler_ready",
+                        "group": name,
+                        "tokens_per_second": rate,
+                        "ready": list(self.groups),
+                    }
+                ),
+                flush=True,
+            )
+        return changed
+
+
 async def run_with_sampler_validation(training, validation=None):
     async with asyncio.TaskGroup() as group:
         if validation is not None:
@@ -558,66 +646,102 @@ def main():
                 stack.enter_context(app.run(environment_name="kailash-dev"))
                 gateways[group["name"]] = server.get_url()
 
-            async def capacities():
-                return await asyncio.gather(
+            def write_manifest(capacity, pending, failures):
+                manifest = {
+                    "model": config.model,
+                    "model_revision": config.model_revision,
+                    "dataset": DATASET,
+                    "dataset_revision": DATASET_REVISION,
+                    "groups": GROUPS,
+                    "capacity": capacity,
+                    "pending_samplers": pending,
+                    "unavailable_samplers": failures,
+                    "capacity_source": str(cache["path"]) if cache is not None else None,
+                    "compute_regions": {
+                        group["name"]: sampler_config(group).inference_region
+                        if sampler_config(group).inference_region is not None
+                        else config.platform["modal"]["region"]
+                        for group in GROUPS
+                    },
+                    "top_p": TOP_P,
+                    "temperature": TEMPERATURE,
+                    "lr": LEARNING_RATE,
+                    "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
+                    "model_id": training.model_id,
+                    "initial_publication": publication.path,
+                    "arguments": {
+                        k: [str(p) for p in v]
+                        if k == "sampler_evidence"
+                        else str(v)
+                        if isinstance(v, Path)
+                        else v
+                        for k, v in vars(args).items()
+                    },
+                }
+                Path(args.output).mkdir(parents=True, exist_ok=True)
+                (Path(args.output) / "manifest.json").write_text(
+                    json.dumps(manifest, indent=2)
+                )
+
+            async def validate_samplers():
+                measured = await asyncio.gather(
                     *(
                         measure_capacity.remote.aio(url, training.model_id, 1)
                         for url in gateways.values()
                     )
                 )
-
-            measured = (
-                [cache["capacity"][group] for group in gateways]
-                if cache is not None
-                else asyncio.run(capacities())
-            )
-            weights = [m["tokens_per_second"] for m in measured]
-            manifest = {
-                "model": config.model,
-                "model_revision": config.model_revision,
-                "dataset": DATASET,
-                "dataset_revision": DATASET_REVISION,
-                "groups": GROUPS,
-                "capacity": dict(zip(gateways, measured, strict=True)),
-                "capacity_source": str(cache["path"]) if cache is not None else None,
-                "compute_regions": {
-                    group["name"]: sampler_config(group).inference_region
-                    if sampler_config(group).inference_region is not None
-                    else config.platform["modal"]["region"]
-                    for group in GROUPS
-                },
-                "top_p": TOP_P,
-                "temperature": TEMPERATURE,
-                "lr": LEARNING_RATE,
-                "batch": [PROMPTS_PER_UPDATE, TRAJECTORIES_PER_PROMPT],
-                "model_id": training.model_id,
-                "initial_publication": publication.path,
-                "arguments": {
-                    k: [str(p) for p in v]
-                    if k == "sampler_evidence"
-                    else str(v)
-                    if isinstance(v, Path)
-                    else v
-                    for k, v in vars(args).items()
-                },
-            }
-            Path(args.output).mkdir(parents=True, exist_ok=True)
-            (Path(args.output) / "manifest.json").write_text(
-                json.dumps(manifest, indent=2)
-            )
-
-            async def validate_samplers():
-                measured = await capacities()
                 (Path(args.output) / "startup-validation.json").write_text(
                     json.dumps(dict(zip(gateways, measured, strict=True)), indent=2)
                 )
 
-            asyncio.run(
-                run_with_sampler_validation(
-                    train(training, gateways, weights, args, tasks, cache=cache),
-                    validate_samplers() if cache is not None else None,
+            async def run():
+                if cache is not None:
+                    measured = [cache["capacity"][group] for group in gateways]
+                    weights = [row["tokens_per_second"] for row in measured]
+                    write_manifest(
+                        dict(zip(gateways, measured, strict=True)),
+                        [],
+                        {},
+                    )
+                    await run_with_sampler_validation(
+                        train(
+                            training, gateways, weights, args, tasks, cache=cache
+                        ),
+                        validate_samplers(),
+                    )
+                    return
+                pool = ReadySamplers()
+                await pool.open(
+                    {
+                        name: measure_capacity.remote.aio(
+                            url, training.model_id, 1
+                        )
+                        for name, url in gateways.items()
+                    }
                 )
-            )
+
+                def record():
+                    write_manifest(
+                        dict(pool.capacity),
+                        pool.pending_names(),
+                        dict(pool.failures),
+                    )
+
+                record()
+                await run_with_sampler_validation(
+                    train(
+                        training,
+                        gateways,
+                        pool.weights,
+                        args,
+                        tasks,
+                        cache=cache,
+                        active_groups=pool.groups,
+                    ),
+                    pool.adopt(record),
+                )
+
+            asyncio.run(run())
     finally:
         try:
             response = httpx.post(

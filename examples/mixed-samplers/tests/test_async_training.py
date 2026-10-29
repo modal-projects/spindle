@@ -38,6 +38,37 @@ def test_token_diagnostics_reconstruct_means_after_sdk_chunk_reduction():
     assert training_module.diagnostic_means(legacy) == (legacy, "sdk_chunk_means")
 
 
+def test_sampling_starts_after_the_first_ready_sampler():
+    async def run():
+        async def fast():
+            return {"tokens_per_second": 5.0}
+
+        async def slow():
+            await asyncio.sleep(0.05)
+            return {"tokens_per_second": 2.0}
+
+        async def down():
+            await asyncio.sleep(0.05)
+            raise RuntimeError("no upstreams")
+
+        pool = training_module.ReadySamplers()
+        await pool.open({"fast": fast(), "slow": slow(), "down": down()})
+        assert pool.groups == ["fast"]
+        assert pool.weights == [5.0]
+        assert set(pool.pending_names()) == {"slow", "down"}
+        await pool.adopt(lambda: None)
+        assert pool.groups == ["fast", "slow"]
+        assert pool.weights == [5.0, 2.0]
+        assert "down" in pool.failures
+        assert pool.pending_names() == []
+
+        empty = training_module.ReadySamplers()
+        with pytest.raises(RuntimeError, match="no samplers became ready"):
+            await empty.open({"down": down()})
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("validation_fails", [False, True])
 def test_recovery_trains_while_validating_and_cancels_on_failure(validation_fails):
     async def run():
