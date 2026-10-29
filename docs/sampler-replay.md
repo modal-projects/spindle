@@ -79,7 +79,8 @@ say otherwise) and skips the centering term. `score_centered_mis` applies that
 window inside the correction E_q[w grad(log p)], including tokens the window
 gives weight zero. Pass `sequence.replay.loss_fn_config()` so training divides
 logits by the sampling temperature. A full-parameter script is
-`examples/score-centering`.
+`examples/score-centering`. The eight-pool MiMo run, with the Megatron and
+Miles loops, is `examples/mixed-samplers`.
 
 For MoE router replay, additionally request `return_routed_experts=True` and
 supply the model's **total transformer layer count** and routed experts per token:
