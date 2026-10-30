@@ -2,7 +2,7 @@
 
 One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It is what the Spindle maintainers run for themselves: three recipes on a frontend named `prod` in a Modal environment named `spindle`, which holds nothing else.
 
-Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`.
+Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`. It also sets `platform.requires_proxy_auth`, so Modal turns away any request without a proxy token before it reaches Spindle.
 
 | Recipe | Base model | Trainer |
 |---|---|---|
@@ -12,7 +12,12 @@ Each file in `recipes/` subclasses a bundled recipe and changes its name to star
 
 ## Deploy
 
-Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. The frontend serves a public URL that checks the Tinker API key itself, so the environment must allow unauthenticated URLs, which a workspace manager sets under Settings → Environments.
+Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then create a proxy token for clients and allow it for the environment:
+
+```bash
+modal workspace proxy-tokens create
+modal workspace proxy-tokens allow <wk-token-id> spindle
+```
 
 Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
 
@@ -24,14 +29,27 @@ A redeploy with the same Spindle version only republishes the frontend, and ever
 
 ## Use
 
-Clients need only the URL and the key:
+Clients need the URL, the Tinker API key, and the proxy token:
 
 ```bash
 export TINKER_BASE_URL=https://<workspace>-spindle--prod.modal.run
 export TINKER_API_KEY=tml-...
+export MODAL_PROXY_TOKEN_ID=wk-...
+export MODAL_PROXY_TOKEN_SECRET=ws-...
 ```
 
-Any stock tinker or tinker-cookbook script then works unchanged. The server picks the recipe from the script's `base_model`.
+The Tinker SDK sends the API key on its own. Pass the proxy token as headers when creating the client:
+
+```python
+service = tinker.ServiceClient(
+    default_headers={
+        "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
+        "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
+    }
+)
+```
+
+The server picks the recipe from the client's `base_model`. tinker-cookbook scripts create their own `ServiceClient` without these headers, so they cannot reach this server yet.
 
 ## Check
 

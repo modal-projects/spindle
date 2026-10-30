@@ -6,6 +6,7 @@ class Config(Parent):
     overrides = {
         "platform.frontend": "prod",
         "platform.url_label": "prod",
+        "platform.requires_proxy_auth": True,
         "platform.modal.environment": "spindle",
     }
 

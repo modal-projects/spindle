@@ -28,6 +28,8 @@ jobs:
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
       TINKER_BASE_URL: ${{ vars.SHARED_SERVER_URL }}
       TINKER_API_KEY: ${{ secrets.SHARED_SERVER_API_KEY }}
+      MODAL_PROXY_TOKEN_ID: ${{ secrets.SHARED_SERVER_PROXY_TOKEN_ID }}
+      MODAL_PROXY_TOKEN_SECRET: ${{ secrets.SHARED_SERVER_PROXY_TOKEN_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:

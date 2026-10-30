@@ -1,8 +1,9 @@
 """Train two LoRA steps on a deployed Spindle server.
 
-Reads TINKER_BASE_URL and TINKER_API_KEY. With --expect-commit, waits until the
-server reports that commit before training, so a deploy job can confirm its
-rollout and that the recipe still trains.
+Reads TINKER_BASE_URL and TINKER_API_KEY, plus MODAL_PROXY_TOKEN_ID and
+MODAL_PROXY_TOKEN_SECRET when the server requires Modal proxy auth. With
+--expect-commit, waits until the server reports that commit before training,
+so a deploy job can confirm its rollout and that the recipe still trains.
 """
 
 import argparse
@@ -17,13 +18,23 @@ import tinker
 from tinker import types
 
 
+def proxy_headers():
+    token_id = os.environ.get("MODAL_PROXY_TOKEN_ID")
+    token_secret = os.environ.get("MODAL_PROXY_TOKEN_SECRET")
+    if not token_id or not token_secret:
+        return {}
+    return {"Modal-Key": token_id, "Modal-Secret": token_secret}
+
+
 def wait_for_commit(base_url, api_key, commit, timeout_s):
     url = (
         base_url.rstrip("/").removesuffix("/api/v1") + "/api/v1/get_server_capabilities"
     )
     deadline = time.monotonic() + timeout_s
     while True:
-        request = urllib.request.Request(url, headers={"x-api-key": api_key})
+        request = urllib.request.Request(
+            url, headers={"x-api-key": api_key, **proxy_headers()}
+        )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 served = json.load(response).get("spindle_commit") or ""
@@ -38,7 +49,9 @@ def wait_for_commit(base_url, api_key, commit, timeout_s):
 
 
 def train(base_url, api_key, base_model, steps):
-    service = tinker.ServiceClient(base_url=base_url, api_key=api_key)
+    service = tinker.ServiceClient(
+        base_url=base_url, api_key=api_key, default_headers=proxy_headers()
+    )
     training = service.create_lora_training_client(base_model=base_model, rank=8)
     tokens = training.get_tokenizer().encode("The shared server trains one step.")
     datum = types.Datum(
