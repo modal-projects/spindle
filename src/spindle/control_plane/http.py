@@ -56,6 +56,15 @@ class SessionHeartbeatBody(BaseModel):
     session_id: str
 
 
+class FinishReason(BaseModel):
+    type: str
+
+
+class FinishSessionBody(BaseModel):
+    reason: FinishReason
+    detail: str | None = None
+
+
 class RolloutPoolBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -334,6 +343,10 @@ def create_control_plane_app(
     async def session_heartbeat(body: SessionHeartbeatBody) -> dict[str, str]:
         await control_plane.heartbeat(body.session_id)
         return {"type": "session_heartbeat"}
+
+    @app.post("/api/v1/sessions/{session_id}/finish")
+    async def finish_session(session_id: str, body: FinishSessionBody) -> None:
+        await control_plane.close_session(session_id, body.reason.type)
 
     @app.post("/api/v1/create_model")
     async def create_model(body: CreateModelBody) -> dict[str, object]:
