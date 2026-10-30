@@ -13,6 +13,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Fixed
 
+- Scripts on Tinker SDK 0.36 or newer, including tinker-cookbook, no longer fail with a 404 when they exit. Spindle now accepts the SDK's end-of-session call and frees that session's models right away.
 - Creating a model no longer fails with `trainer capacity exhausted` when a trainer finishes starting while the model is being placed (#185).
 
 ## 0.1.4 - 2026-10-29

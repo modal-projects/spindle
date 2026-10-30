@@ -579,6 +579,22 @@ def test_real_sdk_forward_only(base_url: str) -> None:
     assert len(result.loss_fn_outputs) == 1
 
 
+def test_finished_session_is_closed(base_url: str) -> None:
+    headers = {"x-api-key": API_KEY}
+    with httpx.Client(base_url=base_url, headers=headers) as client:
+        session_id = client.post("/api/v1/create_session", json={}).json()["session_id"]
+        finish = {"reason": {"type": "success"}, "detail": None}
+        url = f"/api/v1/sessions/{session_id}/finish"
+        assert client.post(url, json=finish).status_code == 200
+        assert client.post(url, json=finish).status_code == 200
+        heartbeat = {"session_id": session_id}
+        assert (
+            client.post("/api/v1/session_heartbeat", json=heartbeat).status_code == 409
+        )
+        missing = client.post("/api/v1/sessions/missing/finish", json=finish)
+        assert missing.status_code == 404
+
+
 def test_dynamic_config_requires_api_key(base_url: str) -> None:
     with httpx.Client(base_url=base_url) as client:
         assert client.post("/api/v1/client/dynamic_config", json={}).status_code == 401
