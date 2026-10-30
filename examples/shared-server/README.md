@@ -12,14 +12,7 @@ Each file in `recipes/` subclasses a bundled recipe and changes its name to star
 
 ## Deploy
 
-Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then create a proxy token for clients and allow it for the environment:
-
-```bash
-modal workspace proxy-tokens create
-modal workspace proxy-tokens allow <wk-token-id> spindle
-```
-
-Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
+Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
 
 ```bash
 uv run spindle deploy examples/shared-server/recipes/*.py
@@ -29,7 +22,14 @@ A redeploy with the same Spindle version only republishes the frontend, and ever
 
 ## Use
 
-Clients need the URL, the Tinker API key, and the proxy token:
+Clients need the URL, the Tinker API key, and a Modal [proxy token](https://modal.com/docs/guide/webhook-proxy-auth). Anyone in the workspace can create their own token and allow it for the environment:
+
+```bash
+modal workspace proxy-tokens create          # prints the token ID (wk-...) and secret (ws-...) once
+modal workspace proxy-tokens allow <wk-token-id> spindle
+```
+
+Then set:
 
 ```bash
 export TINKER_BASE_URL=https://<workspace>-spindle--prod.modal.run
@@ -38,7 +38,7 @@ export MODAL_PROXY_TOKEN_ID=wk-...
 export MODAL_PROXY_TOKEN_SECRET=ws-...
 ```
 
-The Tinker SDK sends the API key on its own but has no setting for the proxy token. Run scripts through `with_proxy_auth.py`, which adds the token to every client the script creates. tinker-cookbook commands work unchanged:
+The Tinker SDK sends the API key on its own but has no setting for the proxy token. Run scripts through [`with_proxy_auth.py`](with_proxy_auth.py), which adds the token to every client the script creates. It only needs `tinker`, so you can copy it next to your own code. tinker-cookbook commands work unchanged:
 
 ```bash
 python examples/shared-server/with_proxy_auth.py -m tinker_cookbook.recipes.chat_sl.train \
