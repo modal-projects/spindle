@@ -164,9 +164,36 @@ All configs deployed together must share platform settings. Use a shared parent 
 
 One frontend serves all models through Tinker’s `base_model`. If several recipes serve the same model, requests by model name go to the one with the longest context. To use a specific recipe, pass its name as `base_model`. `get_server_capabilities` lists every recipe and its context length.
 
-## The frontend registry
+## Add a config to a running deployment
 
-Every recipe a frontend serves is a row in one registry, a Modal Volume named after the frontend's app ID holding one `<recipe>.json` file per recipe. `spindle deploy` publishes the frontend with only its platform and lifecycle settings, then registers each listed recipe; the frontend deploys the trainer and inference apps that are missing or changed and marks the row `ready`. Rows record `state` (`deploying`, `ready`, `failed`), the last ready config, and the attempt that owns them, so a recipe being redeployed keeps serving its last ready version. A row whose deploy died stays `deploying`; deploying it again starts a new attempt.
+You can add a config to a frontend that is already running. Spindle deploys the new config's trainer and inference apps itself. It does not redeploy the frontend, and it leaves the other configs and their running jobs alone. Use this to serve a variant of a live config, such as the same model on another GPU type.
+
+You only need the frontend's URL and API key, the same values you train with. Send a new `name`, the deployed config to start from as `base`, and the settings to change as `overrides`:
+
+~~~bash
+curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "qwen35-9b-lora-16k-h200",
+       "base": "qwen35-9b-lora-16k",
+       "overrides": {"trainer_gpu": "H200", "miles_cfg.max_tokens_per_gpu": 8192}}'
+~~~
+
+`overrides` uses the same dotted keys as a config's `overrides`. A new request returns HTTP 202 at once with `"state": "deploying"`; building the new apps can take several minutes. An invalid config returns HTTP 400, and reusing a name with different settings returns HTTP 409. Sending a failed config again retries it.
+
+~~~bash
+curl -sS -i "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY"
+~~~
+
+The deployments GET returns HTTP 200. Poll it until the added row is `ready`, or inspect its `error` when it is `failed`; a repeated identical POST is idempotent and also returns HTTP 202.
+
+The frontend stores every recipe in one registry (a Modal Volume named after the frontend's app ID, one `<recipe>.json` file per recipe), whether it was included in `spindle deploy` or added through the API. A deploy adds or updates only the listed recipes; unlisted recipes remain served. The new config takes the frontend's platform settings and must match its lifecycle settings. Unknown settings, platform overrides, and values with the wrong type are rejected before deployment. `trainer_env` and `inference_env` are ordinary recipe fields and use the same validation as file-based configs. A different config under an existing name returns HTTP 409; adding identical settings is idempotent.
+
+`GET /api/v1/spindle/deployments` reports `origin`, `state`, `updated_at`, and `error`. States are `deploying`, `ready` and `failed`; a row whose deploy died stays `deploying` and a new POST starts a new attempt.
+
+Plain model IDs such as `Qwen/Qwen3.5-9B` route among all routable recipes by longest context, regardless of origin. Exact recipe-name matches take precedence. To use a specific config, pass its name as `base_model`.
+
+Anyone with the frontend's API key can add configs, and each added config can start GPUs.
 
 Upgrading a frontend that still ships a configs file needs no extra step: any
 `spindle deploy` on the new version first writes a ready registry row for every

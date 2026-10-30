@@ -74,6 +74,10 @@ class MemoryDeploymentStore(DeploymentStore):
     async def running(self, row):
         return self.alive
 
+    @property
+    def rows(self):
+        return self.memory._values
+
     async def list(self):
         self.reads += 1
         return await super().list()
@@ -439,6 +443,46 @@ def test_multiple_models_same_http_service_and_old_binding_survives_switch():
     asyncio.run(run())
 
 
+def test_runtime_config_smoke_variants_compile_and_keep_plain_model_on_base():
+    async def run():
+        base = DeploymentConfig.create(
+            load(
+                Path(__file__).resolve().parents[1]
+                / "examples/runtime_config_add/smoke_base.py"
+            )
+        )
+        routes, store = routes_for(base)
+        variants = (
+            (
+                "runtime-add-smoke-2b-8k",
+                {
+                    "max_context_length": 8192,
+                    "miles_cfg.max_tokens_per_gpu": 8192,
+                },
+            ),
+            ("runtime-add-smoke-2b-kill", {"inference_scaledown_window_s": 120}),
+        )
+        for name, overrides in variants:
+            deployment = await routes.build(name, overrides, base=base.name)
+            row = await routes.put(deployment, origin="api", replace=False)
+            assert row["state"] == "deploying"
+            assert deployment.name == name
+            assert deployment.model == "Qwen/Qwen3.5-2B"
+
+        assert (await routes.select("Qwen/Qwen3.5-2B")).name == base.name
+
+        writes = store.writes
+        with pytest.raises(ValueError):
+            await routes.build(
+                "runtime-add-smoke-2b-invalid",
+                {"max_context_length": "big"},
+                base=base.name,
+            )
+        assert store.writes == writes
+
+    asyncio.run(run())
+
+
 def test_registry_keeps_last_ready_config_during_redeploy_and_failure():
     async def run():
         original = resolved()
@@ -486,6 +530,24 @@ def test_registry_put_replaces_retries_and_skips_identical_updates():
     asyncio.run(run())
 
 
+def test_invalid_registry_builds_do_not_write():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        writes = store.writes
+        for name, overrides, selected_base in (
+            ("invalid", {"max_context_length": "big"}, base.name),
+            ("invalid", {"trainer_gpuu": "H200"}, base.name),
+            ("invalid", {"platform.modal.region": "other"}, base.name),
+            ("invalid", {}, "missing"),
+        ):
+            with pytest.raises(ValueError):
+                await routes.build(name, overrides, base=selected_base)
+        assert store.writes == writes
+
+    asyncio.run(run())
+
+
 def test_registry_cache_ttl_and_exact_name_miss_bypass():
     async def run():
         base = resolved()
@@ -499,6 +561,56 @@ def test_registry_cache_ttl_and_exact_name_miss_bypass():
         routes._cached_at = time.monotonic() - 6
         await routes.rows()
         assert store.reads == reads + 2
+
+    asyncio.run(run())
+
+
+def test_unified_registry_http_status_and_summary_shape():
+    async def run():
+        base = resolved()
+        store = MemoryDeploymentStore([ready_row(base)])
+        routes = DeploymentRoutes(store, FrontendSettings.from_recipe(base.recipe))
+        app = create_control_plane_app(
+            ControlPlane(InMemoryKeyValueStore(), SimpleNamespace()),
+            routes,
+            api_key="test",
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://frontend",
+            headers={"x-api-key": "test"},
+        ) as client:
+            listed = await client.get("/api/v1/spindle/deployments")
+            row = listed.json()["deployments"][0]
+            assert {"origin", "state", "updated_at", "error"} <= row.keys()
+            assert "source" not in row
+
+            both = await client.post(
+                "/api/v1/spindle/deployments",
+                json={"name": "variant", "base": base.name, "recipe": {}},
+            )
+            assert both.status_code == 400
+            assert "pass exactly one of base or recipe" in both.json()["message"]
+
+            added = await client.post(
+                "/api/v1/spindle/deployments",
+                json={
+                    "name": "variant",
+                    "base": base.name,
+                    "overrides": {"trainer_gpu": "H200"},
+                },
+            )
+            assert added.status_code == 202
+            assert added.json()["deployment"]["origin"] == "api"
+            conflict = await client.post(
+                "/api/v1/spindle/deployments",
+                json={
+                    "name": "variant",
+                    "base": base.name,
+                    "overrides": {"trainer_gpu": "B200"},
+                },
+            )
+            assert conflict.status_code == 409
 
     asyncio.run(run())
 
@@ -517,6 +629,95 @@ def client_for(routes, store=None):
     )
 
 
+def test_added_deployment_reaches_every_server_without_redeploy():
+    async def run():
+        kv = InMemoryKeyValueStore()
+        base = resolved()
+        store = MemoryDeploymentStore([ready_row(base)])
+        frontend = FrontendSettings.from_recipe(base.recipe)
+        servers = [DeploymentRoutes(store, frontend) for _ in range(2)]
+        variant = {
+            "name": "variant",
+            "base": base.name,
+            "overrides": {"trainer_gpu": "H200"},
+        }
+
+        async def create(seq, base_model):
+            return await second.post(
+                "/api/v1/create_model",
+                json={
+                    "session_id": session,
+                    "model_seq_id": seq,
+                    "base_model": base_model,
+                    "lora_config": {"rank": 32},
+                },
+            )
+
+        async with (
+            client_for(servers[0], kv) as first,
+            client_for(servers[1], kv) as second,
+        ):
+            session = (await second.post("/api/v1/create_session", json={})).json()[
+                "session_id"
+            ]
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert response.status_code == 202
+            assert response.json()["deployment"]["state"] == "deploying"
+            listed = (await second.get("/api/v1/spindle/deployments")).json()
+            assert [row["state"] for row in listed["deployments"]] == [
+                "ready",
+                "deploying",
+            ]
+            assert (await create(0, "variant")).status_code == 400
+
+            row = store.rows["variant"]
+            store.rows["variant"] = {**row, "state": "ready", "ready": row["config"]}
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert response.json()["deployment"]["state"] == "ready"
+            variant["overrides"] = {"trainer_gpu": "B200"}
+            response = await first.post("/api/v1/spindle/deployments", json=variant)
+            assert response.status_code == 409
+            assert "different settings" in response.json()["message"]
+
+            for seq, (base_model, definition_id) in enumerate(
+                [("variant", "variant"), (base.model, base.name)], start=1
+            ):
+                response = await create(seq, base_model)
+                assert response.status_code == 200, response.text
+                record = await kv.get(model_key(response.json()["model_id"]))
+                assert record["engine_definition_id"] == definition_id
+            assert (await servers[1].get("variant")).recipe.trainer_gpu == "H200"
+        assert len(store.deploys) == 1
+
+    asyncio.run(run())
+
+
+def test_added_deployment_takes_a_base_or_a_recipe_under_frontend_settings():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        with pytest.raises(ValueError, match="unknown base"):
+            await routes.build("other", {}, base="missing")
+        with pytest.raises(ValueError, match="lifecycle"):
+            await routes.put(
+                await routes.build("other", {"sweep_interval_s": 1}, base=base.name),
+                origin="api",
+                replace=False,
+            )
+        with pytest.raises(ValueError, match="unknown config settings: trainer_gpuu"):
+            await routes.build("other", {"trainer_gpuu": "H200"}, base=base.name)
+        assert store.deploys == []
+        assert set(store.rows) == {base.name}
+
+        file_recipe = {**vars(recipe()), "platform": {"frontend": "elsewhere"}}
+        deployment = await routes.build("from-file", {}, recipe=file_recipe)
+        assert deployment.recipe.platform == base.recipe.platform
+        row = await routes.put(deployment, origin="api", replace=False)
+        assert row["state"] == "deploying" and len(store.deploys) == 1
+
+    asyncio.run(run())
+
+
 def test_every_recipe_routes_by_name_and_plain_models_pick_the_longest():
     async def run():
         kv = InMemoryKeyValueStore()
@@ -525,11 +726,19 @@ def test_every_recipe_routes_by_name_and_plain_models_pick_the_longest():
         routes, _ = routes_for(base, longer, origins={"longer": "api"})
         assert (await routes.select(base.model)).definition_id == "longer"
         assert (await routes.select(base.name)).definition_id == base.definition_id
-        assert await routes.capabilities() == [
-            {"model_name": base.model, "max_context_length": 65536},
-            {"model_name": base.name, "max_context_length": base.max_context_length},
-            {"model_name": "longer", "max_context_length": 65536},
-        ]
+        assert sorted(
+            await routes.capabilities(), key=lambda c: c["model_name"]
+        ) == sorted(
+            [
+                {"model_name": base.model, "max_context_length": 65536},
+                {
+                    "model_name": base.name,
+                    "max_context_length": base.max_context_length,
+                },
+                {"model_name": "longer", "max_context_length": 65536},
+            ],
+            key=lambda c: c["model_name"],
+        )
         async with client_for(routes, kv) as client:
             session_id = (await client.post("/api/v1/create_session", json={})).json()[
                 "session_id"
@@ -550,6 +759,95 @@ def test_every_recipe_routes_by_name_and_plain_models_pick_the_longest():
                 assert response.status_code == 200, response.text
                 row = await kv.get(model_key(response.json()["model_id"]))
                 assert row["engine_definition_id"] == expected
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"overrides": {"trainer_gpuu": "H200"}},
+        {"overrides": {"platform.modal.region": "us-east"}},
+        {"overrides": {"platform": {}}},
+        {"overrides": {"trainer_gpus_per_node": "2"}},
+        {"overrides": {"trainer_gpus_per_node": True}},
+        {"overrides": {"trainer_gpu": 5}},
+        {"overrides": {"miles_cfg": 3}},
+        {"overrides": {"trainer_gpu.x": 1}},
+        {"overrides": {"trainer_disk_mib": 5}},
+        {"overrides": {"sweep_interval_s": 1}},
+        {"base": "missing", "overrides": {}},
+        {"base": "qwen35-9b-lora-16k", "recipe": {}, "overrides": {}},
+        {"overrides": {}},
+    ],
+)
+def test_added_deployment_invalid_requests_fail_before_store_write(body):
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        request = {"name": "variant", **body}
+        async with client_for(routes) as client:
+            response = await client.post("/api/v1/spindle/deployments", json=request)
+        assert response.status_code == 400, response.text
+        assert "Traceback" not in response.json()["message"]
+        assert store.deploys == [] and set(store.rows) == {base.name}
+
+    asyncio.run(run())
+
+
+def test_added_deployment_accepts_gpu_preferences_and_integer_float():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        async with client_for(routes) as client:
+            response = await client.post(
+                "/api/v1/spindle/deployments",
+                json={
+                    "name": "variant",
+                    "base": base.name,
+                    "overrides": {
+                        "trainer_gpu": ["H200", "B300"],
+                        "inference_routing_balance_relative": 2,
+                        "trainer_env": {"FOO": "1"},
+                    },
+                },
+            )
+        assert response.status_code == 202, response.text
+        assert len(store.deploys) == 1
+
+    asyncio.run(run())
+
+
+def test_added_deployment_conflicts_are_409_and_identical_adds_are_idempotent():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        async with client_for(routes) as client:
+
+            async def post(name, overrides):
+                return await client.post(
+                    "/api/v1/spindle/deployments",
+                    json={"name": name, "base": base.name, "overrides": overrides},
+                )
+
+            first = await post("variant", {"trainer_gpu": "H200"})
+            identical = await post("variant", {"trainer_gpu": "H200"})
+            conflict = await post("variant", {"trainer_gpu": "B200"})
+            base_conflict = await post(base.name, {"trainer_gpu": "B200"})
+        assert first.status_code == identical.status_code == 202
+        assert identical.json()["deployment"]["state"] == "deploying"
+        assert conflict.status_code == base_conflict.status_code == 409
+        assert conflict.json()["error"] == base_conflict.json()["error"] == "conflict"
+        assert len(store.deploys) == 1
+
+        store.alive = False
+        routes.invalidate()
+        retried = await routes.put(
+            await routes.build("variant", {"trainer_gpu": "H200"}, base=base.name),
+            origin="api",
+            replace=False,
+        )
+        assert retried["state"] == "deploying" and len(store.deploys) == 2
 
     asyncio.run(run())
 
