@@ -193,7 +193,7 @@ proxy_secret = modal.Secret.from_name(
     volumes={MODEL_ASSET_ROOT: model_assets},
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)] if HF_SECRET_NAME else [],
     timeout=4 * 60 * 60,
-    max_containers=1,
+    max_containers=4,
     retries=2,
 )
 async def prepare_model_assets(definition_id: str) -> None:
