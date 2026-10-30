@@ -154,11 +154,11 @@ Set `"platform.requires_proxy_auth": True` when the environment blocks unauthent
 
 ```python
 service = tinker.ServiceClient(
-    default_headers={"Modal-Key": token_id, "Modal-Secret": token_secret}
+    default_headers_overrides={"Modal-Key": token_id, "Modal-Secret": token_secret}
 )
 ```
 
-Scripts that create their own `ServiceClient` without these headers, such as tinker-cookbook's, cannot reach a server with this setting.
+Tinker SDKs older than 0.36 call this argument `default_headers`. Scripts that create their own `ServiceClient`, such as tinker-cookbook's, can run through [`with_proxy_auth.py`](../examples/shared-server/with_proxy_auth.py), which adds the headers to every client the script creates.
 
 All configs deployed together must share platform settings. Use a shared parent config when deploying several models. Explicit `--app`, `--env`, and `--region` flags override the corresponding recipe settings for that invocation. Credentials remain in Modal secrets; recipes contain their names.
 

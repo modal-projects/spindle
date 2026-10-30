@@ -16,14 +16,7 @@ import urllib.request
 
 import tinker
 from tinker import types
-
-
-def proxy_headers():
-    token_id = os.environ.get("MODAL_PROXY_TOKEN_ID")
-    token_secret = os.environ.get("MODAL_PROXY_TOKEN_SECRET")
-    if not token_id or not token_secret:
-        return {}
-    return {"Modal-Key": token_id, "Modal-Secret": token_secret}
+from with_proxy_auth import install, proxy_headers
 
 
 def wait_for_commit(base_url, api_key, commit, timeout_s):
@@ -49,9 +42,7 @@ def wait_for_commit(base_url, api_key, commit, timeout_s):
 
 
 def train(base_url, api_key, base_model, steps):
-    service = tinker.ServiceClient(
-        base_url=base_url, api_key=api_key, default_headers=proxy_headers()
-    )
+    service = tinker.ServiceClient(base_url=base_url, api_key=api_key)
     training = service.create_lora_training_client(base_model=base_model, rank=8)
     tokens = training.get_tokenizer().encode("The shared server trains one step.")
     datum = types.Datum(
@@ -85,6 +76,8 @@ def main():
     args = parser.parse_args()
     base_url = os.environ["TINKER_BASE_URL"]
     api_key = os.environ["TINKER_API_KEY"]
+    if proxy_headers():
+        install()
     if args.expect_commit:
         wait_for_commit(base_url, api_key, args.expect_commit, args.commit_timeout)
     train(base_url, api_key, args.base_model, args.steps)

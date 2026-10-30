@@ -38,18 +38,25 @@ export MODAL_PROXY_TOKEN_ID=wk-...
 export MODAL_PROXY_TOKEN_SECRET=ws-...
 ```
 
-The Tinker SDK sends the API key on its own. Pass the proxy token as headers when creating the client:
+The Tinker SDK sends the API key on its own but has no setting for the proxy token. Run scripts through `with_proxy_auth.py`, which adds the token to every client the script creates. tinker-cookbook commands work unchanged:
+
+```bash
+python examples/shared-server/with_proxy_auth.py -m tinker_cookbook.recipes.chat_sl.train \
+    model_name=Qwen/Qwen3.8-27B base_url=$TINKER_BASE_URL
+```
+
+In your own code you can pass the headers yourself instead. Tinker 0.36 and newer call the argument `default_headers_overrides`; older versions call it `default_headers`:
 
 ```python
 service = tinker.ServiceClient(
-    default_headers={
+    default_headers_overrides={
         "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
         "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
     }
 )
 ```
 
-The server picks the recipe from the client's `base_model`. tinker-cookbook scripts create their own `ServiceClient` without these headers, so they cannot reach this server yet.
+The server picks the recipe from the client's `base_model`.
 
 ## Check
 
