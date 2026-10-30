@@ -1442,6 +1442,7 @@ class ControlPlane:
                 self.trainer_autoscaling(definition_id)
                 and has_capacity is False
                 and all_instances_full
+                and not await self._untried_trainers(definition_id, instances)
             ):
                 raise EngineSaturated("trainer capacity exhausted")
             return None
@@ -1469,6 +1470,20 @@ class ControlPlane:
                     accepted_instance.instance_id,
                 )
         return placement
+
+    async def _untried_trainers(
+        self,
+        definition_id: str,
+        tried: list[EngineInstance],
+    ) -> bool:
+        """A trainer can finish starting after the candidates were listed."""
+        seen = {instance.instance_id for instance in tried}
+        try:
+            active = await self.engines.active_instances(definition_id)
+        except Exception:
+            logging.getLogger(__name__).exception("list trainers for %s", definition_id)
+            return True
+        return any(instance.instance_id not in seen for instance in active)
 
     async def _reclaim_idle_models(
         self,
