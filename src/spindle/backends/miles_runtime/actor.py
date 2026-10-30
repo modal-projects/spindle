@@ -158,11 +158,20 @@ class SpindleMilesTrainRayActor(MultiLoRATrainRayActor):
         alpha: float,
         ckpt_path: str | None = None,
         load_optimizer: bool = True,
+        optimizer: str = "adam",
     ):
         if ckpt_path:
             _sync_checkpoint_volume("reload")
+        # Forward the optimizer family only for non-Adam slots so Miles revisions
+        # without per-slot optimizer families keep loading Adam slots.
+        optimizer_kwargs = {} if optimizer == "adam" else {"optimizer": optimizer}
         result = super().load_slot(
-            slot, rank, alpha, ckpt_path=ckpt_path, load_optimizer=load_optimizer
+            slot,
+            rank,
+            alpha,
+            ckpt_path=ckpt_path,
+            load_optimizer=load_optimizer,
+            **optimizer_kwargs,
         )
         if ckpt_path and expert_lora_compat.enabled():
             expert_lora_compat.restore_factory_weights(

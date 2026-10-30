@@ -18,6 +18,7 @@ from .contract import (
     Backend,
     ForwardBatch,
     ModelSpec,
+    OptimizerParams,
     SamplerPublication,
 )
 from .megatron_config import parse_backend_config
@@ -99,6 +100,10 @@ class LoraMegatronBackend(Backend):
     def accept_model(self, model_id: str, spec: ModelSpec) -> None:
         if spec.parameterization != "lora" or spec.lora_config is None:
             raise ValueError("LoRA backend requires lora parameterization")
+        if spec.optimizer != "adamw":
+            raise ValueError(
+                f"LoRA backend does not support the {spec.optimizer} optimizer"
+            )
         if spec.base_model != self.base_model:
             raise ValueError(
                 f"base model {spec.base_model!r} does not match deployment "
@@ -152,9 +157,11 @@ class LoraMegatronBackend(Backend):
     def optim_step(
         self,
         model_ids: tuple[str, ...],
-        adam: AdamParams,
+        params: OptimizerParams,
     ) -> tuple[OptimStepResponse, ...]:
-        return self._optim_step_batch(model_ids, adam)
+        if not isinstance(params, AdamParams):
+            raise ValueError("LoRA backend supports only AdamW parameters")
+        return self._optim_step_batch(model_ids, params)
 
     def capture_checkpoint(
         self,

@@ -14,6 +14,7 @@ from tinker import AdamParams, ForwardBackwardOutput
 from tinker.types.forward_backward_input import ForwardBackwardInput
 
 from spindle.backends.contract import (
+    DimuonParams,
     Backend,
     ForwardBatch,
     ForwardItem,
@@ -137,7 +138,7 @@ class DistributedExecutor:
             return {"path": payload.uri, "type": "load_weights"}
 
         if kind == OperationKind.OPTIM_STEP:
-            if not isinstance(payload, AdamParams):
+            if not isinstance(payload, (AdamParams, DimuonParams)):
                 raise TypeError("optim_step requires an optimizer payload")
             outputs = await asyncio.to_thread(
                 self._dispatch,
