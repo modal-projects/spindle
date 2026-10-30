@@ -204,11 +204,27 @@ def in_background(step):
     return future
 
 
+def _frontend_client():
+    base_url = os.environ.get("TINKER_BASE_URL")
+    api_key = os.environ.get("TINKER_API_KEY")
+    if not base_url or not api_key:
+        raise ValueError(
+            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
+        )
+    return httpx.Client(
+        base_url=base_url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
+    )
+
+
 def _response_body(response, action):
     try:
         body = response.json()
     except ValueError:
         body = {}
+    if response.status_code == 405:
+        raise ValueError(
+            f"This frontend predates {action.split()[0].lower()} configs; redeploy it once with spindle deploy."
+        )
     if response.is_error:
         message = (
             body.get("message", response.text)
@@ -219,23 +235,13 @@ def _response_body(response, action):
     return body
 
 
-def add_deployment(name, *, base, overrides, base_url, api_key):
+def add_deployment(name, *, base, overrides):
     """Add one config to a running frontend through its deployments API."""
-    if not base_url or not api_key:
-        raise ValueError(
-            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
-        )
-    with httpx.Client(
-        base_url=base_url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
-    ) as client:
+    with _frontend_client() as client:
         response = client.post(
             "/api/v1/spindle/deployments",
             json={"name": name, "base": base, "overrides": overrides},
         )
-        if response.status_code == 405:
-            raise ValueError(
-                "This frontend predates adding configs; redeploy it once with spindle deploy."
-            )
         row = _response_body(response, f"Adding {name}")["deployment"]
         deadline = time.monotonic() + ADD_DEADLINE_S
         if row["state"] == "deploying":
@@ -257,23 +263,32 @@ def add_deployment(name, *, base, overrides, base_url, api_key):
         print(f"Added {name}. Train on it by passing base_model={name!r}.")
 
 
-def remove_deployment(name, *, base_url, api_key):
+def remove_deployment(name):
     """Remove one config from a running frontend through its deployments API."""
-    if not base_url or not api_key:
-        raise ValueError(
-            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
+    with _frontend_client() as client:
+        _response_body(
+            client.delete(f"/api/v1/spindle/deployments/{name}"), f"Removing {name}"
         )
-    with httpx.Client(
-        base_url=base_url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
-    ) as client:
-        response = client.delete(f"/api/v1/spindle/deployments/{name}")
-        if response.status_code == 405:
-            raise ValueError(
-                "This frontend predates removing configs; redeploy it once with spindle deploy."
-            )
-        _response_body(response, f"Removing {name}")
-        print(
-            f"Removed {name}. Its trainer and inference apps scale down on their own."
+    print(f"Removed {name}. Its trainer and inference apps scale down on their own.")
+
+
+def _only(args, flag, *also):
+    """Reject deploy options that make no sense next to --add or --remove."""
+    others = {
+        "files",
+        "all",
+        "app",
+        "env",
+        "region",
+        "refresh_trainer",
+        "refresh_inference",
+        "add",
+        "base",
+        "remove",
+    } - {flag, *also}
+    if any(getattr(args, other) for other in others):
+        raise ValueError(
+            f"--{flag} cannot be combined with config files, --all, --app, --env, --region, or --refresh-trainer/--refresh-inference"
         )
 
 
@@ -479,56 +494,16 @@ def main(argv=None):
             if args.remove is not None:
                 if not args.remove:
                     raise ValueError("--remove requires a non-empty name")
-                if (
-                    args.files
-                    or args.all
-                    or args.add is not None
-                    or args.base is not None
-                    or args.app is not None
-                    or args.env is not None
-                    or args.region is not None
-                    or args.refresh_trainer
-                    or args.refresh_inference
-                ):
-                    raise ValueError(
-                        "--remove cannot be combined with config files, --all, --add, --base, --app, --env, --region, or --refresh-trainer/--refresh-inference"
-                    )
-                remove_deployment(
-                    args.remove,
-                    base_url=os.environ.get("TINKER_BASE_URL"),
-                    api_key=os.environ.get("TINKER_API_KEY"),
-                )
+                _only(args, "remove")
+                remove_deployment(args.remove)
                 return
             if args.add is not None:
                 if not args.add:
                     raise ValueError("--add requires a non-empty name")
-                if (
-                    args.files
-                    or args.all
-                    or args.app is not None
-                    or args.env is not None
-                    or args.region is not None
-                    or args.refresh_trainer
-                    or args.refresh_inference
-                ):
-                    raise ValueError(
-                        "--add cannot be combined with config files, --all, --app, --env, --region, or --refresh-trainer/--refresh-inference"
-                    )
+                _only(args, "add", "base")
                 if args.base is None:
                     raise ValueError("--base is required with --add")
-                base_url = os.environ.get("TINKER_BASE_URL")
-                api_key = os.environ.get("TINKER_API_KEY")
-                if not base_url or not api_key:
-                    raise ValueError(
-                        "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
-                    )
-                add_deployment(
-                    args.add,
-                    base=args.base,
-                    overrides=overrides,
-                    base_url=base_url,
-                    api_key=api_key,
-                )
+                add_deployment(args.add, base=args.base, overrides=overrides)
                 return
             if args.base is not None:
                 raise ValueError("--base requires --add")

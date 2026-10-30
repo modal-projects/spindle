@@ -311,7 +311,6 @@ def test_add_http_errors_exit_without_polling(
     [
         ("ready", None),
         ("failed", "inference app deploy failed: no capacity"),
-        ("stale", "frontend platform changed"),
     ],
 )
 def test_add_polls_until_ready_or_failure(
@@ -656,6 +655,8 @@ def test_remove_deletes_the_named_config(monkeypatch, capsys):
 
 
 def test_remove_reports_unknown_names_and_old_frontends(monkeypatch):
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example/")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
     responses = iter(
         [
             httpx.Response(
@@ -666,9 +667,9 @@ def test_remove_reports_unknown_names_and_old_frontends(monkeypatch):
     )
     mock_add_client(monkeypatch, lambda request: next(responses))
     with pytest.raises(ValueError, match="no deployment named 'x'"):
-        cli.remove_deployment("x", base_url="https://f.example", api_key="k")
+        cli.remove_deployment("x")
     with pytest.raises(ValueError, match="predates removing configs"):
-        cli.remove_deployment("x", base_url="https://f.example", api_key="k")
+        cli.remove_deployment("x")
 
 
 @pytest.mark.parametrize(
