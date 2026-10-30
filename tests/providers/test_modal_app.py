@@ -11,6 +11,7 @@ import pytest
 
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
+from spindle.configuration import BaseConfig
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.errors import RecordNotFound
 from spindle.providers.local import InMemoryKeyValueStore
@@ -328,8 +329,6 @@ def test_recipes_on_the_same_weights_share_one_download(monkeypatch) -> None:
 
 
 def test_revisions_of_one_repo_download_one_at_a_time(monkeypatch) -> None:
-    from spindle.configuration import BaseConfig
-
     modal_app = importlib.import_module("spindle.providers.modal.app")
     registry = InMemoryKeyValueStore()
     calls = {}
@@ -348,7 +347,7 @@ def test_revisions_of_one_repo_download_one_at_a_time(monkeypatch) -> None:
         assert spawned == [LORA_DEFINITION]
         calls["fc-1"] = False
         await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
-        assert await modal_app._start_weights_download(other.definition_id) is not None
+        assert await modal_app._weights_download(other.definition_id) is not None
 
     asyncio.run(run())
     assert spawned == [LORA_DEFINITION, other.definition_id]
@@ -507,7 +506,11 @@ def test_execute_sample_waits_for_weights_and_deploys_the_base_pool(
             return None
         await registry.put(
             modal_app._weights_call_key(definition_id),
-            {"call_id": "fc-1", "started_at": 1.0},
+            {
+                "call_id": "fc-1",
+                "started_at": 1.0,
+                "weights": modal_app._weights_id(definition_id),
+            },
         )
         return 1.0
 

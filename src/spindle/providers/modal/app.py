@@ -334,6 +334,8 @@ async def _weights_download(definition_id: str) -> float | None:
     record = await shared_kv().get(_weights_call_key(definition_id))
     if record is None:
         return None
+    if record["weights"] != _weights_id(definition_id):
+        return await _start_weights_download(definition_id)
     try:
         running = await _call_running(record["call_id"])
     except Exception as exc:
@@ -392,8 +394,7 @@ async def _ensure_weights_ready(definition_id: str) -> None:
         except Exception as exc:
             if await _weights_are_ready(definition_id):
                 return
-            ours = _weights_id(definition_id)
-            if record.get("weights", ours) != ours:
+            if record["weights"] != _weights_id(definition_id):
                 continue
             raise WeightsDownloadFailed(
                 f"Downloading weights for {definition_id} failed: {exc}"
