@@ -1171,3 +1171,27 @@ def test_override_values_replace_dictionaries_and_lists():
     )
     assert config.inference_gpu == "H200"
     assert config.sglang_cfg == {}
+
+
+def test_removed_deployment_stops_routing_and_is_gone_from_the_list():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        async with client_for(routes) as client:
+            added = await client.post(
+                "/api/v1/spindle/deployments",
+                json={"name": "variant", "base": base.name, "overrides": {}},
+            )
+            assert added.status_code == 202, added.text
+            removed = await client.delete("/api/v1/spindle/deployments/variant")
+            assert removed.status_code == 200, removed.text
+            assert removed.json()["deployment"]["name"] == "variant"
+            listed = (await client.get("/api/v1/spindle/deployments")).json()
+            assert [d["name"] for d in listed["deployments"]] == [base.name]
+            assert "variant" not in store.rows
+            assert await routes.get("variant") is None
+            missing = await client.delete("/api/v1/spindle/deployments/variant")
+            assert missing.status_code == 404
+            assert missing.json()["error"] == "not_found"
+
+    asyncio.run(run())

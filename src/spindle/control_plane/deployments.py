@@ -47,6 +47,9 @@ class DeploymentStore:
     async def put(self, name: str, row: dict[str, Any]) -> None:
         await self.kv().put(name, row)
 
+    async def delete(self, name: str) -> None:
+        await self.kv().delete(name)
+
     async def deploy(
         self, row: dict[str, Any], *, refresh_trainer: bool, refresh_inference: bool
     ) -> None:
@@ -58,6 +61,13 @@ class DeploymentStore:
 
 class DeploymentConflict(ValueError):
     """A recipe name is already registered with different settings."""
+
+
+class DeploymentNotFound(KeyError):
+    """No recipe is registered under that name."""
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else ""
 
 
 @dataclass(frozen=True)
@@ -334,6 +344,18 @@ class DeploymentRoutes:
         )
         await self.store.put(name, row)
         await self._start(row, refresh_trainer, refresh_inference)
+        return row
+
+    async def remove(self, name: str) -> dict[str, Any]:
+        """Drop a recipe from the registry; it stops routing on the next read.
+
+        Its trainer and inference apps are left to scale down on their own.
+        """
+        row = await self.store.get(name)
+        if row is None:
+            raise DeploymentNotFound(f"no deployment named {name!r}")
+        await self.store.delete(name)
+        self.invalidate()
         return row
 
     async def _start(self, row, refresh_trainer, refresh_inference):

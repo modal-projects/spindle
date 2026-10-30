@@ -31,7 +31,12 @@ from spindle.request_timing import mark
 from spindle.telemetry.trainer import CommandMiddleware
 from spindle.version import __version__, source_commit
 
-from .deployments import DeploymentConflict, DeploymentRoutes, decode_definition
+from .deployments import (
+    DeploymentConflict,
+    DeploymentNotFound,
+    DeploymentRoutes,
+    decode_definition,
+)
 from .service import ControlPlane, FutureResolutionStatus
 
 MODAL_APP_NAME_LIMIT = 64
@@ -42,6 +47,7 @@ ERROR_STATUSES: tuple[tuple[type[Exception], int, str], ...] = (
     (RecordUnavailable, 409, "conflict"),
     (RecordNotFound, 404, "not_found"),
     (DeploymentConflict, 409, "conflict"),
+    (DeploymentNotFound, 404, "not_found"),
     (RequestValidationError, 400, "invalid_request"),
     (ValueError, 400, "invalid_request"),
     (httpx.TransportError, 503, "engine_unreachable"),
@@ -343,6 +349,10 @@ def create_control_plane_app(
         )
         row = await routes.put(deployment, origin="api", replace=False)
         return {"deployment": _deployment_summary(row)}
+
+    @app.delete("/api/v1/spindle/deployments/{name}")
+    async def remove_deployment(name: str):
+        return {"deployment": _deployment_summary(await routes.remove(name))}
 
     @app.post("/api/v1/client/config")
     async def client_config() -> dict[str, object]:

@@ -187,11 +187,18 @@ curl -sS -i "$TINKER_BASE_URL/api/v1/spindle/deployments" \
 
 The deployments GET returns HTTP 200. Poll it until the added row is `ready`, or inspect its `error` when it is `failed`; a repeated identical POST is idempotent and also returns HTTP 202.
 
+To take a config out of service, delete its row; the frontend stops routing to it on its next registry read and its trainer and inference apps scale down on their own. An unknown name returns HTTP 404.
+
+```bash
+curl -sS -i -X DELETE "$TINKER_BASE_URL/api/v1/spindle/deployments/qwen35-9b-lora-16k-h200" \
+  -H "X-API-Key: $TINKER_API_KEY"
+```
+
 The frontend stores every recipe in one registry (a Modal Volume named after the frontend's app ID, one `<recipe>.json` file per recipe), whether it was included in `spindle deploy` or added through the API. A deploy adds or updates only the listed recipes; unlisted recipes remain served. The new config takes the frontend's platform settings and must match its lifecycle settings. Unknown settings, platform overrides, and values with the wrong type are rejected before deployment. `trainer_env` and `inference_env` are ordinary recipe fields and use the same validation as file-based configs. A different config under an existing name returns HTTP 409; adding identical settings is idempotent.
 
 `GET /api/v1/spindle/deployments` reports `origin`, `state`, `updated_at`, and `error`. States are `deploying`, `ready` and `failed`; a row whose deploy died stays `deploying` and a new POST starts a new attempt.
 
-Plain model IDs such as `Qwen/Qwen3.5-9B` route among all routable recipes by longest context, regardless of origin. Exact recipe-name matches take precedence. To use a specific config, pass its name as `base_model`.
+Plain model IDs such as `Qwen/Qwen3.5-9B` route among all ready recipes by longest context, regardless of origin. Exact recipe-name matches take precedence. To use a specific config, pass its name as `base_model`.
 
 Anyone with the frontend's API key can add configs, and each added config can start GPUs.
 

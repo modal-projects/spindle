@@ -22,7 +22,7 @@
 - `uv run spindle deploy`: interactive picker; without a terminal and without args it exits, deploying nothing. Checks secrets first and prints creation commands for missing ones.
 - `uv run spindle deploy <name...>`: bundled configs by name. `--all`: every bundled config (in `src/spindle/configs`).
 - `uv run spindle deploy config.py`: custom config file.
-- `POST /api/v1/spindle/deployments`: add a named config to a running frontend without redeploying it. Send a JSON body with `name`, a ready `base`, and `overrides`, then poll `GET /api/v1/spindle/deployments` until the row is `ready` or reports an error.
+- `POST /api/v1/spindle/deployments`: add a named config to a running frontend without redeploying it. Send a JSON body with `name`, a ready `base`, and `overrides`, then poll `GET /api/v1/spindle/deployments` until the row is `ready` or reports an error. `DELETE /api/v1/spindle/deployments/{name}` removes a config from the frontend (HTTP 404 if the name is unknown).
 - Invalid config posts return HTTP 400; reusing a name with different settings returns HTTP 409.
 - Each deploy adds or updates the listed configs in the per-frontend registry; configs not listed remain served. Plain model IDs select the longest-context ready config regardless of origin; exact recipe names win.
 
