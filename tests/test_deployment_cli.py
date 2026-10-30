@@ -49,7 +49,7 @@ def deployed(monkeypatch):
             self.name = name
             self.role = role
 
-        def deploy(self, environment_name=None):
+        def deploy(self, environment_name=None, tag=""):
             state.calls.append(self.role)
             if state.fail == self.role:
                 raise RuntimeError(f"{self.role} deploy failed")

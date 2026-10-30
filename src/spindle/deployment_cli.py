@@ -42,7 +42,7 @@ from spindle.providers.modal.deployment_configs import (
 )
 from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.lora_pool import LoraPoolSpec
-from spindle.version import __version__, source_commit
+from spindle.version import __version__, deployment_tag, source_commit
 
 
 NO_CONFIGS = (
@@ -128,11 +128,13 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
     pools = deployed_pools(platform["frontend"], environment) if inference else []
 
     def deploy_trainer(deployment):
-        build_trainer_app(deployment, platform)[0].deploy(environment_name=environment)
+        build_trainer_app(deployment, platform)[0].deploy(
+            environment_name=environment, tag=deployment_tag()
+        )
 
     def deploy_inference(deployment):
         build_inference_app(deployment, platform)[0].deploy(
-            environment_name=environment
+            environment_name=environment, tag=deployment_tag()
         )
         for record in pools:
             if record["definition_id"] != deployment.definition_id:
@@ -144,11 +146,11 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
             )
             if not app_is_missing(pool.app_name, environment):
                 build_rollout_app(deployment, pool, platform)[0].deploy(
-                    environment_name=environment
+                    environment_name=environment, tag=deployment_tag()
                 )
 
     def deploy_frontend():
-        command = [sys.executable, "-m", "modal", "deploy"]
+        command = [sys.executable, "-m", "modal", "deploy", "--tag", deployment_tag()]
         if environment:
             command += ["--env", environment]
         captured = {"capture_output": True, "text": True} if run_steps else {}
