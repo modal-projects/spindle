@@ -43,7 +43,7 @@ except ImportError:
 
 from spindle.startup_timing import timeline
 
-from . import expert_lora_compat, host_syncs
+from . import allgather_cp_lora, expert_lora_compat, host_syncs
 from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volume
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
@@ -68,6 +68,7 @@ install_qwen3_vl_cp_position_ids(
 )
 
 host_syncs.install()
+allgather_cp_lora.install(megatron_model)
 
 
 def _publish_checkpoints_across_nodes() -> None:

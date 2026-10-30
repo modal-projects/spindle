@@ -123,6 +123,7 @@ def _load_actor(monkeypatch):
     fsdp_actor = _module(monkeypatch, "miles.backends.fsdp_utils.actor")
     megatron_actor = _module(monkeypatch, "miles.backends.megatron_utils.actor")
     megatron_model = _module(monkeypatch, "miles.backends.megatron_utils.model")
+    megatron_model.get_batch = lambda *args, **kwargs: {}
     checkpoint = _module(monkeypatch, "miles.backends.megatron_utils.lora.checkpoint")
     _module(monkeypatch, "miles.backends.megatron_utils.lora.model")
     _module(
