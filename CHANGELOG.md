@@ -11,6 +11,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 - LoRA trainers can split one long sequence across GPUs for models that need it, such as DeepSeek-V4.1 (Miles `allgather_cp` with `qkv_format: bshd`).
 - `examples/shared-server`: one deployment a team shares, with three recipes on a `prod` frontend in its own environment, a smoke test, and a workflow that redeploys it from `main`.
 
+### Fixed
+
+- Creating a model no longer fails with `trainer capacity exhausted` when a trainer finishes starting while the model is being placed (#185).
+
 ## 0.1.4 - 2026-10-29
 
 Faster DeepSeek-V4.1-Flash sampling and sampler starts, and agent skills for working with Spindle.
