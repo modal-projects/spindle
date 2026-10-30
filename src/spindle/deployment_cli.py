@@ -257,6 +257,26 @@ def add_deployment(name, *, base, overrides, base_url, api_key):
         print(f"Added {name}. Train on it by passing base_model={name!r}.")
 
 
+def remove_deployment(name, *, base_url, api_key):
+    """Remove one config from a running frontend through its deployments API."""
+    if not base_url or not api_key:
+        raise ValueError(
+            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
+        )
+    with httpx.Client(
+        base_url=base_url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
+    ) as client:
+        response = client.delete(f"/api/v1/spindle/deployments/{name}")
+        if response.status_code == 405:
+            raise ValueError(
+                "This frontend predates removing configs; redeploy it once with spindle deploy."
+            )
+        _response_body(response, f"Removing {name}")
+        print(
+            f"Removed {name}. Its trainer and inference apps scale down on their own."
+        )
+
+
 def _deploy_parser(root):
     for action in root._actions:
         choices = getattr(action, "choices", None)
@@ -361,6 +381,9 @@ def parser():
     apply.add_argument(
         "--base", metavar="BASE", help="Existing config to copy with --add"
     )
+    apply.add_argument(
+        "--remove", metavar="NAME", help="Remove a config from a running frontend"
+    )
     apply.add_argument("--all", action="store_true", help="Deploy every bundled config")
     apply.add_argument("--app")
     apply.add_argument("--env")
@@ -453,6 +476,29 @@ def main(argv=None):
             frontend = args.app or BaseConfig.platform["frontend"]
             environment = args.env or os.environ.get("MODAL_ENVIRONMENT")
             chosen = []
+            if args.remove is not None:
+                if not args.remove:
+                    raise ValueError("--remove requires a non-empty name")
+                if (
+                    args.files
+                    or args.all
+                    or args.add is not None
+                    or args.base is not None
+                    or args.app is not None
+                    or args.env is not None
+                    or args.region is not None
+                    or args.refresh_trainer
+                    or args.refresh_inference
+                ):
+                    raise ValueError(
+                        "--remove cannot be combined with config files, --all, --add, --base, --app, --env, --region, or --refresh-trainer/--refresh-inference"
+                    )
+                remove_deployment(
+                    args.remove,
+                    base_url=os.environ.get("TINKER_BASE_URL"),
+                    api_key=os.environ.get("TINKER_API_KEY"),
+                )
+                return
             if args.add is not None:
                 if not args.add:
                     raise ValueError("--add requires a non-empty name")

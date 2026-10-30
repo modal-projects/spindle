@@ -31,6 +31,7 @@
     --miles_cfg.max_tokens_per_gpu=8192
   ```
 
+- `uv run spindle deploy --remove NAME`: remove a config from a running frontend (`DELETE /api/v1/spindle/deployments/NAME`); it stops routing on the frontend's next registry read.
 - The equivalent API request is `POST /api/v1/spindle/deployments`, with a JSON body containing `name`, a ready `base`, and `overrides`. Poll `GET /api/v1/spindle/deployments` until the row is `ready` or reports an error. `DELETE /api/v1/spindle/deployments/{name}` removes a config from the frontend (HTTP 404 if the name is unknown):
 
   ```bash

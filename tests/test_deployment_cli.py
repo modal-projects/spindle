@@ -635,3 +635,54 @@ def test_conflicting_platforms_fail_before_deployment(deployed):
     with pytest.raises(ValueError, match="share platform settings"):
         cli.deploy([first, second])
     assert deployed.calls == []
+
+
+def test_remove_deletes_the_named_config(monkeypatch, capsys):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"deployment": {"name": "variant"}})
+
+    mock_add_client(monkeypatch, handle)
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example/")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    cli.main(["deploy", "--remove", "variant"])
+    assert [(r.method, r.url.path) for r in requests] == [
+        ("DELETE", "/api/v1/spindle/deployments/variant")
+    ]
+    assert requests[0].headers["X-API-Key"] == "test-key"
+    assert "Removed variant" in capsys.readouterr().out
+
+
+def test_remove_reports_unknown_names_and_old_frontends(monkeypatch):
+    responses = iter(
+        [
+            httpx.Response(
+                404, json={"error": "not_found", "message": "no deployment named 'x'"}
+            ),
+            httpx.Response(405),
+        ]
+    )
+    mock_add_client(monkeypatch, lambda request: next(responses))
+    with pytest.raises(ValueError, match="no deployment named 'x'"):
+        cli.remove_deployment("x", base_url="https://f.example", api_key="k")
+    with pytest.raises(ValueError, match="predates removing configs"):
+        cli.remove_deployment("x", base_url="https://f.example", api_key="k")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["deploy", "--remove", "x", "--add", "y", "--base", "z"],
+        ["deploy", "--remove", "x", "config.py"],
+        ["deploy", "--remove", "x", "--all"],
+    ],
+)
+def test_remove_rejects_other_deploy_options(args, monkeypatch):
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example/")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    mock_add_client(monkeypatch, lambda request: pytest.fail("no request expected"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 1
