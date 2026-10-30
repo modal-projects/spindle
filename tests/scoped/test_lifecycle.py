@@ -85,7 +85,7 @@ def test_owned_children_stop_before_parent(
         try:
             yield
         except KeyboardInterrupt:
-            pass  # Modal app.run suppresses this.
+            pass
         finally:
             events.append("parent-stop")
             if parent_exc is not None:
@@ -95,7 +95,6 @@ def test_owned_children_stop_before_parent(
         events.append("read-tags")
         if tag_failure == "read":
             raise RuntimeError("tag read failure")
-        # Real apps soft-delete their tag rows at stop.
         if "parent-stop" in events:
             return {}
         return dict(base_tags)
@@ -177,7 +176,6 @@ def test_owned_children_stop_before_parent(
         assert events.index("read-tags") < events.index("parent-stop")
     if "write-tags" in events:
         assert events.index("write-tags") > events.index("parent-stop")
-    # Ownership metadata is kept when child context shutdown fails.
     if "registry-delete" in events and "write-tags" in events:
         assert events.index("write-tags") > events.index("registry-delete")
 

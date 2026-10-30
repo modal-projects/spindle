@@ -1,5 +1,3 @@
-"""Scoped Modal provisioning. Returned credentials work with unmodified Tinker."""
-
 from __future__ import annotations
 
 import asyncio
@@ -42,23 +40,13 @@ def run(
     proxy_secret=None,
     telemetry_secret=None,
 ):
-    """Yield (url, api_key); stop pinned apps before the ephemeral parent.
-
-    warm explicitly starts one trainer invocation; trainer min_containers is zero.
-    One training model is active at a time. A lost trainer may be replaced
-    by creating a new full training client in the same deployment.
-    Pinned pools have min_containers=0 and are ephemeral apps owned by this
-    process. Owner loss stops them after Modal's heartbeat timeout.
-    The scoped app is tagged spindle_scope_status=completed/failed/cancelled;
-    completed means the scoped block exited cleanly, not training quality.
-    """
     import modal
 
     from spindle.providers.modal.scoped import build_app
 
     engine.validate()
     latest = latest or Pool()
-    pinned = Pool()  # Fixed zero minimum; not a user-facing pool setting.
+    pinned = Pool()
     import sys
 
     if sys.version_info[:2] != (3, 12):
@@ -136,8 +124,6 @@ def run(
                         yield url, api_key
                     finally:
                         registry.put("closing", True)
-                        # No new demand is accepted; child contexts close
-                        # before parent.
                         owner.close()
                         owner = None
                 except BaseException as exc:
@@ -151,13 +137,9 @@ def run(
                             "could not read app tags before shutdown: %r",
                             tag_error,
                         )
-            # Modal suppresses KeyboardInterrupt on app.run exit. The
-            # provisioning context must not turn an interrupted user's
-            # training block into success.
             if failure is not None:
                 raise failure
         finally:
-            # Keep ownership metadata if child context shutdown fails.
             if owner is not None:
                 owner.close()
             modal.Dict.objects.delete(registry_name, allow_missing=True)
