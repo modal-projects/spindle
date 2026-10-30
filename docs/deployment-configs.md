@@ -168,11 +168,12 @@ One frontend serves all models through Tinker’s `base_model`. If several recip
 
 Every recipe a frontend serves is a row in one registry, a Modal Dict named after the frontend's app ID. `spindle deploy` publishes the frontend with only its platform and lifecycle settings, then registers each listed recipe; the frontend deploys the trainer and inference apps that are missing or changed and marks the row `ready`. Rows record `state` (`deploying`, `ready`, `failed`), the last ready config, and the attempt that owns them, so a recipe being redeployed keeps serving its last ready version. A row left `deploying` after its worker stopped is reported `failed`; deploying it again retries. If a redeploy changes the frontend's platform settings, rows whose last-ready config uses the old platform become `stale` and stop routing until they are deployed again.
 
-Upgrading a frontend that still ships a configs file: `spindle deploy` first
-writes a ready registry row for every listed recipe the old frontend already
-serves unchanged, then redeploys the frontend. Those recipes stay routable
-through the swap and their trainer/inference apps are not deployed again; only
-recipes that changed (or are being refreshed) go through a new deploy.
+Upgrading a frontend that still ships a configs file needs no extra step: any
+`spindle deploy` on the new version first writes a ready registry row for every
+recipe the old frontend serves, then redeploys the frontend. Those recipes stay
+routable through the swap and their trainer/inference apps are not deployed
+again, whether or not they were listed in that deploy; only a listed recipe
+whose config changed (or is being refreshed) goes through a new deploy.
 
 ## Update isolation
 

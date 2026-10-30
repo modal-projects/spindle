@@ -62,6 +62,7 @@ def deployed(monkeypatch):
     class Function:
         def remote(self, configs_json, refresh_trainers, refresh_inference):
             state.calls.append("deploy_recipes")
+            state.legacy = []
             state.configs = json.loads(configs_json)
             state.refresh = (refresh_trainers, refresh_inference)
             for config in state.configs:
@@ -108,15 +109,27 @@ def deployed(monkeypatch):
     return state
 
 
-def test_deploy_seeds_registry_from_a_pre_registry_frontend(deployed):
+def test_deploy_migrates_every_recipe_of_a_pre_registry_frontend(deployed):
     unchanged = deployment()
     changed = deployment("qwen35-9b-fft-64k")
     served_before = changed.model_dump(mode="json")
     served_before["recipe"]["trainer_gpu"] = "B200"
-    deployed.legacy = [unchanged.model_dump(mode="json"), served_before]
+    unlisted = deployment("qwen35-9b-lora-16k").model_dump(mode="json")
+    unlisted["recipe"]["name"] = "unlisted-but-served"
+    deployed.legacy = [unchanged.model_dump(mode="json"), served_before, unlisted]
     cli.deploy([unchanged, changed])
     assert deployed.calls == ["seed", "frontend", "deploy_recipes"]
-    assert [row["recipe"]["name"] for row in deployed.seeded] == [unchanged.name]
+    assert [row["recipe"]["name"] for row in deployed.seeded] == [
+        unchanged.name,
+        "unlisted-but-served",
+    ]
+
+
+def test_deploy_does_not_seed_a_recipe_being_refreshed(deployed):
+    recipe = deployment()
+    deployed.legacy = [recipe.model_dump(mode="json")]
+    cli.deploy([recipe], refresh_trainers=[recipe.name])
+    assert "seed" not in deployed.calls
 
 
 def test_deploy_does_not_seed_a_registry_frontend(deployed):

@@ -89,25 +89,33 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
         inference.update(names)
 
     def seed_registry():
-        """Keep a pre-registry frontend's recipes routable across the upgrade.
+        """Migrate a pre-registry frontend's recipes across the upgrade.
 
         A frontend that still ships a configs file answers `deployed_configs`
-        with bare configs instead of registry rows. Every listed recipe it
-        already serves unchanged is written to the registry as ready before
-        the frontend swaps over, so nothing drops out and its apps stay put.
+        with bare configs instead of registry rows. Every recipe it serves is
+        written to the registry as ready before the frontend swaps over, so
+        nothing drops out and its apps stay put, except a listed recipe whose
+        config changed or is being refreshed: that one deploys as usual.
         """
         served = deployed_configs(platform["frontend"], environment)
         legacy = [config for config in served if "state" not in config]
         if not legacy:
             return
-        unchanged = [
-            deployment.model_dump(mode="json")
+        listed = {
+            deployment.name: deployment.model_dump(mode="json")
             for deployment in configs
-            if deployment.model_dump(mode="json") in legacy
-            and deployment.name not in trainers | inference
+        }
+        keep = [
+            config
+            for config in legacy
+            if config["recipe"]["name"] not in listed
+            or (
+                listed[config["recipe"]["name"]] == config
+                and config["recipe"]["name"] not in trainers | inference
+            )
         ]
-        if unchanged:
-            seed_registry_rows(platform["frontend"], environment, unchanged)
+        if keep:
+            seed_registry_rows(platform["frontend"], environment, keep)
 
     def deploy_frontend():
         seed_registry()
