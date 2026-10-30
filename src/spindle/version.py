@@ -46,6 +46,10 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def deployment_tag() -> str:
+    return f"v{__version__}"
+
+
 def version_tags() -> dict[str, str]:
     sha, dirty, _ = (source_commit() or "unknown").partition("-dirty")
     return {"spindle_version": __version__, "spindle_commit": sha[:7] + dirty}

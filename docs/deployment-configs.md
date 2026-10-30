@@ -150,7 +150,7 @@ config = Config()
 
 All configs deployed together must share platform settings. Use a shared parent config when deploying several models. Explicit `--app`, `--env`, and `--region` flags override the corresponding recipe settings for that invocation. Credentials remain in Modal secrets; recipes contain their names.
 
-One frontend serves all models through Tinker’s `base_model`. When recipes share a model, the first matching recipe in the `spindle deploy` argument list is used. Training also matches the requested LoRA/FFT mode; base sampling uses the first recipe regardless of training mode. To select a specific recipe, pass its name from `/api/v1/spindle/deployments` as `base_model`. The frontend lists the current config set only.
+One frontend serves all models through Tinker’s `base_model`. If several recipes serve the same model, requests by model name go to the one with the longest context. To use a specific recipe, pass its name as `base_model`. `get_server_capabilities` lists every recipe and its context length.
 
 ## Update isolation
 

@@ -6,13 +6,27 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Added
 
-- DeepSeek-V4.1-Flash LoRA recipes with longer context: `deepseek_v41_flash_lora_64k` trains on B300 or B200, and `deepseek_v41_flash_lora_128k` trains on B300 with each sequence split across two GPUs (context parallelism). H200 cannot hold a 64K training sequence for this model.
+- `deepseek_v41_flash_lora_64k`: DeepSeek-V4.1-Flash LoRA with 64K context. It trains at TP8 on B300 or B200; H200 cannot hold a 64K training sequence for this model.
+- `deepseek_v41_flash_lora_128k`: DeepSeek-V4.1-Flash LoRA with 128K context. It trains on B300, with each sequence split across two GPUs (context parallelism, TP4 × CP2).
 - LoRA trainers can split one long sequence across GPUs for models that need it, such as DeepSeek-V4.1 (Miles `allgather_cp` with `qkv_format: bshd`).
+
+## 0.1.4 - 2026-10-29
+
+Faster DeepSeek-V4.1-Flash sampling and sampler starts, and agent skills for working with Spindle.
+
+### Added
+
+- `deepseek_v41_flash_lora_32k_b300`: the 32K DeepSeek-V4.1-Flash recipe on B300, which holds a 32K row at TP2 (#163).
+- `spindle skills install` installs agent skills that explain deploying Spindle, where it differs from Tinker, and how to run experiments on it (#140).
 
 ### Changed
 
-- Sampler images set `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=1`. SGLang still applies split-K only to the BF16 rank-32 CSGMV shapes it measured, and never in deterministic mode. LoRA servers already set the same flag (#123); set it to `0` in `inference_env` to turn it off.
-- DeepSeek-V4.1-Flash samplers keep their compiled kernels on the shared kernel-cache volume, like trainers, and start nearly five minutes sooner once the cache is warm. Other recipes can do the same by setting `SGLANG_CACHE_DIR` under `/root/.cache/kernel-cache` in `inference_env`.
+- The DeepSeek-V4.1-Flash 32K recipes train at TP4 instead of TP8 on H200 and B200, so each rank runs half as many micro-batches per step. The 1017 32K recipe inherits this (#163).
+- The DeepSeek-V4.1-Flash 32K recipes decode with the checkpoint's draft heads (SGLang's DSpark mode). A long sample that used to finish alone at 30 to 60 tokens per second now finishes several times faster, and samples keep the model's own distribution because the full model checks every draft token. The sampler takes four to seven minutes longer to start, which a 32K run earns back within about five steps. The 8K recipes are unchanged (#165).
+- DeepSeek-V4.1-Flash samplers run 128 requests at once instead of 32, so a GRPO step's samples generate together instead of in four waves (#147).
+- DeepSeek-V4.1-Flash samplers start sooner: they read the checkpoint with eight threads instead of one (#148), each GPU rank pins its own eighth of the Engram tables instead of all ranks pinning one shared copy, which saves 200 to 250 seconds on 8× H200 (#149), and they keep their compiled kernels on the shared kernel-cache volume, like trainers, which saves about five minutes once the cache is warm (#146, #167). Other recipes can keep SGLang's caches on the volume too by setting `SGLANG_CACHE_DIR` under `/root/.cache/kernel-cache` in `inference_env`.
+- Sampler images no longer build SGLang's prompt-indexing extension at startup; it ships prebuilt (#146).
+- Every sampler sets `SGLANG_ENABLE_LORA_CSGMV_SPLIT_K=1`. SGLang still applies split-K only to the BF16 rank-32 CSGMV shapes it measured, and never in deterministic mode. LoRA servers already set the flag (#123); set it to `0` in `inference_env` to turn it off. `qwen35_9b_instruct_lora_256k` set the flag under its old name, so split-K never ran there before (#151).
 
 ## 0.1.3 - 2026-10-28
 

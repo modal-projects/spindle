@@ -28,7 +28,7 @@ Spindle requires Python 3.12. With [uv](https://docs.astral.sh/uv/), create a pr
 ```bash
 uv init --python 3.12 my-spindle-project
 cd my-spindle-project
-uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.3'
+uv add 'modal-spindle @ git+https://github.com/modal-projects/spindle.git@v0.1.4'
 uv run spindle skills install
 ```
 

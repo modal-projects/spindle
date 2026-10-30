@@ -1,4 +1,4 @@
-"""Select recipes in deployment order, or explicitly by definition ID."""
+"""Select the longest-context recipe for a model, or a recipe by definition ID."""
 
 
 class DeploymentRoutes:
@@ -12,24 +12,24 @@ class DeploymentRoutes:
         for definition in candidates:
             if definition.definition_id == model:
                 return definition
-        for definition in candidates:
-            if definition.model == model:
-                return definition
-        return None
+        matches = [d for d in candidates if d.model == model]
+        return max(matches, key=lambda d: d.max_context_length, default=None)
 
     def capabilities(self):
-        selected = {}
-        for definition in self.definitions:
-            selected.setdefault(
-                (definition.model, definition.parameterization), definition
+        rows = []
+        for model in dict.fromkeys(d.model for d in self.definitions):
+            recipes = [d for d in self.definitions if d.model == model]
+            context = min(
+                self.select(model, d.parameterization).max_context_length
+                for d in recipes
             )
-        contexts = {}
-        for (model, _), definition in selected.items():
-            contexts[model] = min(
-                contexts.get(model, definition.max_context_length),
-                definition.max_context_length,
-            )
-        return [
-            {"model_name": model, "max_context_length": context}
-            for model, context in contexts.items()
-        ]
+            rows.append({"model_name": model, "max_context_length": context})
+            if len(recipes) > 1:
+                rows += [
+                    {
+                        "model_name": d.definition_id,
+                        "max_context_length": d.max_context_length,
+                    }
+                    for d in recipes
+                ]
+        return rows
