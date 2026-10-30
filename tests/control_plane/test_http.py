@@ -58,7 +58,9 @@ def http_client(api_key: str | None = "tml-test") -> httpx.AsyncClient:
     )
 
 
-async def created_model(client: httpx.AsyncClient) -> tuple[str, str]:
+async def created_model(
+    client: httpx.AsyncClient, base_model: str = BASE_MODEL
+) -> tuple[str, str]:
     created = await client.post(
         "/api/v1/create_session",
         json={"tags": [], "user_metadata": None, "sdk_version": "0.5.0"},
@@ -69,7 +71,7 @@ async def created_model(client: httpx.AsyncClient) -> tuple[str, str]:
         json={
             "session_id": session_id,
             "model_seq_id": 0,
-            "base_model": BASE_MODEL,
+            "base_model": base_model,
             "lora_config": {"rank": 32},
         },
     )
@@ -262,7 +264,9 @@ def test_service_endpoints(monkeypatch) -> None:
         capabilities = await client.get("/api/v1/get_server_capabilities")
         assert capabilities.json() == {
             "supported_models": [
-                {"model_name": BASE_MODEL, "max_context_length": 16_384}
+                {"model_name": BASE_MODEL, "max_context_length": 16_384},
+                {"model_name": DEFINITION, "max_context_length": 16_384},
+                {"model_name": f"{DEFINITION}_full", "max_context_length": 65_536},
             ],
             "spindle_version": spindle.__version__,
             "spindle_commit": "abc123",
@@ -307,14 +311,88 @@ def test_model_info_and_unload() -> None:
     asyncio.run(run())
 
 
-def test_base_sampling_session_uses_first_deployment() -> None:
+SHORT = SimpleNamespace(**{**vars(DEFINITIONS[0]), "definition_id": "short"})
+LONG = SimpleNamespace(
+    **{**vars(SHORT), "definition_id": "long", "max_context_length": 32_768}
+)
+
+
+def recipes_client(definition_id: str) -> tuple[ControlPlane, httpx.AsyncClient]:
+    plane = ControlPlane(
+        InMemoryKeyValueStore(), LocalEnginePlatform(definition_id, EchoExecutor)
+    )
+    app = create_control_plane_app(plane, (SHORT, LONG), retrieve_window=1.0)
+    client = httpx.AsyncClient(
+        base_url="http://test", transport=httpx.ASGITransport(app=app)
+    )
+    return plane, client
+
+
+def test_every_listed_model_name_selects_its_recipe() -> None:
+    async def run() -> None:
+        _, client = recipes_client("long")
+        listed = (await client.get("/api/v1/get_server_capabilities")).json()
+        await client.aclose()
+        expected_recipe = {BASE_MODEL: "long", "short": "short", "long": "long"}
+        assert [row["model_name"] for row in listed["supported_models"]] == list(
+            expected_recipe
+        )
+        for name, expected in expected_recipe.items():
+            plane, client = recipes_client(expected)
+            _, model_id = await created_model(client, name)
+            assert (await plane.get_model(model_id)).engine_definition_id == expected
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_adapter_sampled_by_model_name_keeps_its_recipe() -> None:
+    async def run() -> None:
+        plane, client = recipes_client("short")
+        session_id, model_id = await created_model(client, "short")
+        saved = await client.post(
+            "/api/v1/save_weights_for_sampler",
+            json={"model_id": model_id, "seq_id": 1, "path": "adapter"},
+        )
+        exported = await client.post(
+            "/api/v1/retrieve_future", json={"request_id": saved.json()["request_id"]}
+        )
+        sampling = await client.post(
+            "/api/v1/create_sampling_session",
+            json={
+                "session_id": session_id,
+                "sampling_session_seq_id": 0,
+                "base_model": BASE_MODEL,
+                "model_path": exported.json()["path"],
+            },
+        )
+        assert sampling.status_code == 200, sampling.text
+        record = await plane.get_sampling_session(
+            sampling.json()["sampling_session_id"]
+        )
+        assert record.engine_definition_id == "short"
+        mismatch = await client.post(
+            "/api/v1/create_sampling_session",
+            json={
+                "session_id": session_id,
+                "sampling_session_seq_id": 1,
+                "base_model": "long",
+                "model_path": exported.json()["path"],
+            },
+        )
+        assert mismatch.status_code == 400
+        await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_base_sampling_session_uses_longest_context_deployment() -> None:
     async def run() -> None:
         plane = ControlPlane(
             InMemoryKeyValueStore(),
             LocalEnginePlatform(DEFINITION, EchoExecutor),
         )
-        definitions = list(reversed(DEFINITIONS))
-        app = create_control_plane_app(plane, definitions, api_key=None)
+        app = create_control_plane_app(plane, DEFINITIONS, api_key=None)
         client = httpx.AsyncClient(
             base_url="http://control-plane",
             transport=httpx.ASGITransport(app=app),

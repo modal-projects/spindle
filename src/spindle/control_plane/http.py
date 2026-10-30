@@ -408,6 +408,9 @@ def create_control_plane_app(
                 detail="base_model or model_path is required",
             )
         selected = routes.select(body.base_model) if body.base_model else None
+        if body.model_path and selected and selected.model == body.base_model:
+            # A plain model name defers to the recipe the adapter was trained on.
+            selected = None
         definition_id = selected.definition_id if selected else None
         if body.model_path is None and definition_id is None:
             raise HTTPException(

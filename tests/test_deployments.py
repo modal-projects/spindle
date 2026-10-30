@@ -264,17 +264,29 @@ def test_trainer_image_is_part_of_trainer_identity():
     assert trainer.inference_identity() == resolved().inference_identity()
 
 
-def test_routing_uses_deployment_order():
-    small = resolved()
-    large = resolved(recipe("qwen35-9b-lora-64k"))
+def test_routing_prefers_longest_context():
+    small = resolved(recipe("deepseek-v41-flash-lora-8k"))
+    large = resolved(recipe("deepseek-v41-flash-lora-32k"))
     routes = DeploymentRoutes([small, large])
-    assert routes.select(small.model, "lora").definition_id == small.definition_id
-    assert routes.capabilities()[0]["max_context_length"] == 16384
+    assert routes.select(small.model, "lora").definition_id == large.definition_id
+    assert routes.select(small.definition_id).definition_id == small.definition_id
+    assert routes.capabilities() == [
+        {"model_name": small.model, "max_context_length": 32768},
+        {"model_name": small.definition_id, "max_context_length": 8192},
+        {"model_name": large.definition_id, "max_context_length": 32768},
+    ]
     validate_frontend([small.recipe, large.recipe])
 
-    routes = DeploymentRoutes([large])
-    assert routes.select(small.model, "lora").definition_id == large.definition_id
-    assert routes.capabilities()[0]["max_context_length"] == 65536
+    twin = resolved(recipe("deepseek-v41-flash-lora-8k", name="twin"))
+    routes = DeploymentRoutes([small, twin])
+    assert routes.select(small.model, "lora").definition_id == small.definition_id
+
+    only = resolved(recipe("qwen35-9b-lora-64k"))
+    routes = DeploymentRoutes([only])
+    assert routes.select(only.model, "lora").definition_id == only.definition_id
+    assert routes.capabilities() == [
+        {"model_name": only.model, "max_context_length": 65536}
+    ]
 
     other = resolved(recipe(name="other", model="org/other"))
     routes = DeploymentRoutes([other])
@@ -282,12 +294,13 @@ def test_routing_uses_deployment_order():
     assert {row["model_name"] for row in routes.capabilities()} == {other.model}
 
 
-def test_sampling_uses_order_and_training_filters_parameterization():
+def test_sampling_prefers_longest_context_and_training_filters_parameterization():
     lora = resolved()
     fft = resolved(recipe("qwen35-4b-fft-64k", model=lora.model))
     for first, second in ((lora, fft), (fft, lora)):
         routes = DeploymentRoutes([first, second])
-        assert routes.select(lora.model).definition_id == first.definition_id
+        assert routes.select(lora.model).definition_id == fft.definition_id
+        assert routes.capabilities()[0]["max_context_length"] == 16384
         assert routes.select(lora.model, "lora").definition_id == lora.definition_id
         assert routes.select(lora.model, "full").definition_id == fft.definition_id
         assert routes.select(second.definition_id).definition_id == second.definition_id
