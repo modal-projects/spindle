@@ -11,7 +11,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Changed
 
-- Deployments now download base weights for up to four recipes at once, so a small model no longer waits behind a large one. Recipes that use the same base model share one download.
+- Deployments now download base weights for up to four recipes at once, so a small model no longer waits behind a large one.
 
 ## 0.1.4 - 2026-10-29
 

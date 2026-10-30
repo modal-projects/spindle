@@ -274,7 +274,6 @@ class WeightsDownloadFailed(ValueError):
 
 
 def _weights_of(definition) -> str:
-    # Recipes on the same base weights share one download; a new revision is a new one.
     return f"{definition.asset_path}@{definition.recipe.weights_revision}"
 
 
@@ -291,7 +290,6 @@ def _weights_call_key(definition_id: str) -> str:
 
 
 async def _legacy_weights_ready(store, weights: str) -> bool:
-    # Older releases marked weights ready per recipe.
     for d in DEFINITIONS:
         revision = d.recipe.weights_revision
         key = f"model_assets_ready:{d.definition_id}:{d.weights_repo}@{revision}"
