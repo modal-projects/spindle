@@ -7,6 +7,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Added
 
 - `deepseek_v41_flash_lora_64k`: DeepSeek-V4.1-Flash LoRA with 64K context. It trains at TP8 on B300 or B200; H200 cannot hold a 64K training sequence for this model.
+- `examples/shared-server`: one deployment a team shares, with three recipes on a `prod` frontend in its own environment, a smoke test, and a workflow that redeploys it from `main`.
 
 ## 0.1.4 - 2026-10-29
 

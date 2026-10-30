@@ -1,37 +1,33 @@
 # Shared server
 
-One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It serves three recipes on a frontend named `spindle-shared`, and it is what the Spindle maintainers run for themselves.
+One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It is what the Spindle maintainers run for themselves: three recipes on a frontend named `prod` in a Modal environment named `spindle`, which holds nothing else.
 
-Each file in `recipes/` subclasses a bundled recipe and changes three things: the recipe gets a `shared-` name so it never collides with someone else's deployment of the same recipe in the same environment, the frontend is `spindle-shared`, and the API key and checkpoint volume are the deployment's own.
+Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`.
 
 | Recipe | Base model | Trainer |
 |---|---|---|
-| `shared-qwen3-4b-lora-32k` | Qwen/Qwen3-4B | 4× H100 |
-| `shared-qwen38-27b-lora-64k` | Qwen/Qwen3.8-27B | 8× H200 |
-| `shared-deepseek-v41-flash-lora-32k` | deepseek-ai/DeepSeek-V4.1-Flash | 2 × 8 B300 |
+| `prod-qwen3-4b-lora-32k` | Qwen/Qwen3-4B | 4× H100 |
+| `prod-qwen38-27b-lora-64k` | Qwen/Qwen3.8-27B | 8× H200 |
+| `prod-deepseek-v41-flash-lora-32k` | deepseek-ai/DeepSeek-V4.1-Flash | 2 × 8 B300 |
 
 ## Deploy
 
-Create the API-key secret once in the target environment, next to the `spindle-proxy` and `huggingface-secret` secrets from the [README](../../README.md#secrets):
+Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. The frontend serves a public URL that checks the Tinker API key itself, so the environment must allow unauthenticated URLs, which a workspace manager sets under Settings → Environments.
+
+Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
 
 ```bash
-modal secret create spindle-shared-api TINKER_API_KEY="tml-$(openssl rand -hex 32)" --env <env>
+uv run spindle deploy examples/shared-server/recipes/*.py
 ```
 
-Then deploy all four recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
-
-```bash
-uv run spindle deploy examples/shared-server/recipes/*.py --env <env>
-```
-
-Redeploying keeps every running job: state lives in Modal Dicts named after the frontend's app ID, and a redeploy keeps that ID. Stopping the frontend app does not, so update it with `spindle deploy`, never with `modal app stop`.
+A redeploy with the same Spindle version only republishes the frontend, and every run keeps going: state lives in Modal Dicts named after the frontend's app ID, and a redeploy keeps that ID. A new Spindle version rebuilds every trainer and sampler app, so schedule it with users. Stopping the frontend app gives the next deploy a new app ID and loses that state, so update it with `spindle deploy`, never with `modal app stop`.
 
 ## Use
 
 Clients need only the URL and the key:
 
 ```bash
-export TINKER_BASE_URL=https://<workspace>-<env>--spindle-shared-server.modal.run
+export TINKER_BASE_URL=https://<workspace>-spindle--prod.modal.run
 export TINKER_API_KEY=tml-...
 ```
 
