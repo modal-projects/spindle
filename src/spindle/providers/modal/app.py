@@ -286,7 +286,8 @@ def _weights_ready_key(definition_id: str) -> str:
 
 
 def _weights_call_key(definition_id: str) -> str:
-    return f"model_assets_call:{_weights_id(definition_id)}"
+    # Revisions of one repo download into the same folder, so one runs at a time.
+    return f"model_assets_call:{module_for(definition_id).asset_path}"
 
 
 async def _legacy_weights_ready(store, weights: str) -> bool:
@@ -346,7 +347,9 @@ async def _weights_download(definition_id: str) -> float | None:
 
 async def _start_weights_download(definition_id: str) -> float | None:
     """Join the running download, or start one unless the weights are ready."""
-    lock = _weights_starts.setdefault(_weights_id(definition_id), asyncio.Lock())
+    lock = _weights_starts.setdefault(
+        module_for(definition_id).asset_path, asyncio.Lock()
+    )
     async with lock:
         if await _weights_are_ready(definition_id):
             return None
@@ -364,7 +367,11 @@ async def _start_weights_download(definition_id: str) -> float | None:
             if await _weights_are_ready(definition_id):
                 return None
         call = await prepare_model_assets.spawn.aio(definition_id)
-        record = {"call_id": call.object_id, "started_at": time.time()}
+        record = {
+            "call_id": call.object_id,
+            "started_at": time.time(),
+            "weights": _weights_id(definition_id),
+        }
         inserted = await store.put_if_absent(key, record)
         if not inserted.created:
             existing = inserted.value
@@ -378,17 +385,19 @@ async def _start_weights_download(definition_id: str) -> float | None:
 
 async def _ensure_weights_ready(definition_id: str) -> None:
     """Join or start the base-weight download and wait for it to finish."""
-    if await _start_weights_download(definition_id) is None:
-        return
-    record = await shared_kv().get(_weights_call_key(definition_id))
-    try:
-        await modal.FunctionCall.from_id(record["call_id"]).get.aio()
-    except Exception as exc:
-        if await _weights_are_ready(definition_id):
-            return
-        raise WeightsDownloadFailed(
-            f"Downloading weights for {definition_id} failed: {exc}"
-        ) from exc
+    while await _start_weights_download(definition_id) is not None:
+        record = await shared_kv().get(_weights_call_key(definition_id))
+        try:
+            await modal.FunctionCall.from_id(record["call_id"]).get.aio()
+        except Exception as exc:
+            if await _weights_are_ready(definition_id):
+                return
+            ours = _weights_id(definition_id)
+            if record.get("weights", ours) != ours:
+                continue
+            raise WeightsDownloadFailed(
+                f"Downloading weights for {definition_id} failed: {exc}"
+            ) from exc
 
 
 async def _trainer_booted(registry, definition_id: str) -> bool:
