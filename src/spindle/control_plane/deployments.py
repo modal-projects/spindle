@@ -15,8 +15,6 @@ from spindle.providers.local.kv import InMemoryKeyValueStore
 
 REGISTRY_TTL_S = 5.0
 DEPLOY_TIMEOUT_S = 60 * 60
-ABANDONED_AFTER_S = DEPLOY_TIMEOUT_S + 300
-ABANDONED_ERROR = "deploy worker stopped without reporting a result"
 FRONTEND_FIELDS = ("session_idle_timeout_s", "pool_idle_timeout_s", "sweep_interval_s")
 DEFINITION_FIELDS = (
     "definition_id",
@@ -153,29 +151,11 @@ class DeploymentRoutes:
         kv = InMemoryKeyValueStore(rows)
         return cls(DeploymentStore(lambda: kv), frontend)
 
-    def routable(self, row: dict[str, Any]) -> bool:
-        return row.get("ready") is not None and (
-            row["ready"]["recipe"].get("platform") == self.frontend.platform
-        )
-
-    def _normalize(self, row: dict[str, Any]) -> dict[str, Any]:
-        row = dict(row)
-        if (
-            row["state"] == "deploying"
-            and time.time() - (row.get("updated_at") or row["added_at"])
-            > ABANDONED_AFTER_S
-        ):
-            row.update(state="failed", error=ABANDONED_ERROR)
-        if row["state"] == "ready" and not self.routable(row):
-            row["state"] = "stale"
-        return row
-
     def _entry(self, row: dict[str, Any]) -> _Entry:
-        row = self._normalize(row)
         return _Entry(
             row,
             decode_definition(row["config"]),
-            decode_definition(row["ready"]) if self.routable(row) else None,
+            decode_definition(row["ready"]) if row.get("ready") is not None else None,
         )
 
     def invalidate(self) -> None:
@@ -283,7 +263,7 @@ class DeploymentRoutes:
             and current["config"] == desired
             and not (refresh_trainer or refresh_inference)
         ):
-            normalized = self._normalize(current)
+            normalized = current
             if normalized["state"] == "ready" or (
                 normalized["state"] == "deploying" and await self.store.running(current)
             ):

@@ -463,21 +463,6 @@ def test_registry_keeps_last_ready_config_during_redeploy_and_failure():
     asyncio.run(run())
 
 
-def test_stale_ready_row_is_reported_but_not_routable():
-    async def run():
-        deployment = resolved()
-        row = ready_row(deployment)
-        row["ready"]["recipe"]["platform"] = {"frontend": "old-frontend"}
-        store = MemoryDeploymentStore([row])
-        routes = DeploymentRoutes(
-            store, FrontendSettings.from_recipe(deployment.recipe)
-        )
-        assert (await routes.rows())[0]["state"] == "stale"
-        assert await routes.select(deployment.name) is None
-
-    asyncio.run(run())
-
-
 def test_registry_put_replaces_retries_and_skips_identical_updates():
     async def run():
         original = resolved()
