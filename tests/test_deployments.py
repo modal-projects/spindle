@@ -126,9 +126,8 @@ def test_deepseek_v41_lora_recipe():
     ) == (16, 1, 1, 16, 1)
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
-    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
-    assert "--use-dynamic-batch-size" not in arguments
-    assert miles.cli_options["qkv_format"] == "bshd"
+    assert arguments[arguments.index("--max-tokens-per-gpu") + 1] == "8192"
+    assert "qkv_format" not in miles.cli_options
     assert miles.cli_options["moe_router_freeze_gate"] is True
     assert lora_target_flags(miles.target_modules) == (True, True, False)
 
@@ -165,6 +164,17 @@ def test_deepseek_v41_lora_32k_recipes_keep_tensor_parallelism(name, tp):
         16,
     )
     assert row.inference_settings["context_length"] == 32768
+    assert miles.max_tokens_per_gpu == 32768
+
+
+@pytest.mark.parametrize(
+    "name", ["deepseek-v41-flash-lora-64k", "deepseek-v41-flash-lora-128k"]
+)
+def test_deepseek_v41_long_context_recipes_train_one_row_per_micro_batch(name):
+    miles = MilesBackendConfig(**resolved(recipe(name)).trainer_settings["miles"])
+    arguments = miles.miles_arguments()
+    assert arguments[arguments.index("--micro-batch-size") + 1] == "1"
+    assert miles.cli_options["qkv_format"] == "bshd"
 
 
 @pytest.mark.parametrize("context, tp", [("8k", 1), ("32k", 4)])
