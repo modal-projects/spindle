@@ -281,6 +281,27 @@ updated = (
 print("After update:", tokenizer.decode(updated.tokens, skip_special_tokens=True))
 ```
 
+### Migrate an existing Tinker script in one line
+
+`spindle.on_modal` redirects unmodified Tinker SDK code to Spindle, including clients
+constructed with no `base_url` or with the hosted Tinker URL:
+
+```python
+import spindle
+
+@spindle.on_modal  # or spindle.on_modal(app_name=..., environment=..., model_map={...})
+def main():
+    service = tinker.ServiceClient()
+    ...
+```
+
+The server URL comes from `SPINDLE_BASE_URL` or the deployed `spindle` app's `server`
+function; the API key from `SPINDLE_API_KEY` or the `spindle-api` Modal secret. A hosted
+Tinker `TINKER_API_KEY` is never sent to Spindle. `model_map` remaps base models Spindle
+doesn't serve, and unsupported models fail fast with the list of supported ones. Pass
+`engine=` to bring up a scoped server instead. `with spindle.on_modal(...):` and
+`spindle.patch_tinker(...)` apply the same redirect.
+
 ## Full-parameter training
 
 For a dedicated full-parameter fine-tuning (FFT) run, use a scoped run, which brings up a single-tenant
