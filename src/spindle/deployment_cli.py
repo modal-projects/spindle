@@ -31,6 +31,7 @@ from spindle.providers.modal.deployment_configs import (
     FRONTEND_SETTINGS_ENV,
     deployed_configs,
     deployed_platform,
+    seed_registry_rows,
 )
 from spindle.control_plane.deployments import DEPLOY_TIMEOUT_S, FrontendSettings
 from spindle.version import __version__, deployment_tag, source_commit
@@ -87,7 +88,29 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
         trainers.update(names)
         inference.update(names)
 
+    def seed_registry():
+        """Keep a pre-registry frontend's recipes routable across the upgrade.
+
+        A frontend that still ships a configs file answers `deployed_configs`
+        with bare configs instead of registry rows. Every listed recipe it
+        already serves unchanged is written to the registry as ready before
+        the frontend swaps over, so nothing drops out and its apps stay put.
+        """
+        served = deployed_configs(platform["frontend"], environment)
+        legacy = [config for config in served if "state" not in config]
+        if not legacy:
+            return
+        unchanged = [
+            deployment.model_dump(mode="json")
+            for deployment in configs
+            if deployment.model_dump(mode="json") in legacy
+            and deployment.name not in trainers | inference
+        ]
+        if unchanged:
+            seed_registry_rows(platform["frontend"], environment, unchanged)
+
     def deploy_frontend():
+        seed_registry()
         command = [sys.executable, "-m", "modal", "deploy", "--tag", deployment_tag()]
         if environment:
             command += ["--env", environment]

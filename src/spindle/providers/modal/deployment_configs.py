@@ -60,6 +60,42 @@ def deployed_configs(frontend, environment=None):
     return _ask_frontend(frontend, "deployed_configs", environment, [])
 
 
+def seed_registry_rows(frontend, environment, rows):
+    """Write ready rows straight into a deployed frontend's registry.
+
+    Used before a frontend that still serves a baked-in configs file is
+    redeployed, so its recipes stay routable through the swap and their
+    already-deployed apps are not deployed again.
+    """
+    import asyncio
+    import time
+
+    app = modal.App.lookup(frontend, environment_name=environment)
+    registry = deployment_kv(app.app_id)
+    now = time.time()
+
+    async def seed():
+        for config in rows:
+            name = config["recipe"]["name"]
+            if await registry.get(name) is not None:
+                continue
+            await registry.put(
+                name,
+                {
+                    "config": config,
+                    "ready": config,
+                    "state": "ready",
+                    "attempt": "migrated",
+                    "added_at": now,
+                    "updated_at": now,
+                    "ready_at": now,
+                    "origin": "deploy",
+                },
+            )
+
+    asyncio.run(seed())
+
+
 def deployed_pools(frontend, environment=None):
     return _ask_frontend(frontend, "deployed_pools", environment, [])
 
