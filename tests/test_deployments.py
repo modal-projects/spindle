@@ -82,11 +82,6 @@ class MemoryDeploymentStore(DeploymentStore):
         self.writes += 1
         await super().put(name, row)
 
-    async def put_if_absent(self, name, row):
-        inserted = await super().put_if_absent(name, row)
-        self.writes += inserted.created
-        return inserted
-
 
 def ready_row(deployment, *, origin="deploy", state="ready", ready=None):
     config = deployment.model_dump(mode="json")

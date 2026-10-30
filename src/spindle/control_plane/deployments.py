@@ -10,7 +10,7 @@ from typing import Any
 
 from spindle.configuration import BaseConfig
 from spindle.deployments import DeploymentConfig, validate_frontend
-from spindle.providers.contracts import InsertResult, KeyValueStore
+from spindle.providers.contracts import KeyValueStore
 from spindle.providers.local.kv import InMemoryKeyValueStore
 
 REGISTRY_TTL_S = 5.0
@@ -47,9 +47,6 @@ class DeploymentStore:
 
     async def put(self, name: str, row: dict[str, Any]) -> None:
         await self.kv().put(name, row)
-
-    async def put_if_absent(self, name: str, row: dict[str, Any]) -> InsertResult:
-        return await self.kv().put_if_absent(name, row)
 
     async def deploy(
         self, row: dict[str, Any], *, refresh_trainer: bool, refresh_inference: bool
@@ -281,21 +278,11 @@ class DeploymentRoutes:
         desired = deployment.model_dump(mode="json")
         now = time.time()
         current = await self.store.get(name)
-        if current is None:
-            row = {
-                "config": desired,
-                "state": "deploying",
-                "attempt": uuid.uuid4().hex,
-                "added_at": now,
-                "updated_at": now,
-                "origin": origin,
-            }
-            inserted = await self.store.put_if_absent(name, row)
-            if inserted.created:
-                await self._start(row, refresh_trainer, refresh_inference)
-                return row
-            current = inserted.value
-        if current["config"] == desired and not (refresh_trainer or refresh_inference):
+        if (
+            current is not None
+            and current["config"] == desired
+            and not (refresh_trainer or refresh_inference)
+        ):
             normalized = self._normalize(current)
             if normalized["state"] == "ready" or (
                 normalized["state"] == "deploying" and await self.store.running(current)
@@ -303,13 +290,14 @@ class DeploymentRoutes:
                 return normalized
         row = {
             key: value
-            for key, value in current.items()
+            for key, value in (current or {}).items()
             if key not in {"error", "call_id"}
         }
         row.update(
             config=desired,
             state="deploying",
             attempt=uuid.uuid4().hex,
+            added_at=row.get("added_at", now),
             updated_at=now,
             origin=origin,
         )
