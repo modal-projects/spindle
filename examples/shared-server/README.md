@@ -1,18 +1,14 @@
 # Shared server
 
-One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It is what the Spindle maintainers run for themselves: three recipes on a frontend named `prod` in a Modal environment named `spindle`, which holds nothing else.
+One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It is what the Spindle maintainers run for themselves: recipes on a frontend named `prod` in a Modal environment named `spindle`, which holds nothing else.
 
 Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`. It also sets `platform.requires_proxy_auth`, so Modal turns away any request without a proxy token before it reaches Spindle.
 
-| Recipe | Base model | Trainer |
-|---|---|---|
-| `prod-qwen3-4b-lora-32k` | Qwen/Qwen3-4B | 4× H100 |
-| `prod-qwen38-27b-lora-64k` | Qwen/Qwen3.8-27B | 8× H200 |
-| `prod-deepseek-v41-flash-lora-32k` | deepseek-ai/DeepSeek-V4.1-Flash | 2 × 8 B300 |
+`recipes/` holds one LoRA recipe per base model, 20 in all, from Qwen3.5-2B to Nemotron-3-Ultra-550B.
 
 ## Deploy
 
-Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
+Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then deploy all the recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
 
 ```bash
 uv run spindle deploy examples/shared-server/recipes/*.py
