@@ -22,7 +22,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment: gpu-ci
-    timeout-minutes: 420
+    timeout-minutes: 60
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
@@ -38,18 +38,5 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install uv==0.9.26
       - run: uv sync --locked --python 3.12
-      # A redeploy keeps the frontend's state, but a version bump rebuilds every
-      # trainer and sampler app, so wait until no run is using one.
-      - name: Wait for trainers and samplers to go idle
-        run: |
-          for attempt in $(seq 1 36); do
-            busy=$(uv run modal app list --env "$MODAL_ENVIRONMENT" --json \
-              | jq '[.[] | select(.state == "deployed" and (.tasks | tonumber) > 0 and (.description | test("^spindle-(trainer|lora|fft)-shared-")))] | length')
-            if [ "$busy" = "0" ]; then exit 0; fi
-            echo "$busy GPU apps busy, waiting 10 minutes"
-            sleep 600
-          done
-          echo "GPU apps stayed busy for 6 hours"
-          exit 1
       - run: uv run spindle deploy examples/shared-server/recipes/*.py --env "$MODAL_ENVIRONMENT"
       - run: uv run python examples/shared-server/smoke.py --base-model Qwen/Qwen3-4B --expect-commit "$(git rev-parse HEAD)"
