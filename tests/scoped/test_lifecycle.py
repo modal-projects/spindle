@@ -85,7 +85,7 @@ def test_owned_children_stop_before_parent(
         try:
             yield
         except KeyboardInterrupt:
-            pass
+            pass  # Modal app.run suppresses this.
         finally:
             events.append("parent-stop")
             if parent_exc is not None:
