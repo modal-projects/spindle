@@ -2,6 +2,12 @@
 
 Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [semantic versioning](https://semver.org/). Before 1.0, a minor release (0.x.0) can change config defaults or deployment behavior; a patch release (0.x.y) only fixes bugs. Each release is tagged `vX.Y.Z` and published as a GitHub Release.
 
+## Unreleased
+
+### Added
+
+- `deepseek_v41_flash_lora_64k`: DeepSeek-V4.1-Flash LoRA with 64K context. It trains at TP8 on B300 or B200; H200 cannot hold a 64K training sequence for this model.
+
 ## 0.1.4 - 2026-10-29
 
 Faster DeepSeek-V4.1-Flash sampling and sampler starts, and agent skills for working with Spindle.
