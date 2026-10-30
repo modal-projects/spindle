@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import secrets
 import uuid
 from contextlib import contextmanager
@@ -47,6 +49,8 @@ def run(
     by creating a new full training client in the same deployment.
     Pinned pools have min_containers=0 and are ephemeral apps owned by this
     process. Owner loss stops them after Modal's heartbeat timeout.
+    The scoped app is tagged spindle_scope_status=completed/failed/cancelled;
+    completed means the scoped block exited cleanly, not training quality.
     """
     import modal
 
@@ -83,42 +87,43 @@ def run(
         )
         app, api, manage, servers, prepare_assets, sampler_image = resources
         with app.run():
-            registry.put(
-                "routes",
-                [
-                    {"url": server.get_url(), "function_id": server.object_id}
-                    for server in servers
-                ],
-            )
-            from dataclasses import replace
-            from functools import partial
-
-            from spindle.providers.modal.scoped_pin_owner import (
-                PinOwner,
-                open_pinned_app,
-            )
-
-            sampler_engine = replace(
-                engine,
-                training=replace(
-                    engine.training,
-                    hf_checkpoint=engine.training.hf_checkpoint
-                    or "/assets/" + engine.model.rsplit("/", 1)[-1],
-                ),
-            )
-            owner = PinOwner(
-                manage.remote.aio,
-                partial(
-                    open_pinned_app,
-                    engine=sampler_engine,
-                    name=run_name,
-                    image_id=sampler_image.object_id,
-                    registry_name=registry_name,
-                    pool=pinned,
-                    proxy_secret=proxy_secret,
-                ),
-            )
+            status = "completed"
             try:
+                registry.put(
+                    "routes",
+                    [
+                        {"url": server.get_url(), "function_id": server.object_id}
+                        for server in servers
+                    ],
+                )
+                from dataclasses import replace
+                from functools import partial
+
+                from spindle.providers.modal.scoped_pin_owner import (
+                    PinOwner,
+                    open_pinned_app,
+                )
+
+                sampler_engine = replace(
+                    engine,
+                    training=replace(
+                        engine.training,
+                        hf_checkpoint=engine.training.hf_checkpoint
+                        or "/assets/" + engine.model.rsplit("/", 1)[-1],
+                    ),
+                )
+                owner = PinOwner(
+                    manage.remote.aio,
+                    partial(
+                        open_pinned_app,
+                        engine=sampler_engine,
+                        name=run_name,
+                        image_id=sampler_image.object_id,
+                        registry_name=registry_name,
+                        pool=pinned,
+                        proxy_secret=proxy_secret,
+                    ),
+                )
                 try:
                     prepare_assets.remote()
                     if warm:
@@ -134,7 +139,21 @@ def run(
                     owner = None
             except BaseException as exc:
                 failure = exc
+                status = (
+                    "cancelled"
+                    if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
+                    else "failed"
+                )
                 raise
+            finally:
+                try:
+                    app.set_tags({**app.get_tags(), "spindle_scope_status": status})
+                except Exception as tag_error:
+                    logging.getLogger(__name__).warning(
+                        "could not record spindle_scope_status=%s: %r",
+                        status,
+                        tag_error,
+                    )
         # Modal suppresses KeyboardInterrupt on app.run exit. The provisioning
         # context must not turn an interrupted user's training block into success.
         if failure is not None:

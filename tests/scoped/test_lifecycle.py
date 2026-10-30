@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -14,16 +15,28 @@ def test_pool_bounds():
 
 
 @pytest.mark.parametrize(
-    "warm,body_failure,drain_failure",
+    "warm,body_failure,drain_failure,startup_failure,tag_failure,expected",
     [
-        (True, False, False),
-        (False, True, False),
-        (True, False, True),
-        (False, "interrupt", False),
+        (True, None, False, False, None, "completed"),
+        (False, "error", False, False, None, "failed"),
+        (False, None, False, True, None, "failed"),
+        (True, None, True, False, None, "failed"),
+        (False, "interrupt", False, False, None, "cancelled"),
+        (False, "cancel", False, False, None, "cancelled"),
+        (True, None, False, False, "read", "completed"),
+        (True, None, False, False, "write", "completed"),
+        (False, "error", False, False, "read", "failed"),
+        (False, "error", False, False, "write", "failed"),
     ],
 )
 def test_owned_children_stop_before_parent(
-    monkeypatch, warm, body_failure, drain_failure
+    monkeypatch,
+    warm,
+    body_failure,
+    drain_failure,
+    startup_failure,
+    tag_failure,
+    expected,
 ):
     import modal
 
@@ -31,6 +44,14 @@ def test_owned_children_stop_before_parent(
     scoped = importlib.import_module("spindle.providers.modal.scoped")
     events = []
     data = {}
+    base_tags = {
+        "_modal_source": "spindle",
+        "spindle_commit": "abc123",
+        "spindle_role": "scoped",
+        "_modal_model_name": "qwen3.5-4b",
+        "team": "train",
+    }
+    written = {}
 
     class Registry:
         def put(self, key, value):
@@ -55,6 +76,17 @@ def test_owned_children_stop_before_parent(
         finally:
             events.append("parent-stop")
 
+    def get_tags():
+        if tag_failure == "read":
+            raise RuntimeError("tag read failure")
+        return dict(base_tags)
+
+    def set_tags(tags):
+        events.append("write-tags")
+        if tag_failure == "write":
+            raise RuntimeError("tag write failure")
+        written.update(tags)
+
     class Owner:
         def __init__(self, *args):
             pass
@@ -72,32 +104,57 @@ def test_owned_children_stop_before_parent(
             raise RuntimeError("drain failure")
 
     manage.aio = manage
+
+    def prepare():
+        events.append("assets")
+        if startup_failure:
+            raise RuntimeError("prepare failure")
+
     monkeypatch.setattr(
         scoped,
         "build_app",
         lambda *a, **kw: (
-            SimpleNamespace(run=parent),
+            SimpleNamespace(run=parent, get_tags=get_tags, set_tags=set_tags),
             SimpleNamespace(get_web_url=lambda: "https://example.invalid"),
             SimpleNamespace(remote=manage),
             [],
-            SimpleNamespace(remote=lambda: events.append("assets")),
+            SimpleNamespace(remote=prepare),
             SimpleNamespace(object_id="im-test"),
         ),
     )
-    caught = False
+    body_exc = {
+        "error": ValueError("body failure"),
+        "interrupt": KeyboardInterrupt(),
+        "cancel": asyncio.CancelledError(),
+    }.get(body_failure)
+    caught = None
     try:
         with module.run(engine=qwen3_5_4b_full_64k(), warm=warm) as (url, key):
             assert url == "https://example.invalid" and key.startswith("tml-")
-            if body_failure == "interrupt":
-                raise KeyboardInterrupt()
-            if body_failure:
-                raise ValueError("body failure")
-    except (ValueError, RuntimeError, ExceptionGroup, KeyboardInterrupt):
-        caught = True
-        assert body_failure or drain_failure
-    assert caught == bool(body_failure or drain_failure)
+            if body_exc is not None:
+                raise body_exc
+    except (
+        ValueError,
+        RuntimeError,
+        ExceptionGroup,
+        KeyboardInterrupt,
+        asyncio.CancelledError,
+    ) as exc:
+        caught = exc
+    assert (caught is not None) == bool(
+        body_failure or drain_failure or startup_failure
+    )
+    if body_exc is not None:
+        assert caught is body_exc
     assert ("warm" in events) == warm
     assert events.index("stop-pinned") < events.index("parent-stop")
+    if "write-tags" in events:
+        assert events.index("write-tags") < events.index("parent-stop")
+    if tag_failure:
+        assert not written
+    else:
+        assert events.index("stop-pinned") < events.index("write-tags")
+        assert written == {**base_tags, "spindle_scope_status": expected}
 
 
 def test_recipes_keep_context_and_topology_together():
@@ -115,7 +172,8 @@ def test_recipes_keep_context_and_topology_together():
 
 def test_publication_targets_the_scoped_latest_route(monkeypatch):
     import modal
-    from spindle.providers.modal.scoped_pool import publication_pool, ScopedFlashPool
+
+    from spindle.providers.modal.scoped_pool import ScopedFlashPool, publication_pool
 
     route = {"url": "https://sampler.invalid", "function_id": "fu-scoped"}
     monkeypatch.setenv("SPINDLE_SCOPED_REGISTRY", "owned-run")
@@ -127,8 +185,8 @@ def test_publication_targets_the_scoped_latest_route(monkeypatch):
 
 
 def test_shared_publication_keeps_existing_pool(monkeypatch):
-    from spindle.providers.modal.scoped_pool import publication_pool
     from spindle.providers.modal.fft_pool import FFTLatestPool
+    from spindle.providers.modal.scoped_pool import publication_pool
 
     monkeypatch.delenv("SPINDLE_SCOPED_REGISTRY", raising=False)
     assert isinstance(publication_pool("existing", "abc"), FFTLatestPool)
@@ -136,6 +194,7 @@ def test_shared_publication_keeps_existing_pool(monkeypatch):
 
 def test_latest_minimum_updates_by_id_without_name_lookup(monkeypatch):
     from modal.client import _Client
+
     from spindle.providers.modal.scoped_pool import set_minimum
 
     calls = []
@@ -156,8 +215,9 @@ def test_latest_minimum_updates_by_id_without_name_lookup(monkeypatch):
 
 def test_retry_finishes_preparation_without_creating_another_model():
     import asyncio
-    from spindle.providers.modal.scoped_control import ScopedControlPlane
+
     from spindle.providers.local import InMemoryKeyValueStore, LocalEnginePlatform
+    from spindle.providers.modal.scoped_control import ScopedControlPlane
     from tests.support import EchoExecutor
 
     prepared = []
