@@ -299,6 +299,51 @@ def base_session(definition):
     )
 
 
+def same_weights_as_lora(monkeypatch) -> str:
+    """Deploy a second recipe on the LoRA recipe's base weights."""
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    sibling = DeploymentConfig.create(load(config_path("qwen35-9b-lora-64k")))
+    assert sibling.asset_path == modal_app.module_for(LORA_DEFINITION).asset_path
+    monkeypatch.setattr(modal_app, "DEFINITIONS", (*modal_app.DEFINITIONS, sibling))
+    return sibling.definition_id
+
+
+def test_recipes_on_the_same_weights_share_one_download(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = weight_downloads(monkeypatch, registry, {})
+    sibling = same_weights_as_lora(monkeypatch)
+
+    async def run() -> None:
+        first, second = await asyncio.gather(
+            modal_app._start_weights_download(LORA_DEFINITION),
+            modal_app._start_weights_download(sibling),
+        )
+        assert first == second
+        await registry.put(modal_app._weights_ready_key(LORA_DEFINITION), 1.0)
+        assert await modal_app._weights_are_ready(sibling)
+
+    asyncio.run(run())
+    assert spawned == [LORA_DEFINITION]
+
+
+def test_weights_marked_ready_by_an_older_release_are_not_downloaded_again(
+    monkeypatch,
+) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    registry = InMemoryKeyValueStore()
+    spawned = weight_downloads(monkeypatch, registry, {})
+    sibling = same_weights_as_lora(monkeypatch)
+    weights = modal_app.module_for(LORA_DEFINITION).weights_repo
+
+    async def run() -> None:
+        await registry.put(f"model_assets_ready:{LORA_DEFINITION}:{weights}@", 1.0)
+        assert await modal_app._start_weights_download(sibling) is None
+
+    asyncio.run(run())
+    assert spawned == []
+
+
 def test_ready_weights_skip_the_download_until_the_revision_changes(
     monkeypatch,
 ) -> None:
