@@ -240,6 +240,7 @@ class MilesRuntime:
         _configure_actor_spec(train_specs)
         if create_trainer_handles is None:
             _allow_context_parallel_multi_lora(lora_arguments)
+        _allow_allgather_cp_bshd_multi_lora(lora_arguments)
         architecture = (
             shlex.split(load_model_args(self.config.model_type))
             if self.config.model_type
@@ -483,6 +484,28 @@ def _configure_actor_spec(train_specs) -> None:
 
     compute._spindle_actor_spec = True
     train_specs._compute_spec_trainer = compute
+
+
+def _allow_allgather_cp_bshd_multi_lora(lora_arguments) -> None:
+    """Miles rejects multi-LoRA with all-gather CP. With bshd rows the actor's
+    allgather_cp_lora patch counts each adapter's tokens, so skip that check."""
+    original = lora_arguments.validate_multi_lora_args
+    if getattr(original, "__spindle_allows_allgather_bshd__", False):
+        return
+
+    @wraps(original)
+    def validate(args) -> None:
+        allgather_cp = getattr(args, "allgather_cp", False)
+        if not (allgather_cp and getattr(args, "qkv_format", "thd") == "bshd"):
+            return original(args)
+        args.allgather_cp = False
+        try:
+            original(args)
+        finally:
+            args.allgather_cp = allgather_cp
+
+    validate.__spindle_allows_allgather_bshd__ = True
+    lora_arguments.validate_multi_lora_args = validate
 
 
 def _allow_context_parallel_multi_lora(lora_arguments) -> None:

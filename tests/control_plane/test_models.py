@@ -517,6 +517,50 @@ def test_model_creation_reports_saturation_at_trainer_cap() -> None:
     asyncio.run(run())
 
 
+def test_model_creation_waits_for_a_trainer_that_starts_during_placement() -> None:
+    async def run() -> None:
+        engines = LocalEnginePlatform(DEFINITION, EchoExecutor, max_models=1)
+        first = await engines.spawn_instance(DEFINITION)
+        second = await engines.spawn_instance(DEFINITION)
+        await engines.client(first.instance_id).accept_model("occupied", {"rank": 32})
+        await engines.set_instance_state(second.instance_id, "starting")
+        promote = False
+
+        async def reconcile(definition_id: str) -> bool:
+            if promote:
+                await engines.set_instance_state(second.instance_id, "running")
+            instances = await engines.list_instances()
+            return any(i.state in {"starting", "draining"} for i in instances) or (
+                len(instances) < 2
+            )
+
+        plane = ControlPlane(
+            InMemoryKeyValueStore(),
+            engines,
+            reconcile_trainers=reconcile,
+            trainer_autoscaling=lambda _: True,
+        )
+        session = await plane.create_session()
+        creation = await plane.create_model(
+            session_id=session.session_id,
+            model_seq_id=0,
+            definition_id=DEFINITION,
+            spec={"rank": 32},
+        )
+        promote = True
+        assert (
+            await plane.retrieve(creation.request_id)
+        ).status == FutureResolutionStatus.PENDING
+        assert (
+            await plane.retrieve(creation.request_id)
+        ).status == FutureResolutionStatus.COMPLETE
+        assert await engines.client(second.instance_id).model_ids() == (
+            creation.model.model_id,
+        )
+
+    asyncio.run(run())
+
+
 def test_model_creation_reuses_released_slot_at_trainer_cap() -> None:
     async def no_capacity(definition_id: str) -> bool:
         return False
