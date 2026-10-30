@@ -15,6 +15,7 @@ from functools import partial
 from importlib import resources
 from pathlib import Path
 
+import httpx
 import modal
 from rich.console import Console
 
@@ -42,6 +43,10 @@ NO_CONFIGS = (
     "pass config files or bundled config names (e.g. `spindle deploy qwen35-9b-lora-16k`), "
     "or pass --all to deploy every bundled config."
 )
+
+ADD_POLL_INTERVAL_S = 10
+ADD_DEADLINE_S = 70 * 60
+RECIPE_FIELDS = {key for key in vars(BaseConfig) if not key.startswith("_")}
 
 
 DEPLOY_POLL_INTERVAL_S = 10
@@ -199,6 +204,117 @@ def in_background(step):
     return future
 
 
+def _response_body(response, action):
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if response.is_error:
+        message = (
+            body.get("message", response.text)
+            if isinstance(body, dict)
+            else response.text
+        )
+        raise ValueError(f"{action} failed ({response.status_code}): {message}")
+    return body
+
+
+def add_deployment(name, *, base, overrides, base_url, api_key):
+    """Add one config to a running frontend through its deployments API."""
+    if not base_url or not api_key:
+        raise ValueError(
+            "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
+        )
+    with httpx.Client(
+        base_url=base_url.rstrip("/"), headers={"X-API-Key": api_key}, timeout=60
+    ) as client:
+        response = client.post(
+            "/api/v1/spindle/deployments",
+            json={"name": name, "base": base, "overrides": overrides},
+        )
+        if response.status_code == 405:
+            raise ValueError(
+                "This frontend predates adding configs; redeploy it once with spindle deploy."
+            )
+        row = _response_body(response, f"Adding {name}")["deployment"]
+        deadline = time.monotonic() + ADD_DEADLINE_S
+        if row["state"] == "deploying":
+            print(f"Deploying {name}. Building its apps can take several minutes.")
+        while row["state"] == "deploying":
+            if time.monotonic() > deadline:
+                raise ValueError(
+                    f"{name} is still deploying; run spindle deploy --add again to retry."
+                )
+            time.sleep(ADD_POLL_INTERVAL_S)
+            listed = _response_body(
+                client.get("/api/v1/spindle/deployments"), "Listing deployments"
+            )
+            row = next((r for r in listed["deployments"] if r["name"] == name), row)
+        if row["state"] != "ready":
+            raise ValueError(
+                f"Deploying {name} ended {row['state']}:\n{row.get('error') or ''}"
+            )
+        print(f"Added {name}. Train on it by passing base_model={name!r}.")
+
+
+def _deploy_parser(root):
+    for action in root._actions:
+        choices = getattr(action, "choices", None)
+        if choices and "deploy" in choices:
+            return choices["deploy"]
+    raise RuntimeError("deploy parser is not configured")
+
+
+def _has_add_option(argv):
+    if not argv or argv[0] != "deploy":
+        return False
+    for token in argv[1:]:
+        if token == "--":
+            return False
+        if token == "--add" or token.startswith("--add="):
+            return True
+    return False
+
+
+def _split_add_overrides(argv, deploy_parser):
+    option_strings = {
+        option for action in deploy_parser._actions for option in action.option_strings
+    }
+    cleaned = []
+    overrides = {}
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            cleaned.extend(argv[index:])
+            break
+        if token.startswith("--"):
+            option, separator, raw_value = token.partition("=")
+            if option not in option_strings:
+                field = option[2:]
+                if not field:
+                    raise ValueError("field names cannot be empty")
+                if not separator:
+                    if index + 1 == len(argv) or argv[index + 1].startswith("--"):
+                        raise ValueError(f"missing value for --{field}")
+                    index += 1
+                    raw_value = argv[index]
+                top_level = field.split(".", 1)[0]
+                if top_level not in RECIPE_FIELDS:
+                    raise ValueError(f"unknown recipe field: {field}")
+                if field in overrides:
+                    raise ValueError(f"duplicate field: {field}")
+                try:
+                    overrides[field] = json.loads(raw_value)
+                except ValueError:
+                    overrides[field] = raw_value
+                index += 1
+                continue
+        cleaned.append(token)
+        index += 1
+    return cleaned, overrides
+
+
 class PrintVersion(argparse.Action):
     def __init__(self, option_strings, dest, **kwargs):
         super().__init__(
@@ -225,11 +341,25 @@ def parser():
     apply = commands.add_parser(
         "deploy",
         help="Add or update Python configs behind one frontend",
+        allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  spindle deploy --add qwen35-9b-lora-16k-h200 --base "
+            "qwen35-9b-lora-16k --trainer_gpu=H200 "
+            "--miles_cfg.max_tokens_per_gpu=8192"
+        ),
     )
     apply.add_argument(
         "files",
         nargs="*",
         help="Python config files or bundled config names (none: pick interactively)",
+    )
+    apply.add_argument(
+        "--add", metavar="NAME", help="Add a config to a running frontend"
+    )
+    apply.add_argument(
+        "--base", metavar="BASE", help="Existing config to copy with --add"
     )
     apply.add_argument("--all", action="store_true", help="Deploy every bundled config")
     apply.add_argument("--app")
@@ -298,8 +428,12 @@ def install_skills(project_dir: Path | None, force: bool) -> None:
 
 def main(argv=None):
     cli = parser()
-    args = cli.parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        overrides = {}
+        if _has_add_option(argv):
+            argv, overrides = _split_add_overrides(argv, _deploy_parser(cli))
+        args = cli.parse_args(argv)
         if args.command == "config":
             if args.action == "init":
                 module = config_path(args.preset).stem
@@ -319,6 +453,39 @@ def main(argv=None):
             frontend = args.app or BaseConfig.platform["frontend"]
             environment = args.env or os.environ.get("MODAL_ENVIRONMENT")
             chosen = []
+            if args.add is not None:
+                if not args.add:
+                    raise ValueError("--add requires a non-empty name")
+                if (
+                    args.files
+                    or args.all
+                    or args.app is not None
+                    or args.env is not None
+                    or args.region is not None
+                    or args.refresh_trainer
+                    or args.refresh_inference
+                ):
+                    raise ValueError(
+                        "--add cannot be combined with config files, --all, --app, --env, --region, or --refresh-trainer/--refresh-inference"
+                    )
+                if args.base is None:
+                    raise ValueError("--base is required with --add")
+                base_url = os.environ.get("TINKER_BASE_URL")
+                api_key = os.environ.get("TINKER_API_KEY")
+                if not base_url or not api_key:
+                    raise ValueError(
+                        "Set TINKER_BASE_URL and TINKER_API_KEY to the Spindle frontend's URL and API key."
+                    )
+                add_deployment(
+                    args.add,
+                    base=args.base,
+                    overrides=overrides,
+                    base_url=base_url,
+                    api_key=api_key,
+                )
+                return
+            if args.base is not None:
+                raise ValueError("--base requires --add")
             if args.files:
                 paths = [config_file(arg) for arg in args.files]
             elif args.all:

@@ -6,7 +6,9 @@ from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import httpx
 import modal
 import pytest
 from rich.console import Console
@@ -144,6 +146,228 @@ def test_deploy_uses_frontend_settings_and_upserts_registry_rows(deployed):
     assert deployed.settings["platform"] == deployment().recipe.platform
     assert "unlisted" in deployed.rows
     assert deployed.rows["qwen35-9b-lora-16k"]["state"] == "ready"
+
+
+def mock_add_client(monkeypatch, handler):
+    client_type = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        cli.httpx,
+        "Client",
+        lambda **kwargs: client_type(transport=transport, **kwargs),
+    )
+
+
+def test_add_posts_base_and_json_parsed_overrides(monkeypatch, capsys):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(202, json={"deployment": {"state": "ready"}})
+
+    mock_add_client(monkeypatch, handle)
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example/")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+
+    cli.main(
+        [
+            "deploy",
+            "--add",
+            "variant",
+            "--base",
+            "qwen35-9b-lora-16k",
+            "--trainer_gpus_per_node=4",
+            "--weights_revision",
+            '"1234"',
+            "--trainer_gpu=H200",
+            "--inference_gpu",
+            '["H100","B300"]',
+            "--model_weights=null",
+        ]
+    )
+
+    request = requests[0]
+    assert request.url == "https://frontend.example/api/v1/spindle/deployments"
+    assert request.headers["x-api-key"] == "test-key"
+    assert json.loads(request.content) == {
+        "name": "variant",
+        "base": "qwen35-9b-lora-16k",
+        "overrides": {
+            "trainer_gpus_per_node": 4,
+            "weights_revision": "1234",
+            "trainer_gpu": "H200",
+            "inference_gpu": ["H100", "B300"],
+            "model_weights": None,
+        },
+    }
+    assert "Added variant." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "message"),
+    [
+        (["--not_a_setting=1"], "unknown recipe field"),
+        (["--trainer_gpu=H100", "--trainer_gpu=B200"], "duplicate field"),
+        (["--trainer_gpu"], "missing value"),
+        (["--=1"], "field names cannot be empty"),
+        (["extra"], "cannot be combined with config files"),
+        (["config.py"], "cannot be combined with config files"),
+        (["--all"], "cannot be combined with config files"),
+        (["--app", "frontend"], "cannot be combined with config files"),
+        (["--env", "dev"], "cannot be combined with config files"),
+        (["--region", "us-east"], "cannot be combined with config files"),
+        (["--refresh-trainer", "base"], "cannot be combined with config files"),
+        (["--refresh-inference", "base"], "cannot be combined with config files"),
+        (["--set", "gpu=H200"], "unknown recipe field"),
+    ],
+)
+def test_add_cli_validation_fails_before_http(extra_args, message, monkeypatch, capsys):
+    requests = []
+    monkeypatch.setattr(cli.httpx, "Client", lambda **kwargs: requests.append(kwargs))
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["deploy", "--add", "variant", "--base", "base", *extra_args])
+    assert exc.value.code == 1
+    assert message in capsys.readouterr().err
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("args", "code", "message"),
+    [
+        (["deploy", "--add", "variant"], 1, "--base is required"),
+        (["deploy", "--add", "", "--base", "base"], 1, "non-empty name"),
+        (["deploy", "--base", "base"], 1, "--base requires --add"),
+        (["deploy", "--add", "variant", "--base"], 2, "expected one argument"),
+    ],
+)
+def test_add_cli_requires_name_and_base(args, code, message, monkeypatch, capsys):
+    requests = []
+    monkeypatch.setattr(cli.httpx, "Client", lambda **kwargs: requests.append(kwargs))
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == code
+    assert message in capsys.readouterr().err
+    assert requests == []
+
+
+def test_field_flag_without_add_is_an_argparse_error(monkeypatch):
+    requests = []
+    monkeypatch.setattr(cli.httpx, "Client", lambda **kwargs: requests.append(kwargs))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["deploy", "--trainer_gpu=H200"])
+    assert exc.value.code == 2
+    assert requests == []
+
+
+@pytest.mark.parametrize("missing", ["TINKER_BASE_URL", "TINKER_API_KEY"])
+def test_add_cli_requires_frontend_credentials_before_http(missing, monkeypatch):
+    requests = []
+    monkeypatch.setattr(cli.httpx, "Client", lambda **kwargs: requests.append(kwargs))
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    monkeypatch.delenv(missing, raising=False)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["deploy", "--add", "variant", "--base", "base"])
+    assert exc.value.code == 1
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "message"),
+    [
+        (
+            400,
+            {"error": "invalid_request", "message": "unknown base deployment"},
+            "unknown base deployment",
+        ),
+        (405, {"message": "method not allowed"}, "frontend predates adding configs"),
+    ],
+)
+def test_add_http_errors_exit_without_polling(
+    status, body, message, monkeypatch, capsys
+):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(status, json=body)
+
+    mock_add_client(monkeypatch, handle)
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["deploy", "--add", "variant", "--base", "base"])
+    assert exc.value.code == 1
+    assert len(requests) == 1
+    assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("final_state", "expected_error"),
+    [
+        ("ready", None),
+        ("failed", "inference app deploy failed: no capacity"),
+        ("stale", "frontend platform changed"),
+    ],
+)
+def test_add_polls_until_ready_or_failure(
+    final_state, expected_error, monkeypatch, capsys
+):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(202, json={"deployment": {"state": "deploying"}})
+        return httpx.Response(
+            200,
+            json={
+                "deployments": [
+                    {
+                        "name": "variant",
+                        "state": final_state,
+                        "error": expected_error,
+                    }
+                ]
+            },
+        )
+
+    mock_add_client(monkeypatch, handle)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    args = ["deploy", "--add", "variant", "--base", "base"]
+    if expected_error:
+        with pytest.raises(SystemExit):
+            cli.main(args)
+        assert expected_error in capsys.readouterr().err
+    else:
+        cli.main(args)
+        assert "Added variant." in capsys.readouterr().out
+    assert [request.method for request in requests] == ["POST", "GET"]
+
+
+def test_add_polling_times_out_without_a_second_request(monkeypatch, capsys):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(202, json={"deployment": {"state": "deploying"}})
+
+    mock_add_client(monkeypatch, handle)
+    monkeypatch.setattr(cli.time, "monotonic", Mock(side_effect=[0, 4201]))
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    monkeypatch.setenv("TINKER_BASE_URL", "https://frontend.example")
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["deploy", "--add", "variant", "--base", "base"])
+    assert exc.value.code == 1
+    assert "still deploying" in capsys.readouterr().err
+    assert [request.method for request in requests] == ["POST"]
 
 
 def test_deploy_passes_refresh_sets_and_platform_change_forces_both(deployed):
