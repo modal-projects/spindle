@@ -19,7 +19,7 @@ modal workspace proxy-tokens create
 modal workspace proxy-tokens allow <wk-token-id> spindle
 ```
 
-Then deploy all three recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
+Then deploy all three recipes. A deploy adds or updates only the recipes you list; recipes already on the server keep serving:
 
 ```bash
 uv run spindle deploy examples/shared-server/recipes/*.py

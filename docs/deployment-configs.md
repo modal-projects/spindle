@@ -164,6 +164,10 @@ All configs deployed together must share platform settings. Use a shared parent 
 
 One frontend serves all models through Tinker’s `base_model`. If several recipes serve the same model, requests by model name go to the one with the longest context. To use a specific recipe, pass its name as `base_model`. `get_server_capabilities` lists every recipe and its context length.
 
+## The frontend registry
+
+Every recipe a frontend serves is a row in one registry, a Modal Dict named after the frontend's app ID. `spindle deploy` publishes the frontend with only its platform and lifecycle settings, then registers each listed recipe; the frontend deploys the trainer and inference apps that are missing or changed and marks the row `ready`. Rows record `state` (`deploying`, `ready`, `failed`), the last ready config, and the attempt that owns them, so a recipe being redeployed keeps serving its last ready version. A row left `deploying` after its worker stopped is reported `failed`; deploying it again retries. If a redeploy changes the frontend's platform settings, rows whose last-ready config uses the old platform become `stale` and stop routing until they are deployed again.
+
 ## Update isolation
 
 Trainer apps are named `spindle-trainer-{name}` and inference apps `spindle-inference-{name}`. An inference-only change reuses the trainer app. A trainer-only change reuses the inference app. Source-only upgrades use `--refresh-trainer` / `--refresh-inference`. Updating inference settings also redeploys existing pools for that recipe before publishing the new frontend configuration. An interrupted pool update can be retried with the same command. Changes to region, storage, or secrets refresh both worker apps.

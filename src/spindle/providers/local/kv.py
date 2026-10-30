@@ -7,8 +7,8 @@ from ..contracts import InsertResult
 
 
 class InMemoryKeyValueStore:
-    def __init__(self) -> None:
-        self._values: dict[str, object] = {}
+    def __init__(self, values: dict[str, object] | None = None) -> None:
+        self._values: dict[str, object] = copy.deepcopy(values or {})
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> object | None:

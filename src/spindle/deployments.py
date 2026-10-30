@@ -24,6 +24,46 @@ def _jsonable(value):
     return json.loads(json.dumps(value))
 
 
+def _validate_recipe(recipe: BaseConfig) -> None:
+    fields = {
+        key
+        for key, value in vars(BaseConfig).items()
+        if not key.startswith("_") and not callable(value)
+    }
+    unknown = sorted(set(vars(recipe)) - fields)
+    if unknown:
+        raise ValueError(f"unknown config settings: {', '.join(unknown)}")
+    for field, default in vars(BaseConfig).items():
+        if field.startswith("_") or callable(default) or field not in vars(recipe):
+            continue
+        value = getattr(recipe, field)
+        if field in {"trainer_gpu", "inference_gpu"}:
+            valid = isinstance(value, str) or (
+                isinstance(value, (list, tuple))
+                and bool(value)
+                and all(isinstance(gpu, str) for gpu in value)
+            )
+            if not valid:
+                raise ValueError(
+                    f"{field} must be a string or non-empty array of strings"
+                )
+        elif isinstance(default, bool):
+            if not isinstance(value, bool):
+                raise ValueError(f"{field} must be boolean")
+        elif isinstance(default, int):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(f"{field} must be integer")
+        elif isinstance(default, float):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"{field} must be number")
+        elif isinstance(default, str):
+            if not isinstance(value, str):
+                raise ValueError(f"{field} must be string")
+        elif isinstance(default, dict):
+            if not isinstance(value, dict):
+                raise ValueError(f"{field} must be object")
+
+
 class DeploymentConfig(BaseModel):
     """Recipe plus the backend settings used to deploy one model."""
 
@@ -47,6 +87,7 @@ class DeploymentConfig(BaseModel):
     @classmethod
     def create(cls, recipe: BaseConfig) -> DeploymentConfig:
         """Copy the recipe and attach backend settings."""
+        _validate_recipe(recipe)
         pinned = BaseConfig(**_jsonable(vars(recipe)))
         for field in ("trainer_disk_mib", "inference_disk_mib"):
             disk = getattr(pinned, field)

@@ -6,7 +6,6 @@ from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import modal
 import pytest
@@ -17,103 +16,116 @@ from spindle import deployment_cli as cli
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.modal import deployment_configs
 from spindle.providers.modal.deployment_configs import (
-    CONFIGS_FILE_ENV,
-    PLATFORM_ENV,
+    FRONTEND_SETTINGS_ENV,
     deployed_configs,
 )
-from spindle.providers.modal.fft_pool import FFTPoolSpec
 from spindle.providers.modal.image_dependencies import ignore_config_source
-from spindle.providers.modal.lora_pool import LoraPoolSpec
 
 
-def deployment():
-    return DeploymentConfig.create(load(config_path("qwen35-9b-lora-16k")))
+def deployment(preset="qwen35-9b-lora-16k"):
+    return DeploymentConfig.create(load(config_path(preset)))
 
 
 @pytest.fixture
 def deployed(monkeypatch):
     monkeypatch.setattr(cli.sys, "version_info", (3, 12, 0))
     state = SimpleNamespace(
-        apps=set(),
-        configs=[],
+        rows={
+            "unlisted": {
+                "config": {"recipe": {"name": "unlisted"}},
+                "state": "ready",
+            }
+        },
         platform=None,
-        pools=[],
         calls=[],
         fail=None,
+        settings=None,
+        env=None,
+        configs=None,
+        refresh=None,
         images=[],
-        weights=[],
     )
 
-    class FakeApp:
-        def __init__(self, name, role):
-            self.name = name
-            self.role = role
-
-        def deploy(self, environment_name=None, tag=""):
-            state.calls.append(self.role)
-            if state.fail == self.role:
-                raise RuntimeError(f"{self.role} deploy failed")
-            state.apps.add(self.name)
-
-    def read_configs(frontend, environment):
-        return state.configs
-
-    def lookup(name, **kwargs):
-        if name not in state.apps:
-            raise modal.exception.NotFoundError("not deployed")
-
     def run(command, *, env, check, **kwargs):
+        assert command[command.index("--tag") + 1]
         state.calls.append("frontend")
         if state.fail == "frontend":
             raise subprocess.CalledProcessError(1, command)
-        state.configs = json.loads(Path(env[CONFIGS_FILE_ENV]).read_text())
-        state.platform = json.loads(env[PLATFORM_ENV])
+        state.settings = json.loads(env[FRONTEND_SETTINGS_ENV])
         state.env = env
+        state.platform = state.settings["platform"]
+        state.configs = None
+        return SimpleNamespace(stdout="", stderr="")
 
-    monkeypatch.setattr(cli, "deployed_configs", read_configs)
-    monkeypatch.setattr(cli, "deployed_pools", lambda *args: state.pools)
+    class Function:
+        def remote(self, configs_json, refresh_trainers, refresh_inference):
+            state.calls.append("deploy_recipes")
+            state.configs = json.loads(configs_json)
+            state.refresh = (refresh_trainers, refresh_inference)
+            for config in state.configs:
+                state.rows[config["recipe"]["name"]] = {
+                    "config": config,
+                    "ready": config,
+                    "state": "failed"
+                    if state.fail == config["recipe"]["name"]
+                    else "ready",
+                    "error": (
+                        "trainer app deploy failed: no capacity"
+                        if state.fail == config["recipe"]["name"]
+                        else None
+                    ),
+                }
+
     monkeypatch.setattr(cli, "deployed_platform", lambda *args: state.platform)
-    monkeypatch.setattr(modal.App, "lookup", lookup)
     monkeypatch.setattr(
         cli,
-        "build_trainer_app",
-        lambda row, platform=None, **k: (
-            FakeApp(row.trainer_app_name, "trainer"),
-            None,
-        ),
+        "deployed_configs",
+        lambda *args: list(state.rows.values()),
     )
-    monkeypatch.setattr(
-        cli,
-        "build_inference_app",
-        lambda row, platform=None, **k: (
-            FakeApp(row.inference_app_name, "inference"),
-            None,
-        ),
-    )
-    monkeypatch.setattr(cli.modal, "enable_output", lambda: nullcontext())
-    monkeypatch.setattr(
-        cli,
-        "build_rollout_app",
-        lambda row, pool, platform: (FakeApp(pool.app_name, "pool"), None),
-    )
+    monkeypatch.setattr(modal.Function, "from_name", lambda *args, **kwargs: Function())
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(
         cli,
         "build_sampler_image",
         lambda frontend, environment: state.images.append((frontend, environment)),
     )
-
-    def start_weights(frontend, environment, definition_id):
-        state.weights.append((definition_id, "frontend" in state.calls))
-        return True
-
-    monkeypatch.setattr(cli, "start_weights_download", start_weights)
-    monkeypatch.setattr(
-        modal.Dict,
-        "from_name",
-        lambda *a, **k: pytest.fail("deployment must not use a Dict registry"),
-    )
+    monkeypatch.setattr(cli.modal, "enable_output", nullcontext)
     return state
+
+
+def test_deploy_uses_frontend_settings_and_upserts_registry_rows(deployed):
+    cli.deploy([deployment()])
+    assert deployed.calls == ["frontend", "deploy_recipes"]
+    assert FRONTEND_SETTINGS_ENV in deployed.env
+    assert deployed.settings["platform"] == deployment().recipe.platform
+    assert "unlisted" in deployed.rows
+    assert deployed.rows["qwen35-9b-lora-16k"]["state"] == "ready"
+
+
+def test_deploy_passes_refresh_sets_and_platform_change_forces_both(deployed):
+    row = deployment()
+    cli.deploy([row], refresh_trainers=[row.name])
+    assert deployed.refresh == ([row.name], [])
+
+    previous = deepcopy(row.recipe.platform)
+    deployed.platform = previous
+    row.recipe.platform["modal"]["region"] = "us-east"
+    cli.deploy([row])
+    assert deployed.refresh == ([row.name], [row.name])
+
+
+def test_deploy_raises_the_registry_error_on_failure(deployed):
+    row = deployment()
+    deployed.fail = row.name
+    with pytest.raises(ValueError, match="trainer app deploy failed: no capacity"):
+        cli.deploy([row])
+
+
+def test_read_configs_from_deployed_function(monkeypatch):
+    call = SimpleNamespace(get=lambda timeout: [{"config": {"recipe": {"name": "x"}}}])
+    function = SimpleNamespace(spawn=lambda: call)
+    monkeypatch.setattr(modal.Function, "from_name", lambda *a, **k: function)
+    assert deployed_configs("my-app", "dev") == [{"config": {"recipe": {"name": "x"}}}]
 
 
 def test_deploy_all_deploys_bundled_configs(tmp_path, monkeypatch, deployed):
@@ -182,16 +194,16 @@ def test_bare_deploy_in_a_terminal_deploys_the_picked_models(monkeypatch, deploy
     )
     cli.main(["deploy"])
     assert [row["recipe"]["name"] for row in deployed.configs] == ["qwen35-9b-lora-64k"]
-    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.calls == ["frontend", "deploy_recipes"]
     assert shown == [picked]
 
 
-def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deployed):
+def test_progress_run_names_every_recipe_and_the_retry_command(monkeypatch, deployed):
     console = Console(record=True, width=120)
     presets = deploy_wizard.bundled_presets()
     picked = [deploy_wizard.pick(presets, "Qwen/Qwen3.5-9B-Base", "lora", 16_384)]
-    deployed.fail = "inference"
-    with pytest.raises(RuntimeError):
+    deployed.fail = "qwen35-9b-lora-16k"
+    with pytest.raises(ValueError, match="trainer app deploy failed"):
         cli.deploy(
             cli.compile_configs([preset.path for preset in picked]),
             run_steps=partial(
@@ -201,10 +213,10 @@ def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deploye
             ),
         )
     output = console.export_text()
-    assert "Trainer    qwen35-9b-lora-16k" in output
-    assert "Inference  qwen35-9b-lora-16k failed" in output
+    assert "API server" in output
+    assert "Recipe     qwen35-9b-lora-16k failed" in output
     assert "spindle deploy qwen35-9b-lora-16k" in output
-    assert deployed.calls == ["trainer", "inference"]
+    assert deployed.calls == ["frontend", "deploy_recipes"]
 
 
 def test_sampler_image_failure_still_deploys_the_frontend(
@@ -215,7 +227,7 @@ def test_sampler_image_failure_still_deploys_the_frontend(
 
     monkeypatch.setattr(cli, "build_sampler_image", broken)
     cli.deploy([deployment()])
-    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.calls == ["frontend", "deploy_recipes"]
     assert "Sampler image build failed: image build failed" in capsys.readouterr().err
 
 
@@ -228,23 +240,15 @@ def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
         deployed.images.append(frontend)
 
     def run(*args, **kwargs):
-        deploy_frontend(*args, **kwargs)
+        result = deploy_frontend(*args, **kwargs)
         frontend_deployed.set()
+        return result
 
     monkeypatch.setattr(cli, "build_sampler_image", build)
     monkeypatch.setattr(subprocess, "run", run)
     cli.deploy([deployment()])
-    assert deployed.calls == ["trainer", "inference", "frontend"]
+    assert deployed.calls == ["frontend", "deploy_recipes"]
     assert deployed.images == ["spindle"]
-
-
-def test_deploy_starts_weight_downloads_on_the_new_frontend(deployed, capsys):
-    cli.deploy([deployment()])
-    assert deployed.weights == [(deployment().definition_id, True)]
-    assert (
-        "Weights qwen35-9b-lora-16k: downloading in the background"
-        in capsys.readouterr().out
-    )
 
 
 def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
@@ -257,145 +261,6 @@ def test_cancelled_wizard_deploys_nothing(monkeypatch, deployed, capsys):
         cli.main(["deploy"])
     assert "cancelled" in capsys.readouterr().err
     assert deployed.calls == []
-
-
-def test_new_spindle_version_redeploys_trainer_and_inference(deployed):
-    row = deployment()
-    cli.deploy([row])
-    deployed.configs = [
-        {**config, "spindle_version": "0.1.0"} for config in deployed.configs
-    ]
-    deployed.calls.clear()
-    cli.deploy([row])
-    assert deployed.calls == ["trainer", "inference", "frontend"]
-
-
-def test_configs_saved_before_versioning_report_0_1_0():
-    saved = deployment().model_dump(mode="json")
-    del saved["spindle_version"]
-    assert DeploymentConfig.model_validate(saved).spindle_version == "0.1.0"
-
-
-def test_deploy_reuses_unchanged_apps(deployed):
-    row = deployment()
-    cli.deploy([row])
-    assert deployed.calls == ["trainer", "inference", "frontend"]
-    deployed.calls.clear()
-    cli.deploy([row])
-    assert deployed.calls == ["frontend"]
-
-    spec = deepcopy(row.recipe)
-    spec.inference_max_replicas = 6
-    changed = DeploymentConfig.create(spec)
-    deployed.calls.clear()
-    cli.deploy([changed])
-    assert deployed.calls == ["inference", "frontend"]
-
-    assert [r["recipe"]["name"] for r in deployed.configs] == [changed.name]
-
-    # Modal's actual state wins over a frontend config that mentions an old app.
-    deployed.apps.remove(changed.inference_app_name)
-    deployed.calls.clear()
-    cli.deploy([changed])
-    assert deployed.calls == ["inference", "frontend"]
-
-
-@pytest.mark.parametrize("mode", ["lora", "full"])
-def test_inference_changes_refresh_existing_pools_and_retry_before_frontend(
-    deployed, mode
-):
-    row = DeploymentConfig.create(
-        load(
-            config_path("qwen35-9b-lora-16k" if mode == "lora" else "qwen35-4b-fft-64k")
-        )
-    )
-    cli.deploy([row])
-    pool = (
-        LoraPoolSpec(row.name)
-        if mode == "lora"
-        else FFTPoolSpec(row.name, "job", True, 0)
-    )
-    deployed.apps.add(pool.app_name)
-    deployed.pools = [pool.as_dict(), {"definition_id": "unrelated"}]
-    recipe = deepcopy(row.recipe)
-    recipe.inference_max_replicas = 3
-    changed = DeploymentConfig.create(recipe)
-    deployed.calls.clear()
-    deployed.fail = "pool"
-    with pytest.raises(RuntimeError, match="pool deploy failed"):
-        cli.deploy([changed])
-    assert deployed.calls == ["inference", "pool"]
-    assert deployed.configs[0]["recipe"]["inference_max_replicas"] == 8
-    deployed.fail = None
-    deployed.calls.clear()
-    cli.deploy([changed])
-    assert deployed.calls == ["inference", "pool", "frontend"]
-
-
-@pytest.mark.parametrize(
-    "failure,error",
-    [("inference", RuntimeError), ("frontend", subprocess.CalledProcessError)],
-)
-def test_retry_discovers_completed_apps_without_pending_configs(
-    deployed, failure, error
-):
-    row = deployment()
-    deployed.fail = failure
-    with pytest.raises(error):
-        cli.deploy([row])
-    assert deployed.configs == []
-    assert row.trainer_app_name in deployed.apps
-    deployed.calls.clear()
-    deployed.fail = None
-    cli.deploy([row])
-    assert deployed.calls == (
-        ["inference", "frontend"] if failure == "inference" else ["frontend"]
-    )
-
-
-def test_refresh_redeploys_only_that_trainer(deployed):
-    miles = deployment()
-    fft = DeploymentConfig.create(load(config_path("qwen35-4b-fft-64k")))
-    cli.deploy([miles, fft])
-    deployed.calls.clear()
-    cli.deploy([miles, fft], refresh_trainers=[miles.name])
-    assert deployed.calls == ["trainer", "frontend"]
-    deployed.calls.clear()
-    cli.deploy([miles, fft])
-    assert deployed.calls == ["frontend"]
-
-
-def test_region_change_updates_worker_placement(deployed):
-    row = deployment()
-    cli.deploy([row])
-    platform = row.recipe.platform
-    platform["modal"]["region"] = "us-east"
-    deployed.calls.clear()
-    cli.deploy([row])
-    assert deployed.calls == ["trainer", "inference", "frontend"]
-    assert deployed.platform["modal"]["region"] == "us-east"
-
-
-def test_existing_frontend_without_deployment_metadata_can_be_updated(deployed):
-    row = deployment()
-    deployed.apps.add("spindle")
-    cli.deploy([row])
-    assert deployed.configs[0]["recipe"]["name"] == row.name
-
-
-def test_read_configs_from_deployed_function(monkeypatch):
-    call = SimpleNamespace(get=Mock(return_value=[{"configuration": "saved"}]))
-    function = SimpleNamespace(spawn=Mock(return_value=call))
-    lookup = Mock(return_value=function)
-    monkeypatch.setattr(modal.Function, "from_name", lookup)
-    assert deployed_configs("my-app", "dev") == [{"configuration": "saved"}]
-    lookup.assert_called_once_with("my-app", "deployed_configs", environment_name="dev")
-    function.spawn.side_effect = modal.exception.NotFoundError("no function")
-    assert deployed_configs("my-app", "dev") == []
-    function.spawn.side_effect = None
-    call.get.side_effect = RuntimeError("frontend failed")
-    with pytest.raises(RuntimeError, match="frontend failed"):
-        deployed_configs("my-app", "dev")
 
 
 def test_validate_never_resolves_or_deploys(monkeypatch, capsys):
@@ -414,7 +279,7 @@ def test_validate_never_resolves_or_deploys(monkeypatch, capsys):
 def test_deploy_rejects_python_mismatch_before_remote_changes(monkeypatch):
     monkeypatch.setattr(cli.sys, "version_info", (3, 11, 0))
     monkeypatch.setattr(
-        modal.Dict,
+        modal.Function,
         "from_name",
         lambda *a, **k: pytest.fail("must reject before touching Modal"),
     )

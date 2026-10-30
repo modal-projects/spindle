@@ -3,26 +3,19 @@
 import gc
 import json
 import os
-import tempfile
 
 import pytest
 
-from spindle.deployments import DeploymentConfig, config_path, load
+from spindle.control_plane.deployments import FrontendSettings
+from spindle.deployments import config_path, load
 
 os.environ.setdefault("SPINDLE_MILES_COMMIT", "a" * 40)
-# Importing spindle.providers.modal.app needs explicit offline configs.
-if "SPINDLE_DEPLOYMENT_CONFIGS_FILE" not in os.environ:
-    with tempfile.NamedTemporaryFile(
-        "w", suffix=".json", prefix="spindle-test-configs-", delete=False
-    ) as configs_file:
-        json.dump(
-            [
-                DeploymentConfig.create(load(config_path(name))).model_dump(mode="json")
-                for name in ("qwen35-9b-fft-64k", "qwen35-9b-lora-16k")
-            ],
-            configs_file,
-        )
-    os.environ["SPINDLE_DEPLOYMENT_CONFIGS_FILE"] = configs_file.name
+os.environ.setdefault(
+    "SPINDLE_FRONTEND_SETTINGS",
+    json.dumps(
+        FrontendSettings.from_recipe(load(config_path("qwen35-9b-lora-16k"))).__dict__
+    ),
+)
 
 
 @pytest.fixture

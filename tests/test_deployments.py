@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,11 @@ from spindle.backends.miles_arguments import (
 from spindle.configs.qwen35_9b_lora_16k import Config as Parent
 from spindle.configuration import BaseConfig
 from spindle.control_plane import ControlPlane, create_control_plane_app
-from spindle.control_plane.deployments import DeploymentRoutes
+from spindle.control_plane.deployments import (
+    DeploymentRoutes,
+    DeploymentStore,
+    FrontendSettings,
+)
 from spindle.control_plane.keys import model_key
 from spindle.deployments import (
     DeploymentConfig,
@@ -44,6 +49,67 @@ def recipe(preset="qwen35-9b-lora-16k", **changes):
 
 def resolved(spec=None, **changes):
     return DeploymentConfig.create(spec or recipe(**changes))
+
+
+class MemoryDeploymentStore(DeploymentStore):
+    """The real store over an in-memory KV, counting registry reads and writes."""
+
+    def __init__(self, rows=()):
+        # The store lists rows by when they became ready; keep the given order.
+        self.memory = InMemoryKeyValueStore(
+            {
+                row["config"]["recipe"]["name"]: {**row, "ready_at": order}
+                for order, row in enumerate(rows)
+            }
+        )
+        super().__init__(lambda: self.memory)
+        self.writes = 0
+        self.reads = 0
+        self.deploys = []
+        self.alive = True
+
+    async def deploy(self, row, *, refresh_trainer, refresh_inference):
+        self.deploys.append((row["attempt"], refresh_trainer, refresh_inference))
+
+    async def running(self, row):
+        return self.alive
+
+    async def list(self):
+        self.reads += 1
+        return await super().list()
+
+    async def put(self, name, row):
+        self.writes += 1
+        await super().put(name, row)
+
+    async def put_if_absent(self, name, row):
+        inserted = await super().put_if_absent(name, row)
+        self.writes += inserted.created
+        return inserted
+
+
+def ready_row(deployment, *, origin="deploy", state="ready", ready=None):
+    config = deployment.model_dump(mode="json")
+    return {
+        "config": config,
+        "ready": (ready or deployment).model_dump(mode="json"),
+        "state": state,
+        "attempt": f"attempt-{deployment.name}",
+        "added_at": 1,
+        "updated_at": 1,
+        "ready_at": 1,
+        "origin": origin,
+    }
+
+
+def routes_for(*deployments, origins=None):
+    rows = [
+        ready_row(deployment, origin=(origins or {}).get(deployment.name, "deploy"))
+        for deployment in deployments
+    ]
+    store = MemoryDeploymentStore(rows)
+    frontend = FrontendSettings.from_recipe(deployments[0].recipe)
+    return DeploymentRoutes(store, frontend), store
 
 
 @pytest.mark.parametrize("preset", ["qwen35-9b-lora-16k", "qwen35-4b-fft-64k"])
@@ -265,47 +331,45 @@ def test_trainer_image_is_part_of_trainer_identity():
 
 
 def test_routing_prefers_longest_context():
-    small = resolved(recipe("deepseek-v41-flash-lora-8k"))
-    large = resolved(recipe("deepseek-v41-flash-lora-32k"))
-    routes = DeploymentRoutes([small, large])
-    assert routes.select(small.model, "lora").definition_id == large.definition_id
-    assert routes.select(small.definition_id).definition_id == small.definition_id
-    assert routes.capabilities() == [
-        {"model_name": small.model, "max_context_length": 32768},
-        {"model_name": small.definition_id, "max_context_length": 8192},
-        {"model_name": large.definition_id, "max_context_length": 32768},
-    ]
-    validate_frontend([small.recipe, large.recipe])
+    async def run():
+        small = resolved(recipe("deepseek-v41-flash-lora-8k"))
+        large = resolved(recipe("deepseek-v41-flash-lora-32k"))
+        routes, _ = routes_for(small, large, origins={large.name: "api"})
+        assert (await routes.select(small.model, "lora")).definition_id == large.name
+        assert (await routes.select(small.name)).definition_id == small.name
+        assert (await routes.capabilities())[0] == {
+            "model_name": small.model,
+            "max_context_length": 32768,
+        }
+        validate_frontend([small.recipe, large.recipe])
 
-    twin = resolved(recipe("deepseek-v41-flash-lora-8k", name="twin"))
-    routes = DeploymentRoutes([small, twin])
-    assert routes.select(small.model, "lora").definition_id == small.definition_id
+        twin = resolved(recipe("deepseek-v41-flash-lora-8k", name="twin"))
+        routes, _ = routes_for(small, twin)
+        assert (await routes.select(small.model, "lora")).definition_id == small.name
 
-    only = resolved(recipe("qwen35-9b-lora-64k"))
-    routes = DeploymentRoutes([only])
-    assert routes.select(only.model, "lora").definition_id == only.definition_id
-    assert routes.capabilities() == [
-        {"model_name": only.model, "max_context_length": 65536}
-    ]
+        other = resolved(recipe(name="other", model="org/other"))
+        routes, _ = routes_for(other)
+        assert (await routes.select(other.model, "lora")).definition_id == other.name
 
-    other = resolved(recipe(name="other", model="org/other"))
-    routes = DeploymentRoutes([other])
-    assert routes.select(other.model, "lora").definition_id == other.definition_id
-    assert {row["model_name"] for row in routes.capabilities()} == {other.model}
+    asyncio.run(run())
 
 
 def test_sampling_prefers_longest_context_and_training_filters_parameterization():
-    lora = resolved()
-    fft = resolved(recipe("qwen35-4b-fft-64k", model=lora.model))
-    for first, second in ((lora, fft), (fft, lora)):
-        routes = DeploymentRoutes([first, second])
-        assert routes.select(lora.model).definition_id == fft.definition_id
-        assert routes.capabilities()[0]["max_context_length"] == 16384
-        assert routes.select(lora.model, "lora").definition_id == lora.definition_id
-        assert routes.select(lora.model, "full").definition_id == fft.definition_id
-        assert routes.select(second.definition_id).definition_id == second.definition_id
-        assert routes.select("missing") is None
-        assert routes.select(lora.definition_id, "full") is None
+    async def run():
+        lora = resolved()
+        fft = resolved(recipe("qwen35-4b-fft-64k", model=lora.model))
+        for deployments in ((lora, fft), (fft, lora)):
+            routes, _ = routes_for(*deployments)
+            assert (await routes.select(lora.model)).name == fft.name
+            assert (await routes.select(lora.model, "lora")).name == lora.name
+            assert (await routes.select(lora.model, "full")).name == fft.name
+            assert (await routes.select(deployments[1].name)).name == deployments[
+                1
+            ].name
+            assert await routes.select("missing") is None
+            assert await routes.select(lora.name, "full") is None
+
+    asyncio.run(run())
 
 
 def test_native_false_list_aliases_and_scalar_overrides():
@@ -376,6 +440,136 @@ def test_multiple_models_same_http_service_and_old_binding_survives_switch():
             assert len(configs.json()["deployments"]) == 2
             client.headers.clear()
             assert (await client.get("/api/v1/spindle/deployments")).status_code == 401
+
+    asyncio.run(run())
+
+
+def test_registry_keeps_last_ready_config_during_redeploy_and_failure():
+    async def run():
+        original = resolved()
+        changed = resolved(recipe(name=original.name, trainer_gpu="H200"))
+        routes, store = routes_for(original)
+        deploying = await routes.put(changed, origin="deploy")
+        assert deploying["state"] == "deploying"
+        assert (
+            deploying["ready"]["recipe"]["trainer_gpu"] == original.recipe.trainer_gpu
+        )
+        assert (
+            await routes.select(original.model)
+        ).recipe.trainer_gpu == original.recipe.trainer_gpu
+
+        failed = {**deploying, "state": "failed", "error": "trainer app deploy failed"}
+        await store.put(original.name, failed)
+        routes.invalidate()
+        assert (
+            await routes.select(original.model)
+        ).recipe.trainer_gpu == original.recipe.trainer_gpu
+
+    asyncio.run(run())
+
+
+def test_stale_ready_row_is_reported_but_not_routable():
+    async def run():
+        deployment = resolved()
+        row = ready_row(deployment)
+        row["ready"]["recipe"]["platform"] = {"frontend": "old-frontend"}
+        store = MemoryDeploymentStore([row])
+        routes = DeploymentRoutes(
+            store, FrontendSettings.from_recipe(deployment.recipe)
+        )
+        assert (await routes.rows())[0]["state"] == "stale"
+        assert await routes.select(deployment.name) is None
+
+    asyncio.run(run())
+
+
+def test_registry_put_replaces_retries_and_skips_identical_updates():
+    async def run():
+        original = resolved()
+        changed = resolved(recipe(name=original.name, trainer_gpu="H200"))
+        routes, store = routes_for(original)
+
+        updated = await routes.put(changed, origin="deploy")
+        assert updated["attempt"] != ready_row(original)["attempt"]
+        assert updated["ready"] == original.model_dump(mode="json")
+        writes = store.writes
+        same = await routes.put(changed, origin="deploy")
+        assert same["attempt"] == updated["attempt"]
+        assert store.writes == writes
+
+        await store.put(original.name, {**updated, "state": "failed"})
+        routes.invalidate()
+        retried = await routes.put(changed, origin="deploy")
+        assert retried["attempt"] != updated["attempt"]
+        assert retried["ready"] == original.model_dump(mode="json")
+
+    asyncio.run(run())
+
+
+def test_registry_cache_ttl_and_exact_name_miss_bypass():
+    async def run():
+        base = resolved()
+        routes, store = routes_for(base)
+        await routes.rows()
+        reads = store.reads
+        new = resolved(recipe(name="new-name", max_context_length=32768))
+        await store.memory.put(new.name, ready_row(new, origin="api"))
+        assert (await routes.select(new.name)).name == new.name
+        assert store.reads == reads + 1
+        routes._cached_at = time.monotonic() - 6
+        await routes.rows()
+        assert store.reads == reads + 2
+
+    asyncio.run(run())
+
+
+def client_for(routes, store=None):
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(
+            app=create_control_plane_app(
+                ControlPlane(store or InMemoryKeyValueStore(), SimpleNamespace()),
+                routes,
+                api_key="test",
+            )
+        ),
+        base_url="http://frontend",
+        headers={"x-api-key": "test"},
+    )
+
+
+def test_every_recipe_routes_by_name_and_plain_models_pick_the_longest():
+    async def run():
+        kv = InMemoryKeyValueStore()
+        base = resolved()
+        longer = resolved(recipe(name="longer", max_context_length=65536))
+        routes, _ = routes_for(base, longer, origins={"longer": "api"})
+        assert (await routes.select(base.model)).definition_id == "longer"
+        assert (await routes.select(base.name)).definition_id == base.definition_id
+        assert await routes.capabilities() == [
+            {"model_name": base.model, "max_context_length": 65536},
+            {"model_name": base.name, "max_context_length": base.max_context_length},
+            {"model_name": "longer", "max_context_length": 65536},
+        ]
+        async with client_for(routes, kv) as client:
+            session_id = (await client.post("/api/v1/create_session", json={})).json()[
+                "session_id"
+            ]
+            for seq, model_name, expected in (
+                (0, base.model, "longer"),
+                (1, base.name, base.definition_id),
+            ):
+                response = await client.post(
+                    "/api/v1/create_model",
+                    json={
+                        "session_id": session_id,
+                        "model_seq_id": seq,
+                        "base_model": model_name,
+                        "lora_config": {"rank": 32},
+                    },
+                )
+                assert response.status_code == 200, response.text
+                row = await kv.get(model_key(response.json()["model_id"]))
+                assert row["engine_definition_id"] == expected
 
     asyncio.run(run())
 

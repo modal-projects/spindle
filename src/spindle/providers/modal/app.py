@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
+import sys
 import time
 from dataclasses import asdict
 
@@ -11,9 +14,14 @@ from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
+from spindle.control_plane.deployments import (
+    DEPLOY_TIMEOUT_S,
+    DeploymentRoutes,
+    DeploymentStore,
+)
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.records import ModelRecord
-from spindle.deployments import validate_frontend
+from spindle.deployments import DeploymentConfig
 from spindle.inference.sampling import sample_task
 from spindle.providers.contracts import (
     Parameterization,
@@ -21,7 +29,7 @@ from spindle.providers.contracts import (
 )
 from spindle.startup_timing import StartupTimeline
 from spindle.telemetry.otlp import sample_trace
-from spindle.version import COMMIT_ENV, source_commit
+from spindle.version import COMMIT_ENV, deployment_tag, source_commit
 
 from .app_tags import app_tags
 from .checkpoint_storage import (
@@ -30,11 +38,11 @@ from .checkpoint_storage import (
 )
 from .deployment import trainer_deployment_env
 from .deployment_configs import (
-    CONFIGS_FILE_ENV,
-    CONFIGS_IMAGE_PATH,
-    PLATFORM_ENV,
-    configs_from_env,
-    platform_from_env,
+    DEPLOYMENT_ENV,
+    FRONTEND_SETTINGS_ENV,
+    POOL_CONFIG_ENV,
+    WORKER_ROLE_ENV,
+    frontend_settings_from_env,
 )
 from .engines import EngineInstanceRecord, ModalEnginePlatform
 from .fft_pool import (
@@ -53,6 +61,7 @@ from .image_dependencies import (
 from .kv import (
     ModalSessionKeyValueStores,
     current_app_id,
+    deployment_kv,
     fft_pool_kv,
     shared_kv,
 )
@@ -80,20 +89,61 @@ from .trainer_reconciler import (
     request_reconcile,
 )
 
-DEFINITIONS = tuple(configs_from_env())
-validate_frontend([definition.recipe for definition in DEFINITIONS])
-SETTINGS = DEFINITIONS[0]
-PLATFORM = platform_from_env()
+
+DEPLOY_ADDED_TIMEOUT_S = DEPLOY_TIMEOUT_S
+
+
+class ModalDeploymentStore(DeploymentStore):
+    """Deploys a row's apps from a frontend function, recording the call."""
+
+    async def deploy(self, row, *, refresh_trainer, refresh_inference):
+        name = row["config"]["recipe"]["name"]
+        try:
+            call = await deploy_recipe.spawn.aio(
+                name, row["attempt"], refresh_trainer, refresh_inference
+            )
+        except Exception as exc:
+            await _update_deployment(
+                name, row["attempt"], state="failed", error=str(exc)
+            )
+            raise
+        await _update_deployment(name, row["attempt"], call_id=call.object_id)
+
+    async def running(self, row):
+        if "call_id" not in row:
+            return True
+        try:
+            return await _call_running(row["call_id"])
+        except Exception:
+            return False
+
+
+async def _update_deployment(name: str, attempt: str, **changes) -> None:
+    """Write to the row only for its current attempt, and never demote a ready row."""
+    store = deployment_kv()
+    row = await store.get(name)
+    if (
+        row is None
+        or row.get("attempt") != attempt
+        or (row["state"] == "ready" and changes.get("state") == "failed")
+    ):
+        return
+    await store.put(name, {**row, **changes, "updated_at": time.time()})
+
+
+SETTINGS = frontend_settings_from_env()
+PLATFORM = SETTINGS.platform
+DEPLOYMENTS = DeploymentRoutes(ModalDeploymentStore(lambda: deployment_kv()), SETTINGS)
 APP_NAME = PLATFORM["frontend"]
 # Placement for the CPU-only frontend; trainers and samplers keep their own
 # (unpinned by default) placement.
 FRONTEND_REGION = PLATFORM["modal"]["region"] or "us-east"
 MODEL_ASSET_ROOT = "/assets"
-SESSION_IDLE_TIMEOUT = SETTINGS.recipe.session_idle_timeout_s
-FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.recipe.pool_idle_timeout_s
+SESSION_IDLE_TIMEOUT = SETTINGS.session_idle_timeout_s
+FFT_POOL_IDLE_TIMEOUT = LORA_POOL_IDLE_TIMEOUT = SETTINGS.pool_idle_timeout_s
 FFT_POOL_TOUCH_INTERVAL = 60.0
 LORA_POOL_CHECK_INTERVAL = 60.0
-SWEEP_PERIOD = modal.Period(seconds=SETTINGS.recipe.sweep_interval_s)
+SWEEP_PERIOD = modal.Period(seconds=SETTINGS.sweep_interval_s)
 CHECKPOINT_READ_LOCK = asyncio.Lock()
 _pool_touches: dict[str, float] = {}
 _lora_pool_gateways: dict[str, tuple[float, str]] = {}
@@ -107,8 +157,7 @@ checkpoint_volume = modal.Volume.from_name(
 )
 TRAINER_DEPLOYMENT_ENV = {
     **trainer_deployment_env(),
-    CONFIGS_FILE_ENV: CONFIGS_IMAGE_PATH,
-    PLATFORM_ENV: os.environ.get(PLATFORM_ENV, ""),
+    FRONTEND_SETTINGS_ENV: json.dumps(SETTINGS.as_dict()),
     "SPINDLE_APP_NAME": APP_NAME,
     COMMIT_ENV: source_commit() or "",
 }
@@ -142,11 +191,8 @@ base_image = (
 
 
 def _frontend_image(base):
-    # The configs file changes on every deploy; keep it above slower layers.
-    return (
-        base.add_local_file(os.environ[CONFIGS_FILE_ENV], CONFIGS_IMAGE_PATH, copy=True)
-        .env(TRAINER_DEPLOYMENT_ENV)
-        .add_local_python_source("spindle", ignore=ignore_config_source)
+    return base.env(TRAINER_DEPLOYMENT_ENV).add_local_python_source(
+        "spindle", ignore=ignore_config_source
     )
 
 
@@ -155,8 +201,25 @@ sample_image = _frontend_image(with_router(base_image))
 
 
 @app.function(image=image)
-def deployed_configs():
-    return [row.model_dump(mode="json") for row in configs_from_env()]
+async def deployed_configs():
+    return await DEPLOYMENTS.rows()
+
+
+@app.function(image=image)
+async def deploy_recipes(
+    configs_json: str,
+    refresh_trainers: list[str] | tuple[str, ...] = (),
+    refresh_inference: list[str] | tuple[str, ...] = (),
+):
+    """Register `spindle deploy` recipes; each changed one starts deploying."""
+    for raw in json.loads(configs_json):
+        deployment = DeploymentConfig.model_validate(raw)
+        await DEPLOYMENTS.put(
+            deployment,
+            origin="deploy",
+            refresh_trainer=deployment.name in refresh_trainers,
+            refresh_inference=deployment.name in refresh_inference,
+        )
 
 
 @app.function(image=image)
@@ -197,6 +260,7 @@ proxy_secret = modal.Secret.from_name(
     retries=2,
 )
 async def prepare_model_assets(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     definition = module_for(definition_id)
     checkpoint = os.path.normpath(definition.asset_path)
     if (
@@ -221,8 +285,131 @@ async def prepare_model_assets(definition_id: str) -> None:
 @app.function(image=image)
 async def start_weights_download(definition_id: str) -> bool:
     """Start the base-weight download for `spindle deploy`; True while it runs."""
+    await DEPLOYMENTS.load(definition_id)
     module_for(definition_id)
     return await _start_weights_download(definition_id) is not None
+
+
+def app_is_missing(name: str) -> bool:
+    try:
+        modal.App.lookup(name, environment_name=PLATFORM["modal"]["environment"])
+    except Exception as exc:
+        if isinstance(exc, modal.exception.NotFoundError):
+            return True
+        raise
+    return False
+
+
+def _deploy_worker_app(deployment: DeploymentConfig, role: str, pool=None) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "modal",
+        "deploy",
+        "-m",
+        "spindle.providers.modal.deployment_worker_app",
+        "--tag",
+        deployment_tag(),
+    ]
+    if environment := PLATFORM["modal"]["environment"]:
+        command += ["--env", environment]
+    subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=DEPLOY_ADDED_TIMEOUT_S // 2 - 60,
+        env={
+            **os.environ,
+            DEPLOYMENT_ENV: deployment.model_dump_json(),
+            WORKER_ROLE_ENV: role,
+            FRONTEND_SETTINGS_ENV: json.dumps(SETTINGS.as_dict()),
+            **({POOL_CONFIG_ENV: json.dumps(pool)} if pool is not None else {}),
+        },
+    )
+
+
+async def _redeploy_rollout_pools(deployment: DeploymentConfig) -> None:
+    for pool in await deployed_pools.local():
+        if pool.get("definition_id") != deployment.definition_id:
+            continue
+        spec = (
+            LoraPoolSpec.from_dict(pool)
+            if deployment.parameterization == "lora"
+            else FFTPoolSpec.from_dict(pool)
+        )
+        if app_is_missing(spec.app_name):
+            continue
+        try:
+            await asyncio.to_thread(_deploy_worker_app, deployment, "rollout", pool)
+        except Exception as exc:
+            output = getattr(exc, "stderr", None) or str(exc)
+            raise RuntimeError(f"rollout app deploy failed: {output[-2000:]}") from exc
+
+
+@app.function(image=image, timeout=DEPLOY_ADDED_TIMEOUT_S)
+async def deploy_recipe(
+    name: str,
+    attempt: str,
+    refresh_trainer: bool = False,
+    refresh_inference: bool = False,
+) -> None:
+    """Deploy one recipe's missing or changed apps, then make it routable."""
+    row = await deployment_kv().get(name)
+    if row is None or row.get("attempt") != attempt:
+        return
+    deployment = DeploymentConfig.model_validate(row["config"])
+    ready = (
+        DeploymentConfig.model_validate(row["ready"])
+        if row.get("ready") is not None
+        else None
+    )
+    try:
+        roles = []
+        for role, forced, missing, changed in (
+            (
+                "trainer",
+                refresh_trainer,
+                app_is_missing(deployment.trainer_app_name),
+                ready is None
+                or deployment.trainer_identity() != ready.trainer_identity(),
+            ),
+            (
+                "inference",
+                refresh_inference,
+                app_is_missing(deployment.inference_app_name),
+                ready is None
+                or deployment.inference_identity() != ready.inference_identity(),
+            ),
+        ):
+            if forced or missing or changed:
+                roles.append(role)
+                try:
+                    await asyncio.to_thread(_deploy_worker_app, deployment, role)
+                except Exception as exc:
+                    output = getattr(exc, "stderr", None) or str(exc)
+                    raise RuntimeError(
+                        f"{role} app deploy failed: {output[-2000:]}"
+                    ) from exc
+        if "inference" in roles:
+            await _redeploy_rollout_pools(deployment)
+    except Exception as exc:
+        await _update_deployment(
+            name,
+            attempt,
+            state="failed",
+            error=str(exc),
+        )
+        raise
+    await _update_deployment(
+        name,
+        attempt,
+        state="ready",
+        ready=row["config"],
+        ready_at=time.time(),
+        error=None,
+    )
+    await _start_weights_download(name)
 
 
 async def _touch_fft_pool(spec: FFTPoolSpec) -> None:
@@ -314,6 +501,7 @@ async def _call_running(call_id: str) -> bool:
 
 async def _weights_download(definition_id: str) -> float | None:
     """When the running base-weight download started, or None if none is running."""
+    await DEPLOYMENTS.load(definition_id)
     if await _weights_are_ready(definition_id):
         return None
     record = await shared_kv().get(_weights_call_key(definition_id))
@@ -432,6 +620,7 @@ async def execute_sample(task: dict) -> dict:
 
 async def _execute_sample(task: dict, stats: dict) -> dict:
     definition_id = str(task["engine_definition_id"])
+    await DEPLOYMENTS.load(definition_id)
     parameterization = parameterization_for(definition_id)
     if parameterization not in {"full", "lora"}:
         raise ValueError(f"unsupported sampling definition: {definition_id}")
@@ -527,10 +716,10 @@ async def _model_record(kv, model_id: str):
 
 
 def module_for(definition_id: str):
-    for definition in DEFINITIONS:
-        if definition.definition_id == definition_id:
-            return definition
-    raise KeyError(definition_id)
+    definition = DEPLOYMENTS.cached(definition_id)
+    if definition is None:
+        raise KeyError(definition_id)
+    return definition
 
 
 def parameterization_for(definition_id: str) -> Parameterization | None:
@@ -538,6 +727,11 @@ def parameterization_for(definition_id: str) -> Parameterization | None:
         return module_for(definition_id).parameterization
     except KeyError:
         return None
+
+
+async def _loaded_parameterization(definition_id: str) -> Parameterization | None:
+    await DEPLOYMENTS.load(definition_id)
+    return parameterization_for(definition_id)
 
 
 def trainer_autoscaling(definition_id: str) -> bool:
@@ -556,6 +750,7 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
     call_id = modal.current_function_call_id()
 
     async def run(definition_id: str, token: str) -> None:
+        await DEPLOYMENTS.load(definition_id)
         parameterization = parameterization_for(definition_id)
         if (
             parameterization is None
@@ -597,6 +792,7 @@ async def trainer_reconciler(delay_seconds: float = 0.0) -> None:
 
 
 async def kick_trainer_reconciler(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     if parameterization_for(definition_id) is None:
         return
 
@@ -645,6 +841,7 @@ async def deployment_error(definition_id: str) -> str | None:
 
 @app.function(image=image)
 async def clear_deployment_failure(definition_id: str) -> None:
+    await DEPLOYMENTS.load(definition_id)
     module_for(definition_id)
     await shared_kv().delete(f"deployment_failure:{definition_id}")
     await kick_trainer_reconciler(definition_id)
@@ -660,6 +857,7 @@ def _plane():
         return call.object_id
 
     async def prepare_model(model) -> None:
+        await DEPLOYMENTS.load(model.engine_definition_id)
         parameterization = parameterization_for(model.engine_definition_id)
         if parameterization is None:
             return
@@ -675,6 +873,7 @@ def _plane():
 
     async def ensure_pool(session) -> None:
         definition_id = session.engine_definition_id
+        await DEPLOYMENTS.load(definition_id)
         parameterization = parameterization_for(definition_id)
         if parameterization is None:
             return
@@ -736,7 +935,8 @@ def _plane():
         delete_checkpoint=_delete_checkpoint,
         checkpoint_root=CHECKPOINT_ROOT,
         reconcile_trainers=kick_trainers,
-        trainer_autoscaling=trainer_autoscaling,
+        # Every Modal recipe autoscales; this also covers recipes added after startup.
+        trainer_autoscaling=lambda _: True,
         trainer_gpu_wait=gpu_wait(_trainer_function, _trainer_gpus),
     )
 
@@ -758,7 +958,7 @@ def _plane():
 def server():
     return create_control_plane_app(
         _plane(),
-        DEFINITIONS,
+        DEPLOYMENTS,
         api_key=os.environ["TINKER_API_KEY"],
         checkpoint_volume=CHECKPOINT_VOLUME_NAME,
     )
@@ -769,7 +969,7 @@ async def _lose_undefined_models() -> tuple[str, ...]:
     lost = []
     for _, value in await kv.list_items("model:"):
         model = ModelRecord.model_validate(value)
-        if parameterization_for(model.engine_definition_id) is not None:
+        if await _loaded_parameterization(model.engine_definition_id) is not None:
             continue
         await kv.delete(placement_key(model.model_id))
         await kv.delete(trainer_demand_key(model.model_id))
@@ -787,7 +987,7 @@ async def _cleanup_fft_pools() -> tuple[str, ...]:
         ).app_name
         for _, value in await shared_kv().list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "full"
+        if await _loaded_parameterization(model.engine_definition_id) == "full"
     }
     stopped = []
     registry = fft_pool_kv()
@@ -831,7 +1031,7 @@ async def _cleanup_lora_pools() -> tuple[str, ...]:
         LoraPoolSpec(model.engine_definition_id).app_name
         for _, value in await registry.list_items("model:")
         for model in (ModelRecord.model_validate(value),)
-        if parameterization_for(model.engine_definition_id) == "lora"
+        if await _loaded_parameterization(model.engine_definition_id) == "lora"
     }
     stopped = []
     for key, value in await registry.list_items("lora_pool:"):
