@@ -111,7 +111,7 @@ def start_weights_download(frontend, environment, definition_id):
 
 
 def pool_config(definition_id):
-    row = deployment_kv().dictionary.get(definition_id)
+    row = deployment_kv().read(definition_id)
     if row is None or row.get("ready") is None:
         return None
     return DeploymentConfig.model_validate(row["ready"])

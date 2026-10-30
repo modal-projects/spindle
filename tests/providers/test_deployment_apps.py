@@ -199,10 +199,10 @@ def test_pool_lookup_uses_definition_name(monkeypatch):
         deployment_configs,
         "deployment_kv",
         lambda: SimpleNamespace(
-            dictionary={
+            read={
                 item.name: {"ready": item.model_dump(mode="json")}
                 for item in (row, added)
-            }
+            }.get
         ),
     )
     saved = deployment_configs.pool_config(row.definition_id)
@@ -352,7 +352,7 @@ def test_missing_pool_uses_saved_provisioner(monkeypatch, kind):
         deployment_configs,
         "deployment_kv",
         lambda: SimpleNamespace(
-            dictionary={row.name: {"ready": row.model_dump(mode="json")}}
+            read={row.name: {"ready": row.model_dump(mode="json")}}.get
         ),
     )
     module = lora_pool if kind == "lora" else fft_pool
