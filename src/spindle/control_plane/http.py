@@ -533,7 +533,7 @@ def create_control_plane_app(
                 base_model=body.base_model,
                 user_metadata=body.user_metadata,
                 optimizer=body.optimizer,
-                definition_ids={d.definition_id for d in routes.definitions},
+                definition_ids={d.definition_id for d in await routes.definitions()},
             )
             return {
                 "request_id": creation.request_id,
