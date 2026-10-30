@@ -15,18 +15,23 @@ def test_pool_bounds():
 
 
 @pytest.mark.parametrize(
-    "warm,body_failure,drain_failure,startup_failure,tag_failure,expected",
+    "warm,body_failure,drain_failure,startup_failure,parent_failure,"
+    "tag_failure,expected",
     [
-        (True, None, False, False, None, "completed"),
-        (False, "error", False, False, None, "failed"),
-        (False, None, False, True, None, "failed"),
-        (True, None, True, False, None, "failed"),
-        (False, "interrupt", False, False, None, "cancelled"),
-        (False, "cancel", False, False, None, "cancelled"),
-        (True, None, False, False, "read", "completed"),
-        (True, None, False, False, "write", "completed"),
-        (False, "error", False, False, "read", "failed"),
-        (False, "error", False, False, "write", "failed"),
+        (True, None, False, False, None, None, "completed"),
+        (False, "error", False, False, None, None, "failed"),
+        (False, None, False, True, None, None, "failed"),
+        (True, None, True, False, None, None, "failed"),
+        (False, "interrupt", False, False, None, None, "cancelled"),
+        (False, "cancel", False, False, None, None, "cancelled"),
+        (True, None, False, False, None, "read", "completed"),
+        (True, None, False, False, None, "write", "completed"),
+        (False, "error", False, False, None, "read", "failed"),
+        (False, "error", False, False, None, "write", "failed"),
+        (True, None, False, False, "error", None, "failed"),
+        (True, None, False, False, "interrupt", None, "cancelled"),
+        (True, None, False, False, "cancel", None, "cancelled"),
+        (True, None, False, False, "error", "write", "failed"),
     ],
 )
 def test_owned_children_stop_before_parent(
@@ -35,6 +40,7 @@ def test_owned_children_stop_before_parent(
     body_failure,
     drain_failure,
     startup_failure,
+    parent_failure,
     tag_failure,
     expected,
 ):
@@ -60,11 +66,18 @@ def test_owned_children_stop_before_parent(
         def get(self, key):
             return data.get(key)
 
+    def delete_registry(*args, **kwargs):
+        events.append("registry-delete")
+
     monkeypatch.setattr(modal.Dict, "from_name", lambda *a, **k: Registry())
-    monkeypatch.setattr(
-        modal.Dict, "objects", SimpleNamespace(delete=lambda *a, **k: None)
-    )
+    monkeypatch.setattr(modal.Dict, "objects", SimpleNamespace(delete=delete_registry))
     monkeypatch.setattr(modal.Secret, "from_name", lambda *a, **k: None)
+
+    parent_exc = {
+        "error": RuntimeError("parent shutdown failure"),
+        "interrupt": KeyboardInterrupt("parent interrupt"),
+        "cancel": asyncio.CancelledError("parent cancel"),
+    }.get(parent_failure)
 
     @contextmanager
     def parent():
@@ -75,10 +88,16 @@ def test_owned_children_stop_before_parent(
             pass  # Modal app.run suppresses this.
         finally:
             events.append("parent-stop")
+            if parent_exc is not None:
+                raise parent_exc
 
     def get_tags():
+        events.append("read-tags")
         if tag_failure == "read":
             raise RuntimeError("tag read failure")
+        # Real apps soft-delete their tag rows at stop.
+        if "parent-stop" in events:
+            return {}
         return dict(base_tags)
 
     def set_tags(tags):
@@ -142,19 +161,25 @@ def test_owned_children_stop_before_parent(
     ) as exc:
         caught = exc
     assert (caught is not None) == bool(
-        body_failure or drain_failure or startup_failure
+        body_failure or drain_failure or startup_failure or parent_failure
     )
     if body_exc is not None:
         assert caught is body_exc
+    if parent_exc is not None:
+        assert caught is parent_exc
     assert ("warm" in events) == warm
     assert events.index("stop-pinned") < events.index("parent-stop")
-    if "write-tags" in events:
-        assert events.index("write-tags") < events.index("parent-stop")
     if tag_failure:
         assert not written
     else:
-        assert events.index("stop-pinned") < events.index("write-tags")
         assert written == {**base_tags, "spindle_scope_status": expected}
+    if "read-tags" in events:
+        assert events.index("read-tags") < events.index("parent-stop")
+    if "write-tags" in events:
+        assert events.index("write-tags") > events.index("parent-stop")
+    # Ownership metadata is kept when child context shutdown fails.
+    if "registry-delete" in events and "write-tags" in events:
+        assert events.index("write-tags") > events.index("registry-delete")
 
 
 def test_recipes_keep_context_and_topology_together():
