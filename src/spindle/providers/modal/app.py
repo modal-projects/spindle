@@ -751,7 +751,10 @@ def _plane():
     secrets=[modal.Secret.from_name(API_SECRET_NAME, required_keys=["TINKER_API_KEY"])],
 )
 @modal.concurrent(max_inputs=128, target_inputs=16)
-@modal.asgi_app(requires_proxy_auth=False)
+@modal.asgi_app(
+    requires_proxy_auth=PLATFORM.get("requires_proxy_auth", False),
+    label=PLATFORM.get("url_label"),
+)
 def server():
     return create_control_plane_app(
         _plane(),
