@@ -12,6 +12,7 @@ import modal
 from stitch.pools.modal_flash import ModalFlashPool
 
 from spindle.startup_timing import StartupTimeline
+from spindle.version import deployment_tag
 
 from .deployment_configs import (
     PLATFORM_ENV,
@@ -80,6 +81,8 @@ def deploy_pool(spec: LoraPoolSpec, *, config=None, platform=None) -> str:
         "spindle.providers.modal.deployment_pool_app",
         "--name",
         spec.app_name,
+        "--tag",
+        deployment_tag(),
     ]
     environment = platform["modal"]["environment"]
     if environment:

@@ -15,6 +15,8 @@ import modal
 from stitch.pools.modal_flash import ModalFlashPool, list_flash_containers
 from stitch.types import VersionRef
 
+from spindle.version import deployment_tag
+
 from .deployment_configs import (
     PLATFORM_ENV,
     POOL_CONFIG_ENV,
@@ -156,6 +158,8 @@ def deploy_pool(spec: FFTPoolSpec, *, config=None, platform=None) -> str:
         "spindle.providers.modal.deployment_pool_app",
         "--name",
         spec.app_name,
+        "--tag",
+        deployment_tag(),
     ]
     environment = platform["modal"]["environment"]
     if environment:
