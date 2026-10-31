@@ -66,6 +66,9 @@ class Config(BaseConfig):
         "TORCH_NCCL_BLOCKING_WAIT": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TORCHINDUCTOR_COMPILE_THREADS": "1",
+        # Compile the hyper-connection and loss kernels for any sequence length on the
+        # first step. Otherwise each new mix of lengths recompiles them mid-run.
+        "TORCH_COMPILE_OVERRIDE_DYNAMO_CONFIGS": ">=0:assume_static_by_default=False",
         "TILELANG_CACHE_DIR": "/tmp/tilelang_cache",
         "NCCL_ALGO": "Ring",
         "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
