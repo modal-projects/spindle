@@ -22,7 +22,7 @@
 - `uv run spindle deploy`: interactive picker; without a terminal and without args it exits, deploying nothing. Checks secrets first and prints creation commands for missing ones.
 - `uv run spindle deploy <name...>`: bundled configs by name. `--all`: every bundled config (in `src/spindle/configs`).
 - `uv run spindle deploy config.py`: custom config file.
-- Each deploy adds or updates the listed configs in the per-frontend registry; configs not listed remain served. Plain model IDs select the longest-context routable config regardless of origin; exact recipe names win.
+- Each deploy adds or updates the listed configs in the per-frontend registry; configs not listed remain served. Plain model IDs select the longest-context ready config regardless of origin; exact recipe names win.
 
 ## Custom configs
 

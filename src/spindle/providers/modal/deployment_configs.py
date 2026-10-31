@@ -64,7 +64,7 @@ def seed_registry_rows(frontend, environment, rows):
     """Write ready rows straight into a deployed frontend's registry.
 
     Used before a frontend that still serves a baked-in configs file is
-    redeployed, so its recipes stay routable through the swap and their
+    redeployed, so its recipes keep serving through the swap and their
     already-deployed apps are not deployed again.
     """
     import asyncio

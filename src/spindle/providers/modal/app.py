@@ -354,7 +354,7 @@ async def deploy_recipe(
     refresh_trainer: bool = False,
     refresh_inference: bool = False,
 ) -> None:
-    """Deploy one recipe's missing or changed apps, then make it routable."""
+    """Deploy one recipe's missing or changed apps, then mark it ready."""
     row = await deployment_kv().get(name)
     if row is None or row.get("attempt") != attempt:
         return

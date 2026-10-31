@@ -1433,43 +1433,6 @@ def test_added_deployment_rows_deploy_once_and_retry_failures(monkeypatch) -> No
 
 
 @pytest.mark.skip(reason="superseded by unified registry worker coverage")
-def test_added_deployment_rows_report_abandoned_workers_without_persisting(
-    monkeypatch,
-):
-    modal_app = importlib.import_module("spindle.providers.modal.app")
-    store = InMemoryKeyValueStore()
-    now = 100_000.0
-    old = {
-        "config": {"name": "old"},
-        "added_at": now - modal_app.DEPLOY_ADDED_TIMEOUT_S - 301,
-        "state": "deploying",
-    }
-    recent = {
-        "config": {"name": "recent"},
-        "added_at": now - modal_app.DEPLOY_ADDED_TIMEOUT_S - 301,
-        "updated_at": now - 1,
-        "state": "deploying",
-    }
-    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
-    monkeypatch.setattr(modal_app.time, "time", lambda: now)
-
-    async def run():
-        await store.put("old", old)
-        await store.put("recent", recent)
-        listed = await modal_app.AddedDeployments().list()
-        rows = {row["config"]["name"]: row for row in listed}
-        assert rows["old"]["state"] == "failed"
-        assert (
-            rows["old"]["error"] == "deploy worker stopped without reporting a result"
-        )
-        assert rows["recent"]["state"] == "deploying"
-        assert await store.get("old") == old
-        assert await store.get("recent") == recent
-
-    asyncio.run(run())
-
-
-@pytest.mark.skip(reason="superseded by unified registry worker coverage")
 def test_added_deployment_timestamps_advance_on_store_writes(monkeypatch):
     modal_app = importlib.import_module("spindle.providers.modal.app")
     store = InMemoryKeyValueStore()

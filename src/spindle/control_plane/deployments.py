@@ -187,7 +187,7 @@ class DeploymentRoutes:
         )
 
     def cached(self, definition_id: str):
-        """The routable definition under this exact id, from the cache only."""
+        """The ready definition under this exact id, from the cache only."""
         return self._exact(self._entries or [], definition_id)
 
     async def get(self, definition_id: str):

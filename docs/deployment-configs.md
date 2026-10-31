@@ -171,7 +171,7 @@ Every recipe a frontend serves is a row in one registry, a Modal Volume named af
 Upgrading a frontend that still ships a configs file needs no extra step: any
 `spindle deploy` on the new version first writes a ready registry row for every
 recipe the old frontend serves, then redeploys the frontend. Those recipes stay
-routable through the swap and their trainer/inference apps are not deployed
+served through the swap and their trainer/inference apps are not deployed
 again, whether or not they were listed in that deploy; only a listed recipe
 whose config changed (or is being refreshed) goes through a new deploy.
 
