@@ -16,6 +16,7 @@ from spindle.providers.local.kv import InMemoryKeyValueStore
 REGISTRY_TTL_S = 5.0
 DEPLOY_TIMEOUT_S = 60 * 60
 FRONTEND_FIELDS = ("session_idle_timeout_s", "pool_idle_timeout_s", "sweep_interval_s")
+RECIPE_FIELDS = frozenset(key for key in vars(BaseConfig) if not key.startswith("_"))
 DEFINITION_FIELDS = (
     "definition_id",
     "name",
@@ -46,6 +47,9 @@ class DeploymentStore:
     async def put(self, name: str, row: dict[str, Any]) -> None:
         await self.kv().put(name, row)
 
+    async def delete(self, name: str) -> None:
+        await self.kv().delete(name)
+
     async def deploy(
         self, row: dict[str, Any], *, refresh_trainer: bool, refresh_inference: bool
     ) -> None:
@@ -53,6 +57,17 @@ class DeploymentStore:
 
     async def running(self, row: dict[str, Any]) -> bool:
         return True
+
+
+class DeploymentConflict(ValueError):
+    """A recipe name is already registered with different settings."""
+
+
+class DeploymentNotFound(KeyError):
+    """No recipe is registered under that name."""
+
+    def __str__(self) -> str:
+        return self.args[0] if self.args else ""
 
 
 @dataclass(frozen=True)
@@ -239,15 +254,57 @@ class DeploymentRoutes:
                 ]
         return rows
 
+    async def build(
+        self,
+        name: str,
+        overrides: dict[str, Any],
+        *,
+        base: str | None = None,
+        recipe: dict[str, Any] | None = None,
+    ) -> DeploymentConfig:
+        """Compile an API request into a recipe under this frontend's platform."""
+        if (base is None) == (recipe is None):
+            raise ValueError("pass exactly one of base or recipe")
+        unknown = sorted({key.split(".", 1)[0] for key in overrides} - RECIPE_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown config settings: {', '.join(unknown)}")
+        for key in overrides:
+            if key == "platform" or key.startswith("platform."):
+                raise ValueError(
+                    f"{key}: platform settings come from the frontend and cannot be overridden"
+                )
+        if recipe is None:
+            parent = await self.get(base)
+            if not isinstance(parent, DeploymentConfig):
+                raise ValueError("unknown base deployment")
+            recipe = vars(parent.recipe)
+        unknown = sorted(set(recipe) - RECIPE_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown config settings: {', '.join(unknown)}")
+        recipe = {**recipe, "platform": self.frontend.platform}
+        for field in FRONTEND_FIELDS:
+            recipe.setdefault(field, getattr(self.frontend, field))
+        try:
+            return DeploymentConfig.create(
+                BaseConfig(**recipe, overrides={**overrides, "name": name})
+            )
+        except (ArithmeticError, AttributeError, KeyError, TypeError) as exc:
+            raise ValueError(f"invalid config: {exc}") from exc
+
     async def put(
         self,
         deployment: DeploymentConfig,
         *,
         origin: str,
+        replace: bool = True,
         refresh_trainer: bool = False,
         refresh_inference: bool = False,
     ) -> dict[str, Any]:
-        """Register a recipe and start deploying it if anything changed."""
+        """Register a recipe and start deploying it if anything changed.
+
+        With ``replace=False`` a name already registered with different settings
+        raises ``DeploymentConflict`` instead of being redeployed.
+        """
         name = deployment.name
         others = [
             entry.ready.recipe
@@ -268,6 +325,10 @@ class DeploymentRoutes:
                 normalized["state"] == "deploying" and await self.store.running(current)
             ):
                 return normalized
+        if current is not None and current["config"] != desired and not replace:
+            raise DeploymentConflict(
+                f"deployment {name!r} already exists with different settings"
+            )
         row = {
             key: value
             for key, value in (current or {}).items()
@@ -283,6 +344,18 @@ class DeploymentRoutes:
         )
         await self.store.put(name, row)
         await self._start(row, refresh_trainer, refresh_inference)
+        return row
+
+    async def remove(self, name: str) -> dict[str, Any]:
+        """Drop a recipe from the registry; it stops routing on the next read.
+
+        Its trainer and inference apps are left to scale down on their own.
+        """
+        row = await self.store.get(name)
+        if row is None:
+            raise DeploymentNotFound(f"no deployment named {name!r}")
+        await self.store.delete(name)
+        self.invalidate()
         return row
 
     async def _start(self, row, refresh_trainer, refresh_inference):

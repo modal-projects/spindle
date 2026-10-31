@@ -31,7 +31,12 @@ from spindle.request_timing import mark
 from spindle.telemetry.trainer import CommandMiddleware
 from spindle.version import __version__, source_commit
 
-from .deployments import DeploymentRoutes, decode_definition
+from .deployments import (
+    DeploymentConflict,
+    DeploymentNotFound,
+    DeploymentRoutes,
+    decode_definition,
+)
 from .service import ControlPlane, FutureResolutionStatus
 
 MODAL_APP_NAME_LIMIT = 64
@@ -41,6 +46,8 @@ ERROR_STATUSES: tuple[tuple[type[Exception], int, str], ...] = (
     (SequenceConflict, 409, "conflict"),
     (RecordUnavailable, 409, "conflict"),
     (RecordNotFound, 404, "not_found"),
+    (DeploymentConflict, 409, "conflict"),
+    (DeploymentNotFound, 404, "not_found"),
     (RequestValidationError, 400, "invalid_request"),
     (ValueError, 400, "invalid_request"),
     (httpx.TransportError, 503, "engine_unreachable"),
@@ -158,6 +165,24 @@ class SampleEnvelope(BaseModel):
         return self
 
 
+class AddDeploymentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        pattern=r"^[a-z0-9][a-z0-9-]*$",
+        max_length=MODAL_APP_NAME_LIMIT - len("spindle-inference-"),
+    )
+    base: str | None = None
+    recipe: dict[str, Any] | None = None
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> AddDeploymentBody:
+        if (self.base is None) == (self.recipe is None):
+            raise ValueError("pass exactly one of base or recipe")
+        return self
+
+
 class SaveWeightsForSamplerBody(BaseModel):
     model_config = ConfigDict(extra="allow", protected_namespaces=())
 
@@ -192,7 +217,7 @@ def _deployment_summary(row) -> dict[str, object]:
         "weights_repo": definition.weights_repo,
         "parameterization": definition.parameterization,
         "max_context_length": definition.max_context_length,
-        "state": row["state"],
+        "state": row.get("state", "ready"),
         "origin": row.get("origin"),
         "updated_at": row.get("updated_at"),
         "error": row.get("error"),
@@ -316,6 +341,18 @@ def create_control_plane_app(
         return {
             "deployments": [_deployment_summary(row) for row in await routes.rows()]
         }
+
+    @app.post("/api/v1/spindle/deployments", status_code=202)
+    async def add_deployment(body: AddDeploymentBody):
+        deployment = await routes.build(
+            body.name, body.overrides, base=body.base, recipe=body.recipe
+        )
+        row = await routes.put(deployment, origin="api", replace=False)
+        return {"deployment": _deployment_summary(row)}
+
+    @app.delete("/api/v1/spindle/deployments/{name}")
+    async def remove_deployment(name: str):
+        return {"deployment": _deployment_summary(await routes.remove(name))}
 
     @app.post("/api/v1/client/config")
     async def client_config() -> dict[str, object]:

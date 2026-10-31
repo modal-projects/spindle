@@ -638,6 +638,14 @@ def test_explicit_deployment_keeps_canonical_model_name() -> None:
         async with httpx.AsyncClient(
             base_url="http://test", transport=httpx.ASGITransport(app=app)
         ) as client:
+            listed = (await client.get("/api/v1/spindle/deployments")).json()[
+                "deployments"
+            ]
+            assert [row["definition_id"] for row in listed] == [
+                d.definition_id for d in (*DEFINITIONS, explicit)
+            ]
+            assert listed[-1]["base_model"] == BASE_MODEL
+            assert listed[-1]["weights_repo"] == f"{BASE_MODEL}-bf16"
             session = (
                 await client.post(
                     "/api/v1/create_session", json={"tags": [], "sdk_version": "0.5.0"}
