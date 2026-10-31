@@ -48,6 +48,13 @@ from .volumes import install_cross_node_checkpoint_publish, sync_checkpoint_volu
 from .profiling import RankProfiler, TorchProfileConfig
 from .qwen3_vl_cp import install_qwen3_vl_cp_position_ids
 from .replay import install_replay_hooks
+from .replay_data import install_distribution_sharding
+from .score_centering import install_losses
+
+try:
+    from miles.ray.rollout import train_data_conversion
+except ImportError:
+    train_data_conversion = None
 
 
 if tinker_cp is not None:
@@ -62,6 +69,9 @@ install_replay_hooks(
     fill_replay_data=fill_replay_data,
     manager=routing_replay_manager,
 )
+install_losses(tinker_losses, logit_processors)
+if train_data_conversion is not None:
+    install_distribution_sharding(train_data_conversion)
 
 install_qwen3_vl_cp_position_ids(
     bridge_model=qwen3_vl_model, miles_qwen3_vl=miles_qwen3_vl

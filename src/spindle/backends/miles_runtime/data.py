@@ -8,10 +8,16 @@ import numpy as np
 from tinker import ForwardBackwardOutput, TensorData
 
 from spindle.backends.contract import ForwardBatch
+from spindle.backends.score_centering import (
+    REPLAY_LOSSES,
+    validate_loss_config,
+    validate_support,
+)
 from .replay_data import replay_row
 
-SUPPORTED_LOSSES = frozenset(
-    {"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"}
+SUPPORTED_LOSSES = (
+    frozenset({"cross_entropy", "importance_sampling", "ppo", "cispo", "dro"})
+    | REPLAY_LOSSES
 )
 _RL_LOSSES = SUPPORTED_LOSSES - {"cross_entropy"}
 
@@ -49,6 +55,8 @@ def pad_slot_rows(
     if "sampling_mask_ids" in last:
         pad["sampling_mask_ids"] = []
         pad["sampling_mask_offsets"] = [0, 0]
+    if "sampling_mask_logprobs" in last:
+        pad["sampling_mask_logprobs"] = []
     n_pad = -len(slot_rows) % multiple
     return (*slot_rows, *((slot, dict(pad)) for _ in range(n_pad)))
 
@@ -60,6 +68,8 @@ def prepare_batch(
 ) -> PreparedBatch:
     if batch.loss_fn not in SUPPORTED_LOSSES:
         raise ValueError(f"Miles does not support loss {batch.loss_fn!r}")
+    if batch.loss_fn in REPLAY_LOSSES:
+        validate_loss_config(batch.loss_fn, dict(batch.loss_fn_config))
     if sequence_alignment < 1:
         raise ValueError("sequence_alignment must be at least 1")
     entries: list[tuple[int, int, int, dict[str, Any], int]] = []
@@ -145,6 +155,7 @@ def build_outputs(
             "loss": float(output["loss"]),
             "logprobs": values.reshape(-1).tolist(),
             "shape": shape,
+            "diagnostics": output.get("metrics"),
         }
 
     results = []
@@ -172,16 +183,29 @@ def build_outputs(
                     }
                     for record in complete
                 ],
-                metrics={
-                    "loss:sum": loss,
-                    "loss:mean": loss / max(tokens, 1),
-                    "tokens:sum": float(tokens),
-                    "n_sequences:sum": float(len(complete)),
-                    "response_length:mean": tokens / max(len(complete), 1),
-                },
+                metrics=_metrics(complete, loss, tokens),
             )
         )
     return tuple(results)
+
+
+def _metrics(complete, loss, tokens):
+    metrics = {
+        "loss:sum": loss,
+        "loss:mean": loss / max(tokens, 1),
+        "tokens:sum": float(tokens),
+        "n_sequences:sum": float(len(complete)),
+        "response_length:mean": tokens / max(len(complete), 1),
+    }
+    diagnostics = [record["diagnostics"] for record in complete]
+    if diagnostics and all(row is not None for row in diagnostics):
+        trained = sum(row["tokens"] for row in diagnostics)
+        metrics["tokens:sum"] = float(trained)
+        for key in diagnostics[0].keys() - {"tokens"}:
+            total = sum(row[key] for row in diagnostics)
+            metrics[f"{key}:sum"] = total
+            metrics[f"{key}:mean"] = total / max(trained, 1)
+    return metrics
 
 
 def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
@@ -214,11 +238,16 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
     # Miles derives batch fields from its first datum. Forward only the fields
     # consumed by this loss so optional, unrelated inputs on one client cannot
     # cause missing-key failures when its rows are combined with another client.
-    fields = (
-        (("weights", "weights"),)
-        if loss_fn == "cross_entropy"
-        else (("advantages", "advantages"), ("logprobs", "sampling_logprobs"))
-    )
+    if loss_fn == "cross_entropy":
+        fields = (("weights", "weights"),)
+    elif loss_fn in REPLAY_LOSSES:
+        fields = (
+            ("weights", "weights"),
+            ("advantages", "advantages"),
+            ("logprobs", "sampling_logprobs"),
+        )
+    else:
+        fields = (("advantages", "advantages"), ("logprobs", "sampling_logprobs"))
     for source, destination in fields:
         value = inputs.get(source)
         if value is not None:
@@ -236,6 +265,20 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
             raise ValueError(
                 f"datum {datum_index}: {', '.join(missing)} required for {loss_fn}"
             )
+    if loss_fn in REPLAY_LOSSES:
+        if len(shape) != 1:
+            raise ValueError(
+                f"datum {datum_index}: {loss_fn} requires one target per position"
+            )
+        weights = row.get("weights")
+        validate_support(
+            inputs,
+            [int(value) for value in targets],
+            [1.0] * len(targets)
+            if weights is None
+            else [float(value) for value in weights],
+            centered=loss_fn != "mis",
+        )
     row.update(replay_row(inputs, targets))
     return row
 

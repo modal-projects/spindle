@@ -1,4 +1,4 @@
-"""Opt-in sampler replay for the Miles LoRA backend."""
+"""Opt-in sampler replay for Miles LoRA and full-parameter score centering."""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
 from tinker.lib.public_interfaces.api_future import AwaitableConcurrentFuture
 
 REPLAY_FIELDS = frozenset(
-    {"routed_experts", "sampling_mask_ids", "sampling_mask_offsets"}
+    {
+        "routed_experts",
+        "sampling_mask_ids",
+        "sampling_mask_offsets",
+        "sampling_mask_logprobs",
+    }
 )
 
 
@@ -24,6 +29,7 @@ class SamplingReplay(BaseModel):
     routed_experts: str | None = None  # SGLang's base64 little-endian int32 buffer
     sampling_mask_ids: list[int] | None = None
     sampling_mask_offsets: list[int] | None = None
+    sampling_mask_logprobs: list[float] | None = None
     sampling_logprobs: list[float] | None = None
 
     def loss_fn_config(self) -> dict[str, float]:
@@ -89,6 +95,16 @@ class SamplingReplay(BaseModel):
                 dtype="float32",
                 shape=[n],
             )
+            if self.sampling_mask_logprobs is not None:
+                if len(self.sampling_mask_logprobs) != len(self.sampling_mask_ids):
+                    raise ValueError(
+                        "sampling support logprobs do not match the recorded mask"
+                    )
+                result["sampling_mask_logprobs"] = types.TensorData(
+                    data=self.sampling_mask_logprobs,
+                    dtype="float32",
+                    shape=[len(self.sampling_mask_logprobs)],
+                )
         return result
 
 
@@ -116,12 +132,15 @@ def sample_with_replay(
     num_samples: int = 1,
     return_routed_experts: bool = False,
     return_sampling_mask: bool = False,
+    return_sampling_probabilities: bool = False,
 ) -> AwaitableConcurrentFuture[ReplaySampleResponse]:
     """Like SamplingClient.sample(), with a .replay object on every sequence.
 
     Returns a future supporting result() and result_async(). Ordinary Tinker
     sampling decoders do not preserve these additional response fields.
     """
+    if return_sampling_probabilities:
+        return_sampling_mask = True
     if not (return_routed_experts or return_sampling_mask):
         raise ValueError("request at least one replay type")
 
@@ -147,6 +166,7 @@ def sample_with_replay(
                         **request.model_dump(exclude_none=True, mode="json"),
                         "return_routed_experts": return_routed_experts,
                         "return_sampling_mask": return_sampling_mask,
+                        "return_sampling_probabilities": return_sampling_probabilities,
                     },
                     cast_to=types.UntypedAPIFuture,
                 )
@@ -170,6 +190,7 @@ def capture_replay(
     temperature: float,
     routes: bool,
     mask: bool,
+    probabilities: bool = False,
 ) -> dict:
     """Validate requested capture instead of silently training without replay."""
     replay = SamplingReplay(prompt_tokens=prompt_tokens, temperature=temperature)
@@ -182,7 +203,7 @@ def capture_replay(
         if len(base64.b64decode(encoded, validate=True)) % 4:
             raise ValueError("invalid routed_experts int32 buffer")
         replay.routed_experts = encoded
-    if mask:
+    if mask or probabilities:
         supports = meta.get("output_token_sampling_mask")
         logprobs = meta.get("output_token_sampling_logprobs")
         if (
@@ -208,11 +229,37 @@ def capture_replay(
                 )
             ids.extend(support)
             offsets.append(len(ids))
-        if any(
-            not isinstance(v, (int, float)) or not math.isfinite(v) or v > 0
-            for v in logprobs
-        ):
-            raise ValueError("invalid sampling logprobs")
         replay.sampling_mask_ids, replay.sampling_mask_offsets = ids, offsets
-        replay.sampling_logprobs = logprobs
+        if probabilities:
+            flat, chosen = [], []
+            for token, support, row in zip(tokens, supports, logprobs, strict=True):
+                if (
+                    not isinstance(row, list)
+                    or len(row) != len(support)
+                    or any(
+                        not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or value > 0
+                        for value in row
+                    )
+                    or not math.isclose(
+                        sum(math.exp(value) for value in row), 1, abs_tol=1e-4
+                    )
+                ):
+                    raise ValueError(
+                        "sampling support logprobs must be a normalized distribution over the mask"
+                    )
+                flat.extend(float(value) for value in row)
+                chosen.append(float(row[support.index(token)]))
+            replay.sampling_mask_logprobs = flat
+            replay.sampling_logprobs = chosen
+        else:
+            if any(
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value > 0
+                for value in logprobs
+            ):
+                raise ValueError("invalid sampling logprobs")
+            replay.sampling_logprobs = [float(value) for value in logprobs]
     return replay.model_dump(exclude_none=True)
