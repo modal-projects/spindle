@@ -1389,7 +1389,10 @@ class ControlPlane:
             )
             return None
         accepted_instance = None
-        all_instances_full = bool(instances)
+        # A starting trainer can finish booting before reconcile_trainers looks.
+        all_instances_full = bool(instances) and all(
+            instance.state == "running" for instance in active
+        )
         for instance in instances:
             try:
                 accepted = await self.engines.client(instance.instance_id).accept_model(

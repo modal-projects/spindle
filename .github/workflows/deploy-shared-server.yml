@@ -21,7 +21,7 @@ jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    environment: gpu-ci
+    environment: prod
     timeout-minutes: 60
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}

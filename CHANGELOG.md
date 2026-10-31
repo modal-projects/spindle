@@ -12,6 +12,15 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 - LoRA trainers can split one long sequence across GPUs for models that need it, such as DeepSeek-V4.1 (Miles `allgather_cp` with `qkv_format: bshd`).
 - `examples/shared-server`: one deployment a team shares, with three recipes on a `prod` frontend in its own environment, a smoke test, and a workflow that redeploys it from `main`.
 
+### Changed
+
+- Deployments now download base weights for up to four recipes at once, so a small model no longer waits behind a large one.
+
+### Fixed
+
+- Scripts on Tinker SDK 0.36 or newer, including tinker-cookbook, no longer fail with a 404 when they exit. Spindle now accepts the SDK's end-of-session call and frees that session's models right away.
+- Creating a model no longer fails with `trainer capacity exhausted` when a trainer finishes starting while the model is being placed (#185).
+
 ## 0.1.4 - 2026-10-29
 
 Faster DeepSeek-V4.1-Flash sampling and sampler starts, and agent skills for working with Spindle.
