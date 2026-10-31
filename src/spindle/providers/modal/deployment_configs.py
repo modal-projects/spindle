@@ -1,37 +1,40 @@
-"""Deployment configs and frontend-only platform settings."""
+"""Deployment registry and frontend settings shared by Modal processes."""
+
+from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import modal
 
+from spindle.control_plane.deployments import FrontendSettings
 from spindle.deployments import DeploymentConfig
 
-CONFIGS_FILE_ENV = "SPINDLE_DEPLOYMENT_CONFIGS_FILE"
-CONFIGS_IMAGE_PATH = "/root/spindle_deployment_configs.json"
+from .kv import deployment_kv
+
+FRONTEND_SETTINGS_ENV = "SPINDLE_FRONTEND_SETTINGS"
 PLATFORM_ENV = "SPINDLE_PLATFORM"
 POOL_CONFIG_ENV = "SPINDLE_POOL_DEPLOYMENT"
+DEPLOYMENT_ENV = "SPINDLE_DEPLOYMENT"
+WORKER_ROLE_ENV = "SPINDLE_WORKER_ROLE"
 FRONTEND_TIMEOUT_S = 60
 
 
-def configs_from_env():
-    path = os.environ.get(CONFIGS_FILE_ENV)
-    if not path:
-        raise ValueError(
-            "Missing deployment configs. Use spindle deploy with your Python config files."
-        )
-    rows = json.loads(Path(path).read_text())
-    if not isinstance(rows, list) or not rows:
-        raise ValueError("Deployment configs must be a nonempty list")
-    return [DeploymentConfig.model_validate(row) for row in rows]
+def frontend_settings_from_env() -> FrontendSettings:
+    value = os.environ.get(FRONTEND_SETTINGS_ENV)
+    if not value:
+        raise ValueError(f"Missing {FRONTEND_SETTINGS_ENV}")
+    return FrontendSettings(**json.loads(value))
 
 
-def platform_from_env():
-    data = os.environ.get(PLATFORM_ENV)
-    if not data:
-        return configs_from_env()[0].recipe.platform
-    return json.loads(data)
+def platform_from_env() -> dict:
+    value = os.environ.get(FRONTEND_SETTINGS_ENV)
+    if value:
+        return frontend_settings_from_env().platform
+    value = os.environ.get(PLATFORM_ENV)
+    if value:
+        return json.loads(value)
+    raise ValueError(f"Missing {FRONTEND_SETTINGS_ENV}")
 
 
 def _ask_frontend(frontend, name, environment, missing, *args):
@@ -54,12 +57,46 @@ def _ask_frontend(frontend, name, environment, missing, *args):
 
 
 def deployed_configs(frontend, environment=None):
-    """Read the configuration carried by the currently deployed frontend."""
     return _ask_frontend(frontend, "deployed_configs", environment, [])
 
 
+def seed_registry_rows(frontend, environment, rows):
+    """Write ready rows straight into a deployed frontend's registry.
+
+    Used before a frontend that still serves a baked-in configs file is
+    redeployed, so its recipes keep serving through the swap and their
+    already-deployed apps are not deployed again.
+    """
+    import asyncio
+    import time
+
+    app = modal.App.lookup(frontend, environment_name=environment)
+    registry = deployment_kv(app.app_id)
+    now = time.time()
+
+    async def seed():
+        for config in rows:
+            name = config["recipe"]["name"]
+            if await registry.get(name) is not None:
+                continue
+            await registry.put(
+                name,
+                {
+                    "config": config,
+                    "ready": config,
+                    "state": "ready",
+                    "attempt": "migrated",
+                    "added_at": now,
+                    "updated_at": now,
+                    "ready_at": now,
+                    "origin": "deploy",
+                },
+            )
+
+    asyncio.run(seed())
+
+
 def deployed_pools(frontend, environment=None):
-    """Read pools owned by this frontend before updating its inference settings."""
     return _ask_frontend(frontend, "deployed_pools", environment, [])
 
 
@@ -68,21 +105,19 @@ def deployed_platform(frontend, environment=None):
 
 
 def start_weights_download(frontend, environment, definition_id):
-    """Start the base-weight download in a detached call; True while it runs."""
     return _ask_frontend(
         frontend, "start_weights_download", environment, None, definition_id
     )
 
 
 def pool_config(definition_id):
-    for deployment in configs_from_env():
-        if deployment.definition_id == definition_id:
-            return deployment
-    return None
+    row = deployment_kv().read(definition_id)
+    if row is None or row.get("ready") is None:
+        return None
+    return DeploymentConfig.model_validate(row["ready"])
 
 
 def provision_pool(deployment, pool, platform):
-    """Ask the inference app to create a pool using its original code."""
     provision = modal.Function.from_name(
         deployment.inference_app_name,
         "provision",

@@ -29,13 +29,48 @@ FULL_DEFINITION = definition_id("qwen35-9b-fft-64k")
 LORA_DEFINITION = definition_id("qwen35-9b-lora-16k")
 
 
+def prime_registry(modal_app, store, *definitions):
+    """Seed the frontend registry with ready rows and load them into its cache."""
+
+    async def seed():
+        for definition in definitions:
+            config = definition.model_dump(mode="json")
+            await store.put(
+                definition.name,
+                {
+                    "config": config,
+                    "ready": config,
+                    "state": "ready",
+                    "attempt": "initial",
+                    "added_at": 1,
+                    "updated_at": 1,
+                    "ready_at": 1,
+                    "origin": "deploy",
+                },
+            )
+        modal_app.DEPLOYMENTS.invalidate()
+        await modal_app.DEPLOYMENTS.rows()
+
+    asyncio.run(seed())
+
+
 @pytest.fixture(autouse=True)
 def reset_lora_pool_cache(monkeypatch):
     modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
     monkeypatch.setattr(modal_app, "_lora_pool_gateways", {})
     monkeypatch.setattr(modal_app, "_lora_pool_checks", {})
     monkeypatch.setattr(modal_app, "_weights_ready", set())
     monkeypatch.setattr(modal_app, "_weights_starts", {})
+    prime_registry(
+        modal_app,
+        store,
+        *[
+            DeploymentConfig.create(load(config_path(name)))
+            for name in ("qwen35-9b-fft-64k", "qwen35-9b-lora-16k")
+        ],
+    )
 
 
 def weights_ready(monkeypatch, *definitions):
@@ -47,7 +82,10 @@ def weights_ready(monkeypatch, *definitions):
 
 def test_definitions_come_only_from_the_configured_records() -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
-    assert {definition.definition_id for definition in modal_app.DEFINITIONS} == {
+    assert {
+        row["config"]["recipe"]["name"]
+        for row in asyncio.run(modal_app.DEPLOYMENTS.rows())
+    } == {
         FULL_DEFINITION,
         LORA_DEFINITION,
     }
@@ -305,7 +343,7 @@ def same_weights_as_lora(monkeypatch) -> str:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     sibling = DeploymentConfig.create(load(config_path("qwen35-9b-lora-64k")))
     assert sibling.asset_path == modal_app.module_for(LORA_DEFINITION).asset_path
-    monkeypatch.setattr(modal_app, "DEFINITIONS", (*modal_app.DEFINITIONS, sibling))
+    prime_registry(modal_app, modal_app.deployment_kv(), sibling)
     return sibling.definition_id
 
 
@@ -339,7 +377,7 @@ def test_revisions_of_one_repo_download_one_at_a_time(monkeypatch) -> None:
             **{**vars(recipe), "name": "other-revision", "weights_revision": "abc123"}
         )
     )
-    monkeypatch.setattr(modal_app, "DEFINITIONS", (*modal_app.DEFINITIONS, other))
+    prime_registry(modal_app, modal_app.deployment_kv(), other)
 
     async def run() -> None:
         first = await modal_app._start_weights_download(LORA_DEFINITION)
@@ -901,6 +939,18 @@ def test_cleaner_loses_models_on_removed_definitions(monkeypatch) -> None:
     modal_app = importlib.import_module("spindle.providers.modal.app")
     kv = InMemoryKeyValueStore()
     registry = InMemoryKeyValueStore()
+    recipe = load(config_path("qwen35-9b-fft-64k"))
+    recipe.name = "added-after-startup"
+    added = DeploymentConfig.create(recipe)
+    prime_registry(
+        modal_app,
+        modal_app.deployment_kv(),
+        *[
+            DeploymentConfig.create(load(config_path(name)))
+            for name in ("qwen35-9b-lora-16k", "qwen35-4b-fft-64k")
+        ],
+        added,
+    )
     stopped = []
     monkeypatch.setattr(modal_app, "shared_kv", lambda: kv)
     monkeypatch.setattr(modal_app, "fft_pool_kv", lambda: registry)
@@ -927,17 +977,118 @@ def test_cleaner_loses_models_on_removed_definitions(monkeypatch) -> None:
 
     async def run() -> None:
         await seed(FULL_DEFINITION, "live")
+        await seed(added.definition_id, "added")
         await seed("removed_definition", "orphan")
         assert await modal_app._lose_undefined_models() == ("orphan",)
         assert await modal_app._cleanup_fft_pools() == (pools["orphan"].app_name,)
-        assert await kv.get(placement_key("live")) is not None
-        assert await kv.get(trainer_demand_key("live")) is not None
+        for model_id in ("live", "added"):
+            assert await kv.get(placement_key(model_id)) is not None
+            assert await kv.get(trainer_demand_key(model_id)) is not None
         assert await kv.get(placement_key("orphan")) is None
         assert await kv.get(trainer_demand_key("orphan")) is None
 
     asyncio.run(run())
     assert stopped == [pools["orphan"].app_name]
     assert modal_app.parameterization_for("removed_definition") is None
+
+
+def test_deploy_recipe_uses_last_ready_identity_and_attempt_guard(monkeypatch):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    recipe = load(config_path("qwen35-9b-lora-16k"))
+    recipe.name = "worker-variant"
+    old = DeploymentConfig.create(recipe)
+    recipe.trainer_gpu = "H200"
+    desired = DeploymentConfig.create(recipe)
+    attempt = "attempt-current"
+    row = {
+        "config": desired.model_dump(mode="json"),
+        "ready": old.model_dump(mode="json"),
+        "state": "deploying",
+        "attempt": attempt,
+        "added_at": 1,
+    }
+    deployed = []
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    monkeypatch.setattr(modal_app, "app_is_missing", lambda name: False)
+    monkeypatch.setattr(
+        modal_app,
+        "_deploy_worker_app",
+        lambda deployment, role, pool=None: deployed.append(role),
+    )
+    monkeypatch.setattr(
+        modal_app, "_start_weights_download", AsyncMock(return_value=None)
+    )
+
+    async def run():
+        await store.put(desired.name, row)
+        await modal_app.deploy_recipe.local(desired.name, "outdated-attempt")
+        assert deployed == []
+        await modal_app.deploy_recipe.local(desired.name, attempt)
+        saved = await store.get(desired.name)
+        assert deployed == ["trainer"]
+        assert saved["state"] == "ready"
+        assert saved["ready"] == desired.model_dump(mode="json")
+        assert saved["attempt"] == attempt
+
+    asyncio.run(run())
+
+
+def test_deploy_recipe_refreshes_rollout_pools_and_prefixes_errors(monkeypatch):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    recipe = load(config_path("qwen35-9b-lora-16k"))
+    recipe.name = "worker-rollout"
+    old = DeploymentConfig.create(recipe)
+    recipe.inference_max_replicas = 3
+    desired = DeploymentConfig.create(recipe)
+    attempt = "attempt"
+    row = {
+        "config": desired.model_dump(mode="json"),
+        "ready": old.model_dump(mode="json"),
+        "state": "deploying",
+        "attempt": attempt,
+        "added_at": 1,
+    }
+    deployed = []
+    pools = []
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    monkeypatch.setattr(modal_app, "app_is_missing", lambda name: False)
+    monkeypatch.setattr(
+        modal_app,
+        "_deploy_worker_app",
+        lambda deployment, role, pool=None: deployed.append(role),
+    )
+    monkeypatch.setattr(
+        modal_app,
+        "_redeploy_rollout_pools",
+        AsyncMock(side_effect=lambda deployment: pools.append(deployment.name)),
+    )
+    monkeypatch.setattr(
+        modal_app, "_start_weights_download", AsyncMock(return_value=None)
+    )
+
+    async def run():
+        await store.put(desired.name, row)
+        await modal_app.deploy_recipe.local(desired.name, attempt)
+        assert deployed == ["inference"]
+        assert pools == [desired.name]
+        failing = {**row, "attempt": "failing"}
+        await store.put(desired.name, failing)
+        monkeypatch.setattr(
+            modal_app,
+            "_deploy_worker_app",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("no capacity")),
+        )
+        with pytest.raises(
+            RuntimeError, match="trainer app deploy failed: no capacity"
+        ):
+            await modal_app.deploy_recipe.local(desired.name, "failing", True, False)
+        assert (await store.get(desired.name))["error"] == (
+            "trainer app deploy failed: no capacity"
+        )
+
+    asyncio.run(run())
 
 
 def test_checkpoint_volume_listing_and_delete(tmp_path, monkeypatch) -> None:
@@ -1299,3 +1450,91 @@ def test_startup_failure_expires_so_transient_errors_do_not_disable_training(
         assert await registry.get(key) is None
 
     asyncio.run(check())
+
+
+@pytest.mark.skip(reason="superseded by unified registry worker coverage")
+def test_added_deployment_rows_deploy_once_and_retry_failures(monkeypatch) -> None:
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    spawned = []
+    running = {"call-0": True}
+
+    async def spawn(name, attempt):
+        spawned.append((name, attempt))
+        return SimpleNamespace(object_id=f"call-{len(spawned) - 1}")
+
+    async def call_running(call_id):
+        return running.get(call_id, False)
+
+    real_deploy = modal_app.deploy_added
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    monkeypatch.setattr(modal_app, "_call_running", call_running)
+    monkeypatch.setattr(
+        modal_app, "deploy_added", SimpleNamespace(spawn=SimpleNamespace(aio=spawn))
+    )
+    recipe = load(config_path("qwen35-9b-lora-16k"))
+    recipe.name = "variant"
+    deployment = DeploymentConfig.create(recipe)
+    added = modal_app.AddedDeployments()
+
+    def fail_deploy(deployment, role):
+        if role == "inference":
+            raise subprocess.CalledProcessError(1, "modal deploy", stderr="no capacity")
+
+    async def run():
+        first = await added.add(deployment)
+        assert (await store.get("variant"))["call_id"] == "call-0"
+        assert (await added.add(deployment))["attempt"] == first["attempt"]
+        assert len(spawned) == 1
+
+        running["call-0"] = False
+        retry = await added.add(deployment)
+        assert len(spawned) == 2 and retry["attempt"] != first["attempt"]
+
+        monkeypatch.setattr(modal_app, "_deploy_worker_app", fail_deploy)
+        await real_deploy.local("variant", first["attempt"])
+        assert (await store.get("variant"))["state"] == "deploying"
+        with pytest.raises(subprocess.CalledProcessError):
+            await real_deploy.local("variant", retry["attempt"])
+        row = await store.get("variant")
+        assert row["state"] == "failed"
+        assert row["error"] == "inference app deploy failed: no capacity"
+
+        await store.put("variant", {**row, "state": "ready"})
+        await modal_app._update_added("variant", retry["attempt"], state="failed")
+        assert (await store.get("variant"))["state"] == "ready"
+
+    asyncio.run(run())
+
+
+@pytest.mark.skip(reason="superseded by unified registry worker coverage")
+def test_added_deployment_timestamps_advance_on_store_writes(monkeypatch):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    store = InMemoryKeyValueStore()
+    clock = iter((100.0, 101.0, 102.0))
+    monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    monkeypatch.setattr(modal_app.time, "time", lambda: next(clock))
+    monkeypatch.setattr(
+        modal_app,
+        "deploy_added",
+        SimpleNamespace(
+            spawn=SimpleNamespace(
+                aio=AsyncMock(return_value=SimpleNamespace(object_id="call-1"))
+            )
+        ),
+    )
+    deployment = DeploymentConfig.create(load(config_path("qwen35-9b-lora-16k")))
+    deployment.recipe.name = "variant"
+    deployment = DeploymentConfig.create(deployment.recipe)
+
+    async def run():
+        await modal_app.AddedDeployments().add(deployment)
+        row = await store.get("variant")
+        assert row["added_at"] == 100.0
+        assert row["updated_at"] == 101.0
+        await modal_app._update_added(
+            "variant", row["attempt"], state="failed", error="failed"
+        )
+        assert (await store.get("variant"))["updated_at"] == 102.0
+
+    asyncio.run(run())

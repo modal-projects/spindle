@@ -1,8 +1,14 @@
+import json
+
 import pytest
 
 from spindle.backends.deployment import backend_config, serving_options
+from spindle.control_plane.deployments import FrontendSettings
 from spindle.deployments import DeploymentConfig, config_path, load
-from spindle.providers.modal.deployment_configs import configs_from_env
+from spindle.providers.modal.deployment_configs import (
+    FRONTEND_SETTINGS_ENV,
+    frontend_settings_from_env,
+)
 
 
 @pytest.mark.parametrize(
@@ -87,15 +93,12 @@ def test_single_client_recipe_keeps_shared_backend_capacity():
     assert backend_config(single) == backend_config(shared)
 
 
-@pytest.mark.parametrize("contents", [None, "[]", "{}"])
-def test_missing_configs_have_no_python_catalog_fallback(
-    monkeypatch, tmp_path, contents
-):
-    if contents is None:
-        monkeypatch.delenv("SPINDLE_DEPLOYMENT_CONFIGS_FILE", raising=False)
-    else:
-        path = tmp_path / "configs.json"
-        path.write_text(contents)
-        monkeypatch.setenv("SPINDLE_DEPLOYMENT_CONFIGS_FILE", str(path))
-    with pytest.raises(ValueError, match="configs"):
-        configs_from_env()
+def test_frontend_settings_are_loaded_from_the_environment(monkeypatch):
+    settings = FrontendSettings(
+        platform={"frontend": "test"},
+        session_idle_timeout_s=1,
+        pool_idle_timeout_s=2,
+        sweep_interval_s=3,
+    )
+    monkeypatch.setenv(FRONTEND_SETTINGS_ENV, json.dumps(settings.__dict__))
+    assert frontend_settings_from_env() == settings

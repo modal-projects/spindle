@@ -8,8 +8,8 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
+import time
 from concurrent.futures import Future
 from functools import partial
 from importlib import resources
@@ -26,22 +26,14 @@ from spindle.deployments import (
     load,
     validate_frontend,
 )
-from spindle.providers.modal.deployment_apps import (
-    build_inference_app,
-    build_rollout_app,
-    build_sampler_image,
-    build_trainer_app,
-)
+from spindle.providers.modal.deployment_apps import build_sampler_image
 from spindle.providers.modal.deployment_configs import (
-    CONFIGS_FILE_ENV,
-    PLATFORM_ENV,
+    FRONTEND_SETTINGS_ENV,
     deployed_configs,
     deployed_platform,
-    deployed_pools,
-    start_weights_download,
+    seed_registry_rows,
 )
-from spindle.providers.modal.fft_pool import FFTPoolSpec
-from spindle.providers.modal.lora_pool import LoraPoolSpec
+from spindle.control_plane.deployments import DEPLOY_TIMEOUT_S, FrontendSettings
 from spindle.version import __version__, deployment_tag, source_commit
 
 
@@ -50,6 +42,9 @@ NO_CONFIGS = (
     "pass config files or bundled config names (e.g. `spindle deploy qwen35-9b-lora-16k`), "
     "or pass --all to deploy every bundled config."
 )
+
+
+DEPLOY_POLL_INTERVAL_S = 10
 
 
 def compile_configs(paths):
@@ -73,34 +68,8 @@ def interactive():
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def app_is_missing(app_name, environment):
-    try:
-        modal.App.lookup(app_name, environment_name=environment)
-    except modal.exception.NotFoundError:
-        return True
-    return False
-
-
-def apps_to_publish(configs, current_configs, environment, trainers, inference):
-    """Add names whose apps are missing or whose trainer/inference settings changed."""
-    current_by_name = {deployment.name: deployment for deployment in current_configs}
-    for deployment in configs:
-        current = current_by_name.get(deployment.name)
-        if app_is_missing(deployment.trainer_app_name, environment) or (
-            current is not None
-            and deployment.trainer_identity() != current.trainer_identity()
-        ):
-            trainers.add(deployment.name)
-        if app_is_missing(deployment.inference_app_name, environment) or (
-            current is not None
-            and deployment.inference_identity() != current.inference_identity()
-        ):
-            inference.add(deployment.name)
-    return trainers, inference
-
-
 def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None):
-    """Deploy missing or changed trainer and inference apps, then the frontend."""
+    """Deploy recipes through the frontend registry."""
     if sys.version_info[:2] != (3, 12):
         raise ValueError(
             "Python deployment requires Python 3.12 to match the serialized GPU runtime images"
@@ -114,91 +83,88 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
     validate_frontend([deployment.recipe for deployment in configs])
     platform = configs[0].recipe.platform
     environment = platform["modal"]["environment"]
-    current_configs = [
-        DeploymentConfig.model_validate(row)
-        for row in deployed_configs(platform["frontend"], environment)
-    ]
     current_platform = deployed_platform(platform["frontend"], environment)
     if current_platform is not None and current_platform != platform:
         trainers.update(names)
         inference.update(names)
-    trainers, inference = apps_to_publish(
-        configs, current_configs, environment, trainers, inference
-    )
-    pools = deployed_pools(platform["frontend"], environment) if inference else []
 
-    def deploy_trainer(deployment):
-        build_trainer_app(deployment, platform)[0].deploy(
-            environment_name=environment, tag=deployment_tag()
-        )
+    def seed_registry():
+        """Migrate a pre-registry frontend's recipes across the upgrade.
 
-    def deploy_inference(deployment):
-        build_inference_app(deployment, platform)[0].deploy(
-            environment_name=environment, tag=deployment_tag()
-        )
-        for record in pools:
-            if record["definition_id"] != deployment.definition_id:
-                continue
-            pool = (
-                LoraPoolSpec.from_dict(record)
-                if deployment.parameterization == "lora"
-                else FFTPoolSpec.from_dict(record)
+        A frontend that still ships a configs file answers `deployed_configs`
+        with bare configs instead of registry rows. Every recipe it serves is
+        written to the registry as ready before the frontend swaps over, so
+        nothing drops out and its apps stay put, except a listed recipe whose
+        config changed or is being refreshed: that one deploys as usual.
+        """
+        served = deployed_configs(platform["frontend"], environment)
+        legacy = [config for config in served if "state" not in config]
+        if not legacy:
+            return
+        listed = {
+            deployment.name: deployment.model_dump(mode="json")
+            for deployment in configs
+        }
+        keep = [
+            config
+            for config in legacy
+            if config["recipe"]["name"] not in listed
+            or (
+                listed[config["recipe"]["name"]] == config
+                and config["recipe"]["name"] not in trainers | inference
             )
-            if not app_is_missing(pool.app_name, environment):
-                build_rollout_app(deployment, pool, platform)[0].deploy(
-                    environment_name=environment, tag=deployment_tag()
-                )
+        ]
+        if keep:
+            seed_registry_rows(platform["frontend"], environment, keep)
 
     def deploy_frontend():
+        seed_registry()
         command = [sys.executable, "-m", "modal", "deploy", "--tag", deployment_tag()]
         if environment:
             command += ["--env", environment]
         captured = {"capture_output": True, "text": True} if run_steps else {}
-        with tempfile.TemporaryDirectory() as directory:
-            configs_file = Path(directory, "deployment_configs.json")
-            configs_file.write_text(
-                json.dumps(
-                    [deployment.model_dump(mode="json") for deployment in configs]
-                )
-            )
-            subprocess.run(
-                [*command, "-m", "spindle.providers.modal.app"],
-                check=True,
-                env={
-                    **os.environ,
-                    CONFIGS_FILE_ENV: str(configs_file),
-                    PLATFORM_ENV: json.dumps(platform),
-                    "SPINDLE_APP_NAME": platform["frontend"],
-                },
-                **captured,
-            )
+        settings = FrontendSettings.from_recipe(configs[0].recipe)
+        subprocess.run(
+            [*command, "-m", "spindle.providers.modal.app"],
+            check=True,
+            env={
+                **os.environ,
+                FRONTEND_SETTINGS_ENV: json.dumps(settings.as_dict()),
+                "SPINDLE_APP_NAME": platform["frontend"],
+            },
+            **captured,
+        )
+        deploy_recipes()
 
-    def start_weights(deployment):
-        try:
-            downloading = start_weights_download(
-                platform["frontend"], environment, deployment.definition_id
+    def deploy_recipes():
+        function = modal.Function.from_name(
+            platform["frontend"], "deploy_recipes", environment_name=environment
+        )
+        function.remote(
+            json.dumps([d.model_dump(mode="json") for d in configs]),
+            sorted(trainers),
+            sorted(inference),
+        )
+
+    def wait_for(deployment):
+        deadline = time.monotonic() + DEPLOY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            rows = deployed_configs(platform["frontend"], environment)
+            row = next(
+                (r for r in rows if r["config"]["recipe"]["name"] == deployment.name),
+                None,
             )
-        except Exception as exc:
-            return f"not started ({exc}); the first request starts the download"
-        if downloading is None:
-            return "not started; the first request starts the download"
-        return "downloading in the background" if downloading else "ready"
+            if row and row["state"] == "ready":
+                return
+            if row and row["state"] == "failed":
+                raise ValueError(row.get("error") or "deployment failed")
+            time.sleep(DEPLOY_POLL_INTERVAL_S)
+        raise ValueError(f"timed out waiting for deployment {deployment.name}")
 
     steps = []
-    for deployment in configs:
-        if deployment.name in trainers:
-            steps.append(
-                (f"Trainer    {deployment.name}", partial(deploy_trainer, deployment))
-            )
-        if deployment.name in inference:
-            steps.append(
-                (f"Inference  {deployment.name}", partial(deploy_inference, deployment))
-            )
     steps.append(("API server", deploy_frontend))
     for deployment in configs:
-        steps.append(
-            (f"Weights    {deployment.name}", partial(start_weights, deployment))
-        )
+        steps.append((f"Recipe     {deployment.name}", partial(wait_for, deployment)))
     build_image = partial(build_sampler_image, platform["frontend"], environment)
     if run_steps is not None:
         run_steps(steps, [("Sampler image", in_background(build_image))])
@@ -258,7 +224,7 @@ def parser():
     validate.add_argument("files", nargs="+")
     apply = commands.add_parser(
         "deploy",
-        help="Deploy the complete active Python config set behind one frontend",
+        help="Add or update Python configs behind one frontend",
     )
     apply.add_argument(
         "files",

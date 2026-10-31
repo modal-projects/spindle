@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import json
 import os
 from collections.abc import Awaitable, Callable
 
@@ -17,6 +19,7 @@ SAMPLING_SESSION_KV_NAME = "spindle-sampling-sessions"
 EXPORT_KV_NAME = "spindle-exports"
 ARTIFACT_KV_NAME = "spindle-artifacts"
 FFT_POOL_KV_NAME = "spindle-fft-pools"
+DEPLOYMENT_KV_NAME = "spindle-deployments"
 LIST_ITEMS_ATTEMPTS = 3
 # A healthy scan of ~4,800 session records can take over 40 seconds.
 LIST_ITEMS_TIMEOUT_SECONDS = 120.0
@@ -216,11 +219,80 @@ def shared_kv(app_id: str | None = None) -> RoutedKeyValueStore:
     )
 
 
-def fft_pool_kv(app_id: str | None = None) -> ModalKeyValueStore:
-    app_id = app_id or current_app_id()
+def _app_kv(name: str, app_id: str | None) -> ModalKeyValueStore:
     return ModalKeyValueStore(
         modal.Dict.from_name(
-            app_store_name(FFT_POOL_KV_NAME, app_id),
+            app_store_name(name, app_id or current_app_id()),
+            create_if_missing=True,
+        )
+    )
+
+
+def fft_pool_kv(app_id: str | None = None) -> ModalKeyValueStore:
+    return _app_kv(FFT_POOL_KV_NAME, app_id)
+
+
+class ModalVolumeStore:
+    """One `<key>.json` file per key in a Modal Volume."""
+
+    def __init__(self, volume: modal.Volume) -> None:
+        self.volume = volume
+
+    def read(self, key: str) -> object | None:
+        try:
+            return json.loads(b"".join(self.volume.read_file(f"{key}.json")))
+        except FileNotFoundError:
+            return None
+
+    async def get(self, key: str) -> object | None:
+        return await asyncio.to_thread(self.read, key)
+
+    async def put(self, key: str, value: object) -> None:
+        async with self.volume.batch_upload.aio(force=True) as batch:
+            batch.put_file(io.BytesIO(json.dumps(value).encode()), f"/{key}.json")
+
+    async def put_if_absent(self, key: str, value: object) -> InsertResult:
+        current = await self.get(key)
+        if current is not None:
+            return InsertResult(False, current)
+        await self.put(key, value)
+        return InsertResult(True, value)
+
+    async def delete(self, key: str) -> None:
+        try:
+            await self.volume.remove_file.aio(f"{key}.json")
+        except (FileNotFoundError, modal.exception.NotFoundError):
+            pass
+
+    async def list_keys(self, prefix: str) -> tuple[str, ...]:
+        names = [
+            os.path.basename(entry.path) for entry in await self.volume.listdir.aio("/")
+        ]
+        return tuple(
+            sorted(
+                name.removesuffix(".json")
+                for name in names
+                if name.endswith(".json") and name.startswith(prefix)
+            )
+        )
+
+    async def list_items(self, *prefixes: str) -> tuple[tuple[str, object], ...]:
+        keys = [
+            key
+            for key in await self.list_keys("")
+            if any(key.startswith(prefix) for prefix in prefixes)
+        ]
+        items = []
+        for key in keys:
+            items.append((key, await self.get(key)))
+        return tuple(items)
+
+
+def deployment_kv(app_id: str | None = None) -> ModalVolumeStore:
+    """The recipes a frontend serves: one JSON file per recipe, named after it."""
+    return ModalVolumeStore(
+        modal.Volume.from_name(
+            app_store_name(DEPLOYMENT_KV_NAME, app_id or current_app_id()),
             create_if_missing=True,
         )
     )

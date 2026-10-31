@@ -8,7 +8,7 @@ Each file in `recipes/` subclasses a bundled recipe and changes its name to star
 
 ## Deploy
 
-Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then deploy all the recipes together. Every deploy must list all of them, because the argument list is the full set the frontend serves:
+Create the environment and its `spindle-api`, `spindle-proxy` and `huggingface-secret` secrets as the [README](../../README.md#secrets) describes. Then deploy all the recipes. A deploy adds or updates only the recipes you list; recipes already on the server keep serving:
 
 ```bash
 uv run spindle deploy examples/shared-server/recipes/*.py
