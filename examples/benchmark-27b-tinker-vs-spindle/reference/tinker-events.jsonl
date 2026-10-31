@@ -1,0 +1,18 @@
+{"event": "rollout_start", "time": 1791491366.5797186, "update": 4}
+{"event": "rollout_done", "time": 1791491541.399346, "update": 4, "seconds": 174.80495285987854, "output_tokens": 886575, "sampling_input_tokens": 13472, "training_input_tokens": 899983}
+{"event": "rollout_start", "time": 1791491541.4140975, "update": 5}
+{"event": "update_done", "time": 1791491557.742291, "update": 4, "seconds": 164.33307194709778}
+{"event": "rollout_done", "time": 1791491812.9509356, "update": 5, "seconds": 271.524290561676, "output_tokens": 754099, "sampling_input_tokens": 11368, "training_input_tokens": 765403}
+{"event": "rollout_start", "time": 1791491812.9685657, "update": 6}
+{"event": "update_done", "time": 1791491827.8910763, "update": 5, "seconds": 270.148722410202}
+{"event": "rollout_done", "time": 1791492004.2297947, "update": 6, "seconds": 191.24882006645203, "output_tokens": 724149, "sampling_input_tokens": 12232, "training_input_tokens": 736317}
+{"event": "rollout_start", "time": 1791492004.243867, "update": 7}
+{"event": "update_done", "time": 1791492019.1973574, "update": 6, "seconds": 191.30622816085815}
+{"event": "rollout_done", "time": 1791492248.2788057, "update": 7, "seconds": 244.02010989189148, "output_tokens": 930845, "sampling_input_tokens": 12264, "training_input_tokens": 943045}
+{"event": "rollout_start", "time": 1791492248.2943661, "update": 8}
+{"event": "update_done", "time": 1791492267.1297402, "update": 7, "seconds": 247.9323329925537}
+{"event": "rollout_done", "time": 1791492453.711358, "update": 8, "seconds": 205.40680241584778, "output_tokens": 602538, "sampling_input_tokens": 12264, "training_input_tokens": 614738}
+{"event": "rollout_start", "time": 1791492453.7246985, "update": 9}
+{"event": "update_done", "time": 1791492467.7874887, "update": 8, "seconds": 200.65769481658936}
+{"event": "rollout_done", "time": 1791492623.6641545, "update": 9, "seconds": 169.92694878578186, "output_tokens": 729983, "sampling_input_tokens": 11200, "training_input_tokens": 741119}
+{"event": "update_done", "time": 1791492639.2946274, "update": 9, "seconds": 171.5070676803589}
