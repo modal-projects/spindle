@@ -11,7 +11,11 @@ class Config(Parent):
     name = "deepseek-v41-flash-lora-64k"
     max_context_length = 65536
     trainer_gpu = ["B300", "B200"]
-    overrides = {"miles_cfg.tensor_model_parallel_size": 8}
+    overrides = {
+        "miles_cfg.tensor_model_parallel_size": 8,
+        "miles_cfg.dynamic_batch_size": False,
+        "miles_cfg.cli_options.qkv_format": "bshd",
+    }
 
 
 config = Config()
