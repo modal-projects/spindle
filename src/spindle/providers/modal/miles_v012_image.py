@@ -7,7 +7,7 @@ MILES_REPOSITORY = "https://github.com/modal-projects/miles.git"
 MILES_BRANCH = "micah/v41-engram-prefetch"
 # Head of MILES_BRANCH. Modal caches this layer by command, so fetching the branch
 # by name would keep serving an older head.
-MILES_COMMIT = "268cf1914dde09231a30d88b0464ad5a6cf330d2"
+MILES_COMMIT = "464ba627fbea9ce8f812c2d0d0cbc3789784da32"
 
 image = release_image.run_commands(
     f"git -C {MILES_PATH} fetch --depth=1 {MILES_REPOSITORY} {MILES_COMMIT}"

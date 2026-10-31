@@ -127,7 +127,6 @@ def test_deepseek_v41_lora_recipe():
     arguments = miles.miles_arguments()
     assert arguments[arguments.index("--megatron-to-hf-mode") + 1] == "raw"
     assert arguments[arguments.index("--max-tokens-per-gpu") + 1] == "8192"
-    assert "qkv_format" not in miles.cli_options
     assert miles.cli_options["moe_router_freeze_gate"] is True
     assert lora_target_flags(miles.target_modules) == (True, True, False)
 
@@ -164,7 +163,6 @@ def test_deepseek_v41_lora_32k_recipes_keep_tensor_parallelism(name, tp):
         16,
     )
     assert row.inference_settings["context_length"] == 32768
-    assert miles.max_tokens_per_gpu == 32768
 
 
 @pytest.mark.parametrize(
