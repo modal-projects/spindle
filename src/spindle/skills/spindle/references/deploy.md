@@ -22,7 +22,27 @@
 - `uv run spindle deploy`: interactive picker; without a terminal and without args it exits, deploying nothing. Checks secrets first and prints creation commands for missing ones.
 - `uv run spindle deploy <name...>`: bundled configs by name. `--all`: every bundled config (in `src/spindle/configs`).
 - `uv run spindle deploy config.py`: custom config file.
-- `POST /api/v1/spindle/deployments`: add a named config to a running frontend without redeploying it. Send a JSON body with `name`, a ready `base`, and `overrides`, then poll `GET /api/v1/spindle/deployments` until the row is `ready` or reports an error. `DELETE /api/v1/spindle/deployments/{name}` removes a config from the frontend (HTTP 404 if the name is unknown).
+- `uv run spindle deploy --add NAME --base BASE [--FIELD=VALUE | --FIELD VALUE ...]`: add a config to a running frontend. Pass recipe fields directly; dotted fields are supported, and values are parsed as JSON with a raw-string fallback. For example:
+
+  ```bash
+  uv run spindle deploy --add qwen35-9b-lora-16k-h200 \
+    --base qwen35-9b-lora-16k \
+    --trainer_gpu=H200 \
+    --miles_cfg.max_tokens_per_gpu=8192
+  ```
+
+- `uv run spindle deploy --remove NAME`: remove a config from a running frontend (`DELETE /api/v1/spindle/deployments/NAME`); it stops routing on the frontend's next registry read.
+- The equivalent API request is `POST /api/v1/spindle/deployments`, with a JSON body containing `name`, a ready `base`, and `overrides`. Poll `GET /api/v1/spindle/deployments` until the row is `ready` or reports an error. `DELETE /api/v1/spindle/deployments/{name}` removes a config from the frontend (HTTP 404 if the name is unknown):
+
+  ```bash
+  curl -sS -X POST -H "X-API-Key: $TINKER_API_KEY" \
+    -H 'Content-Type: application/json' \
+    "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+    -d '{"name":"qwen35-9b-lora-16k-h200","base":"qwen35-9b-lora-16k","overrides":{"trainer_gpu":"H200","miles_cfg.max_tokens_per_gpu":8192}}'
+  curl -sS -H "X-API-Key: $TINKER_API_KEY" \
+    "$TINKER_BASE_URL/api/v1/spindle/deployments"
+  ```
+
 - Invalid config posts return HTTP 400; reusing a name with different settings returns HTTP 409.
 - Each deploy adds or updates the listed configs in the per-frontend registry; configs not listed remain served. Plain model IDs select the longest-context ready config regardless of origin; exact recipe names win.
 

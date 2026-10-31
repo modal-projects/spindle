@@ -178,6 +178,25 @@ curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
        "overrides": {"trainer_gpu": "H200", "miles_cfg.max_tokens_per_gpu": 8192}}'
 ~~~
 
+The CLI sends the same request and polls until the deployment is ready or fails.
+Pass recipe fields directly as flags; dotted fields are supported and values are
+parsed as JSON with a raw-string fallback:
+
+~~~bash
+uv run spindle deploy --add qwen35-9b-lora-16k-h200 \
+  --base qwen35-9b-lora-16k \
+  --trainer_gpu=H200 \
+  --miles_cfg.max_tokens_per_gpu=8192
+~~~
+
+`spindle deploy --remove NAME` takes a config out of service through the same
+API (`DELETE /api/v1/spindle/deployments/NAME`); the frontend stops routing to
+it on its next registry read and its apps scale down on their own.
+
+~~~bash
+uv run spindle deploy --remove qwen35-9b-lora-16k-h200
+~~~
+
 `overrides` uses the same dotted keys as a config's `overrides`. A new request returns HTTP 202 at once with `"state": "deploying"`; building the new apps can take several minutes. An invalid config returns HTTP 400, and reusing a name with different settings returns HTTP 409. Sending a failed config again retries it.
 
 ~~~bash

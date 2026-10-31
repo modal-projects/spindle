@@ -11,7 +11,59 @@ spindle config validate examples/runtime_config_add/smoke_base.py
 spindle deploy examples/runtime_config_add/smoke_base.py
 ```
 
-For adding runtime variants, see [Deployment configs](../../docs/deployment-configs.md).
+Set the frontend URL and API key, then add both runtime variants without
+redeploying the frontend:
+
+```bash
+export TINKER_BASE_URL=... TINKER_API_KEY=...
+
+uv run spindle deploy --add runtime-add-smoke-2b-8k \
+  --base runtime-add-smoke-2b \
+  --max_context_length=8192 \
+  --miles_cfg.max_tokens_per_gpu=8192
+
+uv run spindle deploy --add runtime-add-smoke-2b-kill \
+  --base runtime-add-smoke-2b \
+  --inference_scaledown_window_s=120
+
+curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"runtime-add-smoke-2b-8k","base":"runtime-add-smoke-2b","overrides":{"max_context_length":8192,"miles_cfg.max_tokens_per_gpu":8192}}'
+
+curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"runtime-add-smoke-2b-kill","base":"runtime-add-smoke-2b","overrides":{"inference_scaledown_window_s":120}}'
+
+curl -sS -i "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY"
+```
+
+The CLI accepts the same fields directly, parses JSON values with a raw-string
+fallback, and waits until each deployment is ready or fails. The curl commands
+submit the same API requests and can be polled with the deployments GET.
+
+Each new POST returns HTTP 202 with `state=deploying`; the GET returns HTTP 200.
+Poll the GET until each added row is `ready`. An invalid config returns HTTP
+400:
+
+```bash
+curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"runtime-add-smoke-invalid","base":"runtime-add-smoke-2b","overrides":{"max_context_length":"big"}}'
+```
+
+A repeated identical POST is idempotent and returns HTTP 202. Reusing the 8k
+name with different settings returns HTTP 409:
+
+```bash
+curl -sS -i -X POST "$TINKER_BASE_URL/api/v1/spindle/deployments" \
+  -H "X-API-Key: $TINKER_API_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"runtime-add-smoke-2b-8k","base":"runtime-add-smoke-2b","overrides":{"max_context_length":4096}}'
+```
+
+The 8k variant is intentionally longer than the base. A plain
+`Qwen/Qwen3.5-2B` request should still select the 4k base recipe; use the
+config name to select either added variant.
 
 With `TINKER_BASE_URL` and `TINKER_API_KEY` set, run the shared-server smoke
 test through the proxy-auth wrapper:
