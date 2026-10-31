@@ -75,6 +75,33 @@ def test_gpt_oss_120b_uses_its_own_weights_and_mxfp4_layout(context, gpus, cp):
     assert "log_probs_chunk_size" not in trainer["cli_options"]
 
 
+@pytest.mark.parametrize(
+    "preset,parent",
+    [
+        (
+            "nemotron35-super-vl-120b-a12b-lora-64k",
+            "nemotron3-super-120b-a12b-lora-64k",
+        ),
+        (
+            "nemotron35-super-vl-120b-a12b-base-lora-64k",
+            "nemotron3-super-120b-a12b-lora-64k",
+        ),
+        (
+            "nemotron35-super-vl-120b-a12b-lora-64k-b300",
+            "nemotron3-super-120b-a12b-lora-64k-b300",
+        ),
+    ],
+)
+def test_nemotron35_super_vl_trains_the_super_language_model(preset, parent):
+    spec = load(config_path(preset))
+    super_spec = load(config_path(parent))
+    assert spec.model.startswith("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B")
+    trainer = backend_config(spec)["miles"]
+    assert trainer["model_type"] == "nemotron-3-super-120b-a12b"
+    assert trainer == backend_config(super_spec)["miles"]
+    assert serving_options(spec) == serving_options(super_spec)
+
+
 def test_single_client_recipe_keeps_shared_backend_capacity():
     shared = load(config_path("qwen35-9b-lora-16k"))
     single = load(config_path("qwen35-9b-lora-16k-single"))
