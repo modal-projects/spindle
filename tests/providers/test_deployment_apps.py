@@ -577,6 +577,63 @@ def test_scheduled_gpus_are_logged(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_single_node_rdma_trainer_requests_rdma(builders, monkeypatch):
+    row = deployment("qwen35-9b-lora-16k")
+    row.recipe.trainer_gpus_per_node = 8
+    row.recipe.trainer_gpu = "B200"
+    row.recipe.trainer_rdma = True
+    clusters = []
+
+    def clustered(nodes, *, rdma):
+        clusters.append((nodes, rdma))
+
+        def decorate(fn):
+            return fn
+
+        return decorate
+
+    monkeypatch.setattr(modal.experimental, "clustered", clustered)
+    app, _ = deployment_apps.build_trainer_app(row, image="test")
+    settings, _ = app.functions["trainer"]
+    assert clusters == [(1, True)]
+    assert settings["gpu"] == "B200:8"
+    assert settings["experimental_options"] == {}
+
+
+def test_recipe_region_overrides_platform_placement(builders):
+    row = deployment("qwen35-4b-fft-64k")
+    row.recipe.platform["modal"]["region"] = "us-east"
+    row.recipe.trainer_region = ()
+    row.recipe.inference_region = ("us-west", "eu")
+    trainer, _ = deployment_apps.build_trainer_app(row, image="test")
+    trainer_settings, _ = trainer.functions["trainer"]
+    assert trainer_settings["region"] is None
+    pool = FFTPoolSpec.base(row.definition_id)
+    server_app, _ = deployment_apps.build_rollout_app(row, pool, image="test")
+    server, _ = server_app.servers["Server"]
+    assert server["routing_region"] == "us-east"
+    assert server["compute_region"] == ("us-west", "eu")
+
+    row.recipe.inference_region = ()
+    server_app, _ = deployment_apps.build_rollout_app(row, pool, image="test")
+    server, _ = server_app.servers["Server"]
+    assert server["routing_region"] == "us-east"
+    assert "compute_region" not in server
+
+    with pytest.raises(ValueError, match="region"):
+        row.recipe.trainer_region = ["us-east"]
+        deployment_apps.build_trainer_app(row, image="test")
+
+
+def test_region_and_rdma_change_deployment_identity():
+    row = deployment("qwen35-4b-fft-64k")
+    moved = deployment("qwen35-4b-fft-64k")
+    moved.recipe.inference_region = ()
+    moved.recipe.trainer_rdma = True
+    assert row.inference_identity() != moved.inference_identity()
+    assert row.trainer_identity() != moved.trainer_identity()
+
+
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     row = deployment("qwen38-27b-lora-256k")
     clusters = []

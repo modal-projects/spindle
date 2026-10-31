@@ -107,10 +107,30 @@ def secrets_for(platform, *, training=False):
     return result
 
 
-def server_placement(region):
-    if region is None:
-        return {}
-    return {"routing_region": region, "compute_region": region}
+def selected_region(override, default):
+    """None keeps the platform region. () schedules in any region."""
+    if override is None:
+        return default
+    if override == ():
+        return None
+    if isinstance(override, str) or (
+        isinstance(override, tuple)
+        and override
+        and all(isinstance(name, str) and name for name in override)
+    ):
+        return override
+    raise ValueError(
+        "region must be a region name, a tuple of region names, or () for any region"
+    )
+
+
+def server_placement(routing_region, compute_region):
+    placement = {}
+    if routing_region is not None:
+        placement["routing_region"] = routing_region
+    if compute_region is not None:
+        placement["compute_region"] = compute_region
+    return placement
 
 
 def gpu_request(gpu: str | list[str], count: int) -> str | list[str]:
@@ -168,7 +188,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
         log_scheduled_gpus("trainer")
         run_trainer(saved, instance_id, platform)
 
-    if recipe.trainer_nodes > 1:
+    if recipe.trainer_nodes > 1 or recipe.trainer_rdma:
         trainer = modal.experimental.clustered(recipe.trainer_nodes, rdma=True)(trainer)
     trainer = app.function(
         name="trainer",
@@ -179,7 +199,7 @@ def build_trainer_app(deployment: DeploymentConfig, platform=None, *, image=None
             else image_for(recipe.backend, recipe.trainer_image)
         ),
         gpu=gpu_request(recipe.trainer_gpu, recipe.trainer_gpus_per_node),
-        region=platform["modal"]["region"],
+        region=selected_region(recipe.trainer_region, platform["modal"]["region"]),
         cpu=recipe.trainer_cpu,
         memory=recipe.trainer_memory_mib,
         ephemeral_disk=recipe.trainer_disk_mib or None,
@@ -320,7 +340,10 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
         startup_timeout=recipe.inference_startup_timeout_s,
         exit_grace_period=300,
         port=8000,
-        **server_placement(platform["modal"]["region"]),
+        **server_placement(
+            platform["modal"]["region"],
+            selected_region(recipe.inference_region, platform["modal"]["region"]),
+        ),
     )
     class Server:
         @modal.enter()
