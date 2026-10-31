@@ -58,7 +58,8 @@ results = await asyncio.gather(*(
 
 Miles also accepts `mis`, `score_centered`, and `score_centered_mis` when the
 datum carries the sampler's support. Request `return_sampling_probabilities=True`
-and pass `sequence.replay.loss_fn_config()`. See `examples/score-centering` and
+and pass `sequence.replay.loss_fn_config()`. See `examples/score-centering`,
+`examples/mixed-samplers` for the eight-pool MiMo run, and
 [sampler replay](sampler-replay.md).
 
 ## Adapter publication via the Bulletin

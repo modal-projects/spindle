@@ -1,0 +1,278 @@
+# Asynchronous mixed-sampler reproduction
+
+This reproduces the training setup described in Modal's
+[mixed-precision sampler article](https://modal.com/blog/toward-rl-on-mixed-precision-mixed-accelerator-samplers)
+using native Spindle `score_centered_mis`. The implementation follows the
+[score-centering estimator](https://arxiv.org/html/2609.20807), including its
+correction when MIS masks the sampled token.
+
+The multi-LoRA entry point is `mixed_samplers.train_miles`, configured by
+`miles_config.py`. It runs two rank-32, alpha-32 adapters on one Miles trainer,
+with independent asynchronous client loops and 60-second start staggering.
+`mixed_samplers.train` remains the separate native Megatron full-training
+experiment. Neither uses `forward_backward_custom`.
+
+**Training stability has not yet been established.** Unit tests and short GPU
+checks validate implementation paths; the asynchronous experiment must produce
+training curves before a stability conclusion is justified.
+
+## Settings
+
+- `Qwen/Qwen3.6-35B-A3B`, pinned to `995ad96eacd98c81ed38be0c5b274b04031597b0`.
+- `XiaomiMiMo/MiMo-V2.6-RL-oss`, code subset, pinned to the article-era revision
+  `639865fd3374018d6cb29b9fb82dd531406fcf5f` containing **2,698 tasks**. The later
+  release removed 96. Images come from this revision's `image-mapping.jsonl`.
+- BF16 trainer on eight B200s; 262,144-token context; batches of
+  128 prompts with eight trajectories per prompt; no MoE route replay.
+  Miles uses these batch dimensions **per client**. LoRA parameterization is the
+  requested adaptation of the article's full-parameter experiment.
+- MIS ratio window [0.2, 5.0], matching the article's diagnostics.
+- Eight sampler groups, all with FP8 KV cache:
+
+| Group | GPUs per replica | Weight format |
+|---|---:|---|
+| B200 | 2 | NVFP4 |
+| B300 | 2 | NVFP4 |
+| H100 | 4 | FP8 |
+| H100 | 4 | BF16 |
+| H200 | 2 | FP8 |
+| H200 | 2 | BF16 |
+| A100 80GB | 4 | BF16 |
+| RTX PRO 6000 | 4 | BF16 |
+
+Each trajectory stays on one group. Initial measured throughput determines fixed
+assignment probabilities. The replica counts and GPU counts per replica are
+choices for this reproduction; the article does not specify those allocations.
+
+Rollout producers continue during training, optimizer updates and publication.
+The trainer consumes completed prompt groups, and never rejects a group based
+on its policy age. Bounded queues limit outstanding work. Event timestamps record
+both overlap and actual served weight versions, including updates within a turn.
+
+## Explicit assumptions
+
+The original private code and run configuration are unavailable. The article
+does not specify learning rate, top-p threshold, optimizer details, exact agent
+prompt, or the full sanitization procedure. This recipe chooses:
+
+- top-p 0.9, temperature 1, top-k disabled;
+- per-prompt reward normalization with population standard deviation plus 1e-6;
+  token-mean loss over the full update;
+- Adam, LR 1e-6, betas (0.9, 0.95), epsilon 1e-8, no weight decay, clip norm 1;
+- up to 200 bash turns; each continuation may use the remaining 256K context budget;
+- a three-hour sampling request deadline, allowing long continuations to finish;
+- stop after three consecutive non-tool responses; the `submit` tool
+  ends the agent session; binary test reward;
+- 192 concurrent prompt producers, at most 512 CPU rollout workers, and up to
+  two serving replicas per group, keeping one warm through fleet startup;
+  200 updates for full training or 20 per client for the initial Miles check,
+  with a checkpoint after every optimizer update.
+
+All groups use PyTorch top-p selection so recorded supports and probabilities
+describe the actual categorical distribution. Their model execution still uses
+their accelerator-specific and quantization-specific kernels. Exact support
+capture is bounded by the full model vocabulary, not an approximate top-k tail.
+New turns start only below the pinned SGLang scheduler's input limit of
+`context_length - 6` tokens. At context exhaustion, the existing patch is graded
+normally and all previously sampled token IDs and replay probabilities are kept.
+
+The public `XiaomiMiMo/mimoagent` environment is pinned to
+`c3df8469f250b15e7906487a6d52be4c1827a509`. Setup runs its anti-leak cleanup,
+then replaces repository history with a single root commit. Grading applies the
+submitted diff in a fresh sandbox and runs the hidden test patch there. Verifier
+infrastructure errors fail the rollout rather than becoming zero rewards.
+Commit parsing tolerates shell startup diagnostics in dataset images; patch
+capture and grading transfer raw bytes through sandbox files, preserving empty,
+large, and non-UTF8 diffs while excluding shell diagnostics and bypassing the
+command output's 50 MiB tail limit.
+Patch capture preserves its baseline outside the editable working directory, so
+agent commits or deletion of the working directory's `.git` still yield a diff.
+Container tags are published dataset tags; historical image digests are not
+available, so this is not a bitwise reconstruction of the original environments.
+
+NVFP4 uses the pinned SGLang runtime's `nvfp4_online` routed-expert quantization;
+dense layers retain their source precision. Staging recreates NVFP4 loader
+callbacks against the isolated CPU layer, keeping its weights and scales
+together and preventing writes to live serving scales during compilation.
+Decode-scale arithmetic matches GPU startup during CPU staging as well.
+FP8 quantizes BF16 weights into E4M3
+with FP32 scales per 128 x 128 block, matching the granularity of
+[Qwen's official FP8 configuration](https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8/blob/main/config.json).
+Recurrent gates and routers retain their source precision. For full training,
+this is recomputed for every BF16 publication; there is no separately trained
+FP8 base model. The serving weight cache recompiles BF16 publications into each
+group's format. For Miles LoRA, the base is frozen and quantized at startup;
+each client publishes its BF16 adapter. NVFP4 uses the LoRA-capable
+`experimental_sgl_trtllm` MoE runner; the other groups use Triton with EP=1.
+The NVFP4 image patch enables that runner for online quantization. Both the
+base-only and LoRA paths use the existing gated weight layout; the LoRA kernel
+adds the BF16 adapter output before SwiGLU. Quantized adapter export is unnecessary
+for this frozen-base LoRA configuration.
+The Miles NVFP4 groups use serial LoRA kernels by setting
+`SGLANG_TWO_STREAM_MAX_TOKENS=0`. This bypasses the experimental cross-stream
+path implicated in a B300 illegal-memory-access failure under mixed
+prefill/decode traffic. It is a mitigation, not an isolated root-cause fix;
+the underlying expand kernel passed standalone checks. Kernel scheduling does
+not introduce a barrier between RL clients or change the precision recipe.
+`validate --weights` first checks compiled runtime weights byte for byte against
+startup weights, then tests a changed expert tensor followed by restoration using
+the same XOR-delta format as Spindle publications. Exact sampled text equality is
+recorded separately because the normal serving kernels are not deterministic.
+
+## Run in kailash-dev
+
+From this directory, using Python 3.12:
+
+```bash
+uv sync --frozen
+export MODAL_ENVIRONMENT=kailash-dev
+uv run --frozen spindle deploy mixed_samplers/miles_config.py --refresh-trainer qwen36-mimo-miles-256k
+uv run --frozen python -m mixed_samplers.validate_miles --api-key-file /path/to/deployment-key --output results/miles-validation
+uv run --frozen python -m mixed_samplers.train_miles --api-key-file /path/to/deployment-key --output results/miles-run-001 --clients 2 --steps 20 --validation-adapters results/miles-validation/result.json
+```
+
+The NVFP4 kernel reference check can also run independently:
+
+```bash
+uv run modal run -e kailash-dev -m mixed_samplers.validate_nvfp4_lora \
+  --output results/nvfp4-lora-validation.json
+```
+
+It checks decode and prefill shapes against dequantized reference weights, with
+zero and nonzero pre-SwiGLU adapter deltas. It preserves the existing TRTLLM
+`[up, gate]` weight layout and `[gate, up]` adapter layout. The acceptance bounds
+are normalized RMS errors of 0.2 for the activation, 0.25 for the output, and
+0.25 for the adapter-induced output change; these include activation quantization.
+The full sampler check must still exercise exported adapters on every group.
+
+The Miles frontend is `spindle-mimo-miles-mixed`. It shares the pinned model asset
+volume with the full-training deployment, and has separate trainer, bulletin,
+checkpoint, worker and sandbox ownership. Each client writes its own
+`client-N/events.jsonl`, trajectories and checkpoint. It may start its next update
+while the other client is still sampling, training or publishing. Sampler groups
+are shared across clients. `validate_miles` checks adapter isolation, native
+losses, optimizer updates and publication; its synthetic updates are discarded.
+`--validation-adapters` checks both trained validation adapters on all eight
+sampler groups before creating fresh RL clients. Each client limits outstanding
+rollout calls to 512 (`--rollout-concurrency`) so the two clients stay below the
+worker function's pending-input limit. Prompts remain queued locally, and the
+128×8 update batch and independent asynchronous loops are unchanged.
+The 20-update default is an early stability check, shorter than the article's run.
+
+For the existing full-training experiment:
+
+```bash
+uv run --frozen spindle deploy mixed_samplers/config.py --refresh-trainer qwen36-mimo-mixed-256k
+uv run --frozen python -m mixed_samplers.validate --group all --weights --output sampler-validation.json
+uv run --frozen python -m mixed_samplers.validate_trainer --api-key-file /path/to/deployment-key
+uv run --frozen python -m mixed_samplers.train --api-key-file /path/to/deployment-key --output results/run-001
+```
+
+The deployment uses its own frontend, storage volumes and API-secret reference
+`spindle-mimo-mixed-api`. The secret contains `TINKER_API_KEY`; the key file must
+match it. Without `--api-key-file`, the clients use `TINKER_API_KEY` from their
+environment. The existing `spindle-proxy` secret remains inside Modal workers.
+The trainer has no geographic restriction; its API frontend remains in
+`us-west`. This avoids requiring an idle eight-B200 node in one region.
+H100 groups use Modal's `H100!` selector to prevent automatic H200 upgrades.
+The explicit trainer refresh publishes native-code changes even when the trainer
+configuration has not changed; an ordinary redeploy can retain the prior trainer
+code. Check the running backend's diagnostic aggregation in the event log.
+
+`validate_trainer` performs a synthetic native-loss check and unloads that model.
+It does not contribute samples or optimizer state to the experiment. The training
+controller owns ephemeral sampler/worker apps: keep it alive for the duration
+of the run. A failed controller stops those apps. A trajectory gets at most one
+infrastructure retry; repeated failure, non-finite metrics, a skipped optimizer
+step, or two hours without a completed prompt stops the run.
+Backward and optimizer waits are bounded at two hours, publication and checkpoint
+waits at one hour. The controller requests trainer unloading when it exits.
+
+The full-training entry point can resume with
+`--checkpoint <path> --start-step <saved-step> --steps <remaining>`
+using `checkpoint.json`. Optimizer state is restored. Queued rollouts and producer
+RNG state are not resumed, so recovery is not a bitwise replay of scheduling.
+Use a new output directory for each resumed attempt.
+The Miles entry point resumes both clients from their last saved optimizer
+checkpoints with `--resume-from <previous-Miles-run-directory>`. Use a new output
+directory. `--steps` is the target **total** update count for each client; their
+checkpoint steps may differ, and each independently runs its remaining updates.
+Both clients must have a saved checkpoint. Recovery retains the original sampler
+assignment weights, verifies the recipe and training settings, and publishes the
+restored adapters before sampling. A client already at the target performs no
+additional updates. For example:
+
+```bash
+uv run --frozen python -m mixed_samplers.train_miles \
+  --api-key-file /path/to/deployment-key --clients 2 --steps 20 \
+  --resume-from results/miles-run-001 --output results/miles-run-002
+```
+
+Queued rollouts, partial gradients, and producer RNG state are not restored.
+Each client's seeded task order restarts with fresh sampling from its checkpoint,
+so this is not a bitwise replay of scheduling. An update whose checkpoint did not
+finish is repeated from the last saved state. Initial-rollout caching and
+checkpoint resume are mutually exclusive.
+
+Before either client completes an optimizer update,
+`--initial-rollout-cache <previous-Miles-run-directory>` can reuse completed
+initial-policy trajectories. It checks each client's seed and task order, keeps
+the original sampler assignment weights, and creates fresh zero-delta adapters.
+Use a new output directory. It does not restore in-flight work or partially
+accumulated gradients; completion order can differ after a restart.
+
+For full training, if an attempt stops before completing any new optimizer
+update, restart with
+`--initial-rollout-cache <previous-run-directory>` and a new output directory.
+This checks recipe pins, sampling settings, task order, served versions, and the
+initial checkpoint and step before reusing completed initial-policy trajectories.
+For a checkpoint-based attempt, pass the exact same `--checkpoint` and
+`--start-step` as that attempt. Missing trajectories are sampled
+by the independent producers. Restored trajectories have distinct events, so they
+do not count as newly completed rollouts in the overlap report. A cache from a
+different checkpoint or an attempt with a completed update is rejected.
+Repeated recovery also retains trajectories restored by earlier attempts. Pending
+gradients are not checkpointed, so an interrupted update must be recomputed.
+Recovery retains the original validated capacity weights and runs fresh sampler
+checks alongside training, recording them in `startup-validation.json`. This lets
+the trainer consume saved trajectories while new serving replicas initialize.
+A sampler check failure cancels training. A100 compute can use any available region to
+avoid a capacity bottleneck; its request endpoint remains in `us-west`.
+
+Long generated shell commands are transferred as script files to avoid Modal's
+64 KiB exec-argument limit. Their contents, working directory, timeout and exit
+status are preserved.
+
+## Evidence to inspect
+
+Native diagnostic totals preserve token averages when Tinker splits a large
+request into chunks. The recipe reconstructs entropy, KL and MIS-mask means from
+those totals. Older deployed backends expose only means; reports explicitly label
+that fallback `sdk_chunk_means`. This affects diagnostic weighting, not the loss
+gradient, whose active-token weights are normalized across the full update.
+Miles publication IDs are command sequence IDs. The controller resolves the
+actual serving snapshot after each publication and maps it to the optimizer
+update, so policy-age diagnostics remain meaningful when IDs are nonconsecutive.
+
+`manifest.json` records revisions, allocations, capacity measurements and chosen
+settings. `events.jsonl` records per-trajectory rewards, formatting failures,
+lengths and served versions; update records include entropy, sampler/trainer KL,
+MIS rejection fraction, gradient norm, and successful updates. Compressed
+trajectory files preserve the token IDs and full sampler distributions.
+
+Review reward, format-error rate, entropy, length, KL and gradient norm over the
+entire run, broken down by sampler group. Finite metrics alone do not establish
+stable dynamics: check for reward collapse, degeneration, or trends that worsen
+with policy age. The homogeneous B200 BF16 baseline and SWE-bench Pro V2/HARD51
+evaluations from the article have not been reproduced by this script.
+
+Local tests: `uv run --frozen pytest tests`. Native gradient and SDK tests live
+in the repository's `tests/backends/test_score_centering.py` and `tests/replay`.
+Generate measured curves with `uv run --frozen python -m mixed_samplers.report results/run-001`.
+For Miles, run the same report separately on `results/miles-run-001/client-0`
+and `client-1`. Each client's events include queue wait, training, publication,
+and time from the earliest rollout in its batch to publication.
+Run `uv run --frozen python -m mixed_samplers.report_miles results/miles-run-001`
+to compare the clients' curves and elapsed-time timelines. The combined summary
+counts fresh sampling and other clients' update events during each completed
+update, without requiring the clients to reach the same step.
