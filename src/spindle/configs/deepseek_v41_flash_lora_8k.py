@@ -29,7 +29,6 @@ class Config(BaseConfig):
         "tensor_model_parallel_size": 1,
         "expert_model_parallel_size": 16,
         "expert_tensor_parallel_size": 1,
-        "dynamic_batch_size": False,
         # Whole-path patterns: a bare wkv or wq_b would also select the
         # compressor, indexer or Engram projections of the same name.
         "target_modules": [
@@ -47,7 +46,6 @@ class Config(BaseConfig):
         "cli_options": {
             "dsv4_impl": "miles",
             "model_name": "deepseekv41",
-            "qkv_format": "bshd",
             "attention_backend": "auto",
             "moe_router_freeze_gate": True,
             "freeze_e_score_correction_bias": True,

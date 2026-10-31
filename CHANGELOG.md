@@ -14,6 +14,7 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 ### Changed
 
 - Deployments now download base weights for up to four recipes at once, so a small model no longer waits behind a large one.
+- The DeepSeek-V4.1-Flash 8K and 32K LoRA trainers now train several sequences per micro-batch instead of one, and every DeepSeek-V4.1-Flash trainer preloads its Engram tables at startup, so training steps take less time.
 
 ### Fixed
 

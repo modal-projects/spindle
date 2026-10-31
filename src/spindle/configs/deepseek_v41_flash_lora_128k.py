@@ -10,6 +10,9 @@ class Config(Parent):
     overrides = {
         "miles_cfg.context_parallel_size": 2,
         "miles_cfg.cli_options.allgather_cp": True,
+        # Adapters under all-gather context parallelism need one row per micro-batch.
+        "miles_cfg.dynamic_batch_size": False,
+        "miles_cfg.cli_options.qkv_format": "bshd",
         "sglang_cfg.mem_fraction_static": 0.85,
     }
 
