@@ -1,0 +1,776 @@
+{
+  "experiment_date": "2026-11-06",
+  "scope": "NCCL-only subprocess control; no model or Ray",
+  "gpu_request": "H100!:4",
+  "transport": "P2P/CUMEM",
+  "nvls_enabled": false,
+  "checks": [
+    "all-group rank-sum all-reduce",
+    "saved tensor sum",
+    "saved worker PIDs"
+  ],
+  "rows": [
+    {
+      "init_id": "e05f358e502a4a4cb2f1c32f0a1d391e",
+      "creator": "ta-01M6RQF8H5MQ5BTGBJZRNXVTQR",
+      "task": "ta-01M6RQF8H5MQ5BTGBJZRNXVTQR",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 2,
+          "pid": 14,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 3,
+          "pid": 15,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "0e8bfc1cd4c5289ba62dda555fd0f0ee6b90628240647e77b6b94e4e81a7d440",
+        "nccl.13.log": "7cd3aff154a3b3ba804755674acc40f734329e9ddeab121555ef1a1e31c26752",
+        "nccl.14.log": "0e314f2092c74c3cf32a60a29f76e5991593814a32a736f0ef193d12bca05efa",
+        "nccl.15.log": "5a3890f6e53e616b722ef54bb1a811b2003d1692d5b70644bcaf41109fc14dc2"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ],
+        "nccl.14.log": [
+          "modal:14:14 [2] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:14:14 [2] NCCL INFO Channel 00/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO Channel 01/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources"
+        ],
+        "nccl.15.log": [
+          "modal:15:15 [3] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:15:15 [3] NCCL INFO Channel 00/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO Channel 01/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources"
+        ]
+      }
+    },
+    {
+      "init_id": "9d95963e9cb142fea80dc5d83979b820",
+      "creator": "ta-01M6RQJ80MVJWV1H8FWPN3W50R",
+      "task": "ta-01M6RQJ80MVJWV1H8FWPN3W50R",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 2,
+          "pid": 14,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 3,
+          "pid": 15,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "50cd015b5cb6a025b32af885890a2ed52fe14360ca239f234368a1aa4f82122a",
+        "nccl.15.log": "de3310edab397e59ffd45329636fc5eb9200ff0a831eb8d993536887ae270844",
+        "nccl.13.log": "04483ae924e7fe907581b8b896f067e46f279636650b17cd99242814414cdeca",
+        "nccl.14.log": "084346981c3aed08f7e31bc0f5467a6bdab608769ec13d3eb7606d34f0c73f40"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.15.log": [
+          "modal:15:15 [3] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:15:15 [3] NCCL INFO Channel 00/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO Channel 01/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ],
+        "nccl.14.log": [
+          "modal:14:14 [2] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:14:14 [2] NCCL INFO Channel 00/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO Channel 01/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources"
+        ]
+      }
+    },
+    {
+      "init_id": "e05f358e502a4a4cb2f1c32f0a1d391e",
+      "creator": "ta-01M6RQF8H5MQ5BTGBJZRNXVTQR",
+      "task": "ta-01M6RQP9QCTB33KA7C8V28RRDR",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 2,
+          "pid": 14,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 3,
+          "pid": 15,
+          "sum": 549755289600.0,
+          "nccl_groups": 18,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "0e8bfc1cd4c5289ba62dda555fd0f0ee6b90628240647e77b6b94e4e81a7d440",
+        "nccl.13.log": "7cd3aff154a3b3ba804755674acc40f734329e9ddeab121555ef1a1e31c26752",
+        "nccl.14.log": "0e314f2092c74c3cf32a60a29f76e5991593814a32a736f0ef193d12bca05efa",
+        "nccl.15.log": "5a3890f6e53e616b722ef54bb1a811b2003d1692d5b70644bcaf41109fc14dc2"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 2[2] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ],
+        "nccl.14.log": [
+          "modal:14:14 [2] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:14:14 [2] NCCL INFO Channel 00/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO Channel 01/0 : 2[2] -> 3[3] via P2P/CUMEM",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources",
+          "modal:14:14 [2] NCCL INFO ncclCommResume: rank 2 resuming all resources"
+        ],
+        "nccl.15.log": [
+          "modal:15:15 [3] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:15:15 [3] NCCL INFO Channel 00/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO Channel 01/0 : 3[3] -> 0[0] via P2P/CUMEM",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources",
+          "modal:15:15 [3] NCCL INFO ncclCommResume: rank 3 resuming all resources"
+        ]
+      }
+    }
+  ],
+  "platform_and_phase_logs": [
+    "2026-11-06 15:26:12+00:00 ta-01M6RQF8H5MQ5BTGBJZRNXVTQR Creating GPU memory snapshot for Function.",
+    "2026-11-06 15:26:44+00:00 ta-01M6RQF8H5MQ5BTGBJZRNXVTQR MINIMAL_CONTROL_PASSED [{\"rank\": 0, \"pid\": 12, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 1, \"pid\": 13, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 2, \"pid\": 14, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 3, \"pid\": 15, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}]",
+    "2026-11-06 15:26:46+00:00 ta-01M6RQF8H5MQ5BTGBJZRNXVTQR MINIMAL_READY_TO_CAPTURE e05f358e502a4a4cb2f1c32f0a1d391e",
+    "2026-11-06 15:27:04+00:00 ta-01M6RQF8H5MQ5BTGBJZRNXVTQR MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:27:08+00:00 ta-01M6RQF8H5MQ5BTGBJZRNXVTQR MINIMAL_RESUME_PASSED",
+    "2026-11-06 15:27:48+00:00 ta-01M6RQJ80MVJWV1H8FWPN3W50R Creating GPU memory snapshot for Function.",
+    "2026-11-06 15:28:16+00:00 ta-01M6RQJ80MVJWV1H8FWPN3W50R MINIMAL_CONTROL_PASSED [{\"rank\": 0, \"pid\": 12, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 1, \"pid\": 13, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 2, \"pid\": 14, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 3, \"pid\": 15, \"sum\": 549755289600.0, \"nccl_groups\": 18, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}]",
+    "2026-11-06 15:28:17+00:00 ta-01M6RQJ80MVJWV1H8FWPN3W50R MINIMAL_READY_TO_CAPTURE 9d95963e9cb142fea80dc5d83979b820",
+    "2026-11-06 15:28:36+00:00 ta-01M6RQJ80MVJWV1H8FWPN3W50R MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:28:40+00:00 ta-01M6RQJ80MVJWV1H8FWPN3W50R MINIMAL_RESUME_PASSED",
+    "2026-11-06 15:30:03+00:00 ta-01M6RQP9QCTB33KA7C8V28RRDR Restoring Function from memory snapshot.",
+    "2026-11-06 15:30:13+00:00 ta-01M6RQP9QCTB33KA7C8V28RRDR MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:30:17+00:00 ta-01M6RQP9QCTB33KA7C8V28RRDR MINIMAL_RESUME_PASSED"
+  ],
+  "group_layout": [
+    {
+      "name": "0",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "1",
+      "backend": "gloo",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "2",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "3",
+      "backend": "gloo",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "4",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "5",
+      "backend": "gloo",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "6",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "7",
+      "backend": "gloo",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "8",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "9",
+      "backend": "gloo",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "10",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "11",
+      "backend": "gloo",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "12",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "13",
+      "backend": "gloo",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "14",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "15",
+      "backend": "gloo",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "16",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "17",
+      "backend": "gloo",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "18",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "19",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "20",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "21",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "22",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "23",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "24",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "25",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "26",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "27",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "28",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "29",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "30",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "31",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "32",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "33",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "34",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "35",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "36",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "37",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "38",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "39",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "40",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "41",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "42",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "43",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "44",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "45",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "46",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "47",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "48",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "49",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "50",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "51",
+      "backend": "nccl",
+      "ranks": [
+        0
+      ]
+    },
+    {
+      "name": "52",
+      "backend": "nccl",
+      "ranks": [
+        1
+      ]
+    },
+    {
+      "name": "53",
+      "backend": "nccl",
+      "ranks": [
+        2
+      ]
+    },
+    {
+      "name": "54",
+      "backend": "nccl",
+      "ranks": [
+        3
+      ]
+    },
+    {
+      "name": "55",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "56",
+      "backend": "gloo",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "57",
+      "backend": "nccl",
+      "ranks": [
+        0,
+        1,
+        2,
+        3
+      ]
+    }
+  ]
+}

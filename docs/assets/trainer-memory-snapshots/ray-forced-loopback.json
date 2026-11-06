@@ -1,0 +1,110 @@
+[
+  {
+    "initialization_id": "1b84897766ca4da9a75d568669408fa4",
+    "boot_id": "75f9492f77ed42e48de4aee69803ac03",
+    "task_id": "ta-01M6Q0JEHPCNEN94S56HP4NXGR",
+    "ray_version": "2.58.0",
+    "node_ip": "127.0.0.1",
+    "bound_ip": "127.0.0.1",
+    "actors": [
+      [
+        328,
+        17
+      ],
+      [
+        329,
+        17
+      ],
+      [
+        330,
+        17
+      ],
+      [
+        331,
+        17
+      ]
+    ],
+    "call_to_result_s": 20.401039817996207
+  },
+  {
+    "initialization_id": "c3a7434aecf24bd18abff85aa20b923f",
+    "boot_id": "d3aff4f0d7644b92bd74ac56d6c7d029",
+    "task_id": "ta-01M6Q0K977SPMN4Z9DS20FD8SR",
+    "ray_version": "2.58.0",
+    "node_ip": "127.0.0.1",
+    "bound_ip": "127.0.0.1",
+    "actors": [
+      [
+        328,
+        17
+      ],
+      [
+        330,
+        17
+      ],
+      [
+        329,
+        17
+      ],
+      [
+        331,
+        17
+      ]
+    ],
+    "call_to_result_s": 21.09691987899714
+  },
+  {
+    "initialization_id": "c3a7434aecf24bd18abff85aa20b923f",
+    "boot_id": "ea8b1b9a786e413e8426d709a9db2419",
+    "task_id": "ta-01M6Q0KRHMG2JSCA1S4S5DGQ3R",
+    "ray_version": "2.58.0",
+    "node_ip": "127.0.0.1",
+    "bound_ip": "127.0.0.1",
+    "actors": [
+      [
+        328,
+        17
+      ],
+      [
+        330,
+        17
+      ],
+      [
+        329,
+        17
+      ],
+      [
+        331,
+        17
+      ]
+    ],
+    "call_to_result_s": 5.8450115870073205
+  },
+  {
+    "initialization_id": "1b84897766ca4da9a75d568669408fa4",
+    "boot_id": "7518ad2348d144ffbfaf760466a24b66",
+    "task_id": "ta-01M6Q0KXB9QX4D7QB7N77MVGFR",
+    "ray_version": "2.58.0",
+    "node_ip": "127.0.0.1",
+    "bound_ip": "127.0.0.1",
+    "actors": [
+      [
+        328,
+        17
+      ],
+      [
+        329,
+        17
+      ],
+      [
+        330,
+        17
+      ],
+      [
+        331,
+        17
+      ]
+    ],
+    "call_to_result_s": 7.380957895002211
+  }
+]

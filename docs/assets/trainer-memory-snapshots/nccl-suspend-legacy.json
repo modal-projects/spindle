@@ -1,0 +1,43 @@
+{
+  "experiment_date": "2026-11-06",
+  "app": "spindle-nccl-suspend-legacy-1106",
+  "call_id": "fc-01M6RQQFDSWX361V9CT7V8FY0P",
+  "task_id": "ta-01M6RQQFKRTVS87S75Y1VHFY9R",
+  "gpu_request": "H100!:2",
+  "outcome": "capture_stalled_for_more_than_two_minutes_then_cancelled",
+  "env_overrides": {
+    "NCCL_CUMEM_ENABLE": "0",
+    "NCCL_NVLS_ENABLE": "0",
+    "NCCL_SOCKET_IFNAME": "lo"
+  },
+  "control_ranks": [
+    {
+      "rank": 0,
+      "pid": 12,
+      "sum": 549755289600.0,
+      "torch": "2.13.0+cu130",
+      "nccl": [
+        2,
+        29,
+        7
+      ]
+    },
+    {
+      "rank": 1,
+      "pid": 13,
+      "sum": 549755289600.0,
+      "torch": "2.13.0+cu130",
+      "nccl": [
+        2,
+        29,
+        7
+      ]
+    }
+  ],
+  "phase_logs": [
+    "2026-11-06 15:30:40+00:00 ta-01M6RQQFKRTVS87S75Y1VHFY9R Creating GPU memory snapshot for Function.",
+    "2026-11-06 15:30:53+00:00 ta-01M6RQQFKRTVS87S75Y1VHFY9R MINIMAL_CONTROL_PASSED [{\"rank\": 0, \"pid\": 12, \"sum\": 549755289600.0, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 1, \"pid\": 13, \"sum\": 549755289600.0, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}]",
+    "2026-11-06 15:30:53+00:00 ta-01M6RQQFKRTVS87S75Y1VHFY9R MINIMAL_READY_TO_CAPTURE 2d48aa11509d4a2082924050e2ad57b1"
+  ],
+  "interpretation": "The same two-rank control passed suspend/resume before capture but did not resume from capture with cuMem disabled. This is a bounded stall, not proof of an impossible restore or a specific CUDA error."
+}

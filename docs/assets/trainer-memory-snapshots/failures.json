@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-05",
+  "default": {
+    "call_id": "fc-01M6PZPPYTEVXH5AJ8GYTJB2VM",
+    "task_id": "ta-01M6PZPQ6HTEFWTH4FQVR8SV4R",
+    "capture_boundary_utc": "2026-11-05T23:18:03Z",
+    "observation": "capture stalled for more than 10 minutes; test stopped; no CUDA error surfaced"
+  },
+  "no_nvls": {
+    "call_id": "fc-01M6Q054JNPVR4NK1NEEFDDD19",
+    "task_id": "ta-01M6Q0550N0FFJGTYCJ1TZSGWR",
+    "capture_boundary_utc": "2026-11-05T23:25:25Z",
+    "observation": "capture stalled for more than 5 minutes; test stopped; NCCL logs confirmed NVLS disabled and P2P/IPC still enabled"
+  },
+  "ray_auto_ip": {
+    "task_id": "ta-01M6Q0BFMDZPMN5RE8HJQVDQHR",
+    "restore_utc": "2026-11-05T23:22:56Z",
+    "observation": "CPU snapshot restored but actor RPC failed with ActorUnavailableError: No route to host, targeting original container IP"
+  },
+  "ray_loopback_without_override": {
+    "task_id": "ta-01M6Q0DPJEDTW1XHJFJ5RREZBR",
+    "restore_utc": "2026-11-05T23:24:09Z",
+    "observation": "Ray normalized requested 127.0.0.1 to external container IP; actor RPC again failed after restore"
+  }
+}

@@ -1,0 +1,1143 @@
+{
+  "experiment_date": "2026-11-06",
+  "app": "spindle-qwen9b-nccl-suspend-1106",
+  "call_id": "fc-01M6RPRSSXAMCC8MZ70762PQ41",
+  "task_id": "ta-01M6RPRT03ZA0AHYAD6JR3HVXR",
+  "outcome": "capture_stalled_for_more_than_five_minutes_then_cancelled",
+  "capture_boundary_utc": "2026-11-06T15:20:07Z",
+  "snapshot_restored": false,
+  "transport": "no-nvls",
+  "transport_env_overrides": {
+    "NCCL_NVLS_ENABLE": "0"
+  },
+  "ray_ip": "127.0.0.1",
+  "comms_lifecycle": "suspend",
+  "control": {
+    "suspended": [
+      {
+        "rank": 0,
+        "groups": [
+          "0",
+          "10",
+          "18",
+          "2",
+          "22",
+          "23",
+          "24",
+          "25",
+          "26",
+          "36",
+          "37",
+          "38",
+          "39",
+          "43",
+          "47",
+          "51",
+          "55",
+          "57"
+        ],
+        "elapsed_s": 0.013458071000002292
+      },
+      {
+        "rank": 1,
+        "groups": [
+          "0",
+          "12",
+          "19",
+          "22",
+          "23",
+          "27",
+          "28",
+          "29",
+          "36",
+          "37",
+          "38",
+          "4",
+          "40",
+          "44",
+          "48",
+          "52",
+          "55",
+          "57"
+        ],
+        "elapsed_s": 0.013533398999982182
+      },
+      {
+        "rank": 2,
+        "groups": [
+          "0",
+          "14",
+          "20",
+          "22",
+          "23",
+          "30",
+          "31",
+          "32",
+          "36",
+          "37",
+          "38",
+          "41",
+          "45",
+          "49",
+          "53",
+          "55",
+          "57",
+          "6"
+        ],
+        "elapsed_s": 0.013605321999989428
+      },
+      {
+        "rank": 3,
+        "groups": [
+          "0",
+          "16",
+          "21",
+          "22",
+          "23",
+          "33",
+          "34",
+          "35",
+          "36",
+          "37",
+          "38",
+          "42",
+          "46",
+          "50",
+          "54",
+          "55",
+          "57",
+          "8"
+        ],
+        "elapsed_s": 0.01353467600000613
+      }
+    ],
+    "resumed": [
+      {
+        "rank": 0,
+        "groups": [
+          "0",
+          "10",
+          "18",
+          "2",
+          "22",
+          "23",
+          "24",
+          "25",
+          "26",
+          "36",
+          "37",
+          "38",
+          "39",
+          "43",
+          "47",
+          "51",
+          "55",
+          "57"
+        ],
+        "elapsed_s": 0.03126999200003411
+      },
+      {
+        "rank": 1,
+        "groups": [
+          "0",
+          "12",
+          "19",
+          "22",
+          "23",
+          "27",
+          "28",
+          "29",
+          "36",
+          "37",
+          "38",
+          "4",
+          "40",
+          "44",
+          "48",
+          "52",
+          "55",
+          "57"
+        ],
+        "elapsed_s": 0.03107715300001246
+      },
+      {
+        "rank": 2,
+        "groups": [
+          "0",
+          "14",
+          "20",
+          "22",
+          "23",
+          "30",
+          "31",
+          "32",
+          "36",
+          "37",
+          "38",
+          "41",
+          "45",
+          "49",
+          "53",
+          "55",
+          "57",
+          "6"
+        ],
+        "elapsed_s": 0.03083159800002022
+      },
+      {
+        "rank": 3,
+        "groups": [
+          "0",
+          "16",
+          "21",
+          "22",
+          "23",
+          "33",
+          "34",
+          "35",
+          "36",
+          "37",
+          "38",
+          "42",
+          "46",
+          "50",
+          "54",
+          "55",
+          "57",
+          "8"
+        ],
+        "elapsed_s": 0.030764430999965953
+      }
+    ],
+    "max_logprob_error": 0.0
+  },
+  "suspended_comms": [
+    {
+      "rank": 0,
+      "groups": [
+        "0",
+        "10",
+        "18",
+        "2",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "36",
+        "37",
+        "38",
+        "39",
+        "43",
+        "47",
+        "51",
+        "55",
+        "57"
+      ],
+      "elapsed_s": 0.016658476000031897
+    },
+    {
+      "rank": 1,
+      "groups": [
+        "0",
+        "12",
+        "19",
+        "22",
+        "23",
+        "27",
+        "28",
+        "29",
+        "36",
+        "37",
+        "38",
+        "4",
+        "40",
+        "44",
+        "48",
+        "52",
+        "55",
+        "57"
+      ],
+      "elapsed_s": 0.0165711860000215
+    },
+    {
+      "rank": 2,
+      "groups": [
+        "0",
+        "14",
+        "20",
+        "22",
+        "23",
+        "30",
+        "31",
+        "32",
+        "36",
+        "37",
+        "38",
+        "41",
+        "45",
+        "49",
+        "53",
+        "55",
+        "57",
+        "6"
+      ],
+      "elapsed_s": 0.016689382000038222
+    },
+    {
+      "rank": 3,
+      "groups": [
+        "0",
+        "16",
+        "21",
+        "22",
+        "23",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "42",
+        "46",
+        "50",
+        "54",
+        "55",
+        "57",
+        "8"
+      ],
+      "elapsed_s": 0.016816871000003175
+    }
+  ],
+  "before": {
+    "initialization_id": "49c3fbc9f4f74123a6506cc43289b943",
+    "initialization_s": 295.19660953,
+    "ranks": [
+      {
+        "rank": 0,
+        "pid": 1070,
+        "groups": [
+          {
+            "name": "0",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "1",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "10",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "11",
+            "backend": "gloo",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "18",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "2",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "22",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "23",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "24",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "25",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "26",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "3",
+            "backend": "gloo",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "36",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "37",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "38",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "39",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "43",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "47",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "51",
+            "backend": "nccl",
+            "ranks": [
+              0
+            ]
+          },
+          {
+            "name": "55",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "56",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "57",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          }
+        ],
+        "model_sha256": "f85e28ed05914945f5629feacb29cd9e11b5b53059af0e06693a3ebad7395581",
+        "optimizer_sha256": "854d52cd14934fd2b93980b3be6b4a929e673d25116d15df6e17c578494c441b",
+        "rng_sha256": "2deb4b71a2dbb0fe890b731c57366894b0f4b5aecfa4cfcbafea50c034e12436",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "nccl": [
+          2,
+          29,
+          7
+        ],
+        "allocated_bytes": 5532887552
+      },
+      {
+        "rank": 1,
+        "pid": 1067,
+        "groups": [
+          {
+            "name": "0",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "1",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "12",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "13",
+            "backend": "gloo",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "19",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "22",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "23",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "27",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "28",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "29",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "36",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "37",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "38",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "4",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "40",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "44",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "48",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "5",
+            "backend": "gloo",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "52",
+            "backend": "nccl",
+            "ranks": [
+              1
+            ]
+          },
+          {
+            "name": "55",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "56",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "57",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          }
+        ],
+        "model_sha256": "a4c72386d1e4b7a624b1e030e515dd5c5ec1f8a589eced9d039a95ec4be47c90",
+        "optimizer_sha256": "e4b2a7dc20610897b51516eda3d5403b5695b3cc3c99dc0d265b30e795bb7e24",
+        "rng_sha256": "192adf3bed3cf7e51bbd5ccbe85593ec81563bddd080abf2a3345aa94fb55ecb",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "nccl": [
+          2,
+          29,
+          7
+        ],
+        "allocated_bytes": 5532887552
+      },
+      {
+        "rank": 2,
+        "pid": 1068,
+        "groups": [
+          {
+            "name": "0",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "1",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "14",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "15",
+            "backend": "gloo",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "20",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "22",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "23",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "30",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "31",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "32",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "36",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "37",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "38",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "41",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "45",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "49",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "53",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "55",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "56",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "57",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "6",
+            "backend": "nccl",
+            "ranks": [
+              2
+            ]
+          },
+          {
+            "name": "7",
+            "backend": "gloo",
+            "ranks": [
+              2
+            ]
+          }
+        ],
+        "model_sha256": "722d1d9e6a2758f983b9901e211f3f9166c69381154f59eae4429e876b226487",
+        "optimizer_sha256": "86c7a195c90389b5b3fd2f42aa1ecf77a95fbdd81eb0e6f095b2fa50f50079e0",
+        "rng_sha256": "9a5aede855d44fdb7f32e98dbefa6fae7d18ef32acf122d04b302a0834d3dae4",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "nccl": [
+          2,
+          29,
+          7
+        ],
+        "allocated_bytes": 5532887040
+      },
+      {
+        "rank": 3,
+        "pid": 1069,
+        "groups": [
+          {
+            "name": "0",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "1",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "16",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "17",
+            "backend": "gloo",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "21",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "22",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "23",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "33",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "34",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "35",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "36",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "37",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "38",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "42",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "46",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "50",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "54",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "55",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "56",
+            "backend": "gloo",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "57",
+            "backend": "nccl",
+            "ranks": [
+              0,
+              1,
+              2,
+              3
+            ]
+          },
+          {
+            "name": "8",
+            "backend": "nccl",
+            "ranks": [
+              3
+            ]
+          },
+          {
+            "name": "9",
+            "backend": "gloo",
+            "ranks": [
+              3
+            ]
+          }
+        ],
+        "model_sha256": "cdaad4c03cd4efcaf5c5a19ff4eb4b30c7ee74a9f21befe7255914c376d1e91a",
+        "optimizer_sha256": "1ce38141fbd2362a26da0e62c15fe6926698b7a15feeda0af05754bc0e90f651",
+        "rng_sha256": "6e1730ce905de42413672d1bf6fe6788122bb276b2a7d236226aa5f71886004c",
+        "torch": "2.13.0+cu130",
+        "cuda": "13.0",
+        "nccl": [
+          2,
+          29,
+          7
+        ],
+        "allocated_bytes": 5532887040
+      }
+    ]
+  },
+  "client_result": {
+    "mode": "snapshot",
+    "rows": [],
+    "failure": {
+      "call_id": "fc-01M6RPRSSXAMCC8MZ70762PQ41",
+      "error": "",
+      "elapsed_s": 709.4807356389938
+    }
+  },
+  "platform_events": [
+    {
+      "timestamp": "2026-11-06T15:20:07Z",
+      "message": "memory checkpoint starting; container liveness counting stopped"
+    }
+  ],
+  "transport_log_excerpt": [
+    "2026-11-06 15:16:35+00:00 ta-01M6RPRT03ZA0AHYAD6JR3HVXR \u001b[36m(SnapshotProbeActor pid=1070)\u001b[0m modal:1070:1070 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/IPC",
+    "2026-11-06 15:16:35+00:00 ta-01M6RPRT03ZA0AHYAD6JR3HVXR \u001b[36m(SnapshotProbeActor pid=1069)\u001b[0m modal:1069:1069 [3] NCCL INFO NCCL_NVLS_ENABLE set by environment to 0.",
+    "2026-11-06 15:19:53+00:00 ta-01M6RPRT03ZA0AHYAD6JR3HVXR \u001b[36m(SnapshotProbeActor pid=1067)\u001b[0m modal:1067:1067 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory"
+  ],
+  "interpretation": "All 48 registered NCCL groups suspended successfully. The pre-capture resume, all-group checks, state fingerprints and reference forward passed. CPU/GPU capture did not return; no application resume or cloned trainer was observed. No specific unsupported resource was isolated."
+}

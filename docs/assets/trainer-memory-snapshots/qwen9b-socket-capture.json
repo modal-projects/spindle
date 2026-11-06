@@ -1,0 +1,1652 @@
+{
+  "mode": "snapshot",
+  "rows": [
+    {
+      "initialization_id": "4b99d2a36d654130980b5b430cf5a8c7",
+      "boot_id": "379505cf2236475a95716ed6e86504fc",
+      "task_id": "ta-01M6Q05AY3S4YJKPVC6K8A05ER",
+      "transport": "socket",
+      "hardware": [
+        "NVIDIA H200, 610.57.04",
+        "NVIDIA H200, 610.57.04",
+        "NVIDIA H200, 610.57.04",
+        "NVIDIA H200, 610.57.04"
+      ],
+      "initialization_s": 300.660783722,
+      "verification_s": 16.380598823000014,
+      "max_logprob_error": 0.0,
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 1067,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "10",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "11",
+              "backend": "gloo",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "18",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "2",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "24",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "25",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "26",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "3",
+              "backend": "gloo",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "39",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "43",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "47",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "51",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "model_sha256": "455f6c3c9a0bb60349ffdb1d2d98607f6945faaaec61c9e337cff9b9df8e6679",
+          "optimizer_sha256": "42f7e348bba03aec03d1b7bf6fbea53a75dbacc21a393d70b6ff78b0e5e7647b",
+          "rng_sha256": "2deb4b71a2dbb0fe890b731c57366894b0f4b5aecfa4cfcbafea50c034e12436",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532881920
+        },
+        {
+          "rank": 1,
+          "pid": 1070,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "12",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "13",
+              "backend": "gloo",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "19",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "27",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "28",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "29",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "4",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "40",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "44",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "48",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "5",
+              "backend": "gloo",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "52",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "model_sha256": "fa60ce02534b8415aed90a028df93a0ca4e936e01a915a5d1bc5de8c992ced3d",
+          "optimizer_sha256": "aa125056ed2e3b0047eaa4c3d1196f8a9ccf897cc1ae5143215e625e5377bcb7",
+          "rng_sha256": "192adf3bed3cf7e51bbd5ccbe85593ec81563bddd080abf2a3345aa94fb55ecb",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532881920
+        },
+        {
+          "rank": 2,
+          "pid": 1068,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "14",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "15",
+              "backend": "gloo",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "20",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "30",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "31",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "32",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "41",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "45",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "49",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "53",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "6",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "7",
+              "backend": "gloo",
+              "ranks": [
+                2
+              ]
+            }
+          ],
+          "model_sha256": "adc74162329ccdf8947bc6f9dc661b937875ac7f6180d34846310a3b5847ca32",
+          "optimizer_sha256": "729abe65544cfc5c86e36cf7a450c2d036b7da1967254029557636f9c08de984",
+          "rng_sha256": "9a5aede855d44fdb7f32e98dbefa6fae7d18ef32acf122d04b302a0834d3dae4",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532881408
+        },
+        {
+          "rank": 3,
+          "pid": 1069,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "16",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "17",
+              "backend": "gloo",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "21",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "33",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "34",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "35",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "42",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "46",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "50",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "54",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "8",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "9",
+              "backend": "gloo",
+              "ranks": [
+                3
+              ]
+            }
+          ],
+          "model_sha256": "b7f474105560d4f45d16797d3faf3cf5690522cba0796e5435ab3305ad046850",
+          "optimizer_sha256": "ef09461b0d0a0efe3c67deeb4bac2f83f91583196792e5935b70c019b9cff7a1",
+          "rng_sha256": "6e1730ce905de42413672d1bf6fe6788122bb276b2a7d236226aa5f71886004c",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532881408
+        }
+      ],
+      "updated_ranks": [
+        {
+          "rank": 0,
+          "pid": 1067,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "10",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "11",
+              "backend": "gloo",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "18",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "2",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "24",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "25",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "26",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "3",
+              "backend": "gloo",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "39",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "43",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "47",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "51",
+              "backend": "nccl",
+              "ranks": [
+                0
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "model_sha256": "eb295d47c9b41daba514a4eb5df1a5f4f0e040a3d02ffd4d06bc39242a62deff",
+          "optimizer_sha256": "5cc0a2f08d870b1aadf9f88d4fff5bed7bf575e2183bea45a66eecda0f2de4cb",
+          "rng_sha256": "2deb4b71a2dbb0fe890b731c57366894b0f4b5aecfa4cfcbafea50c034e12436",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532890112
+        },
+        {
+          "rank": 1,
+          "pid": 1070,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "12",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "13",
+              "backend": "gloo",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "19",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "27",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "28",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "29",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "4",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "40",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "44",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "48",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "5",
+              "backend": "gloo",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "52",
+              "backend": "nccl",
+              "ranks": [
+                1
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "model_sha256": "49556965a36cbfe097a69820286d17d9a472cfb970906f832d1fbd1fb2d3a505",
+          "optimizer_sha256": "ad645b36da0dbbf18bc88e1a35ee167e9110aba4edfdbbdce67f53137abf6f4a",
+          "rng_sha256": "192adf3bed3cf7e51bbd5ccbe85593ec81563bddd080abf2a3345aa94fb55ecb",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532890112
+        },
+        {
+          "rank": 2,
+          "pid": 1068,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "14",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "15",
+              "backend": "gloo",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "20",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "30",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "31",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "32",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "41",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "45",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "49",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "53",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "6",
+              "backend": "nccl",
+              "ranks": [
+                2
+              ]
+            },
+            {
+              "name": "7",
+              "backend": "gloo",
+              "ranks": [
+                2
+              ]
+            }
+          ],
+          "model_sha256": "671c2858b3b1d226e3296d2452ee9a0289d2bc8545c77f8d21dfe676c4776d88",
+          "optimizer_sha256": "a02a38610196669c5271b03eb67239a38b3809e685d4979e374c7da594fa9aed",
+          "rng_sha256": "9a5aede855d44fdb7f32e98dbefa6fae7d18ef32acf122d04b302a0834d3dae4",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532889600
+        },
+        {
+          "rank": 3,
+          "pid": 1069,
+          "groups": [
+            {
+              "name": "0",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "1",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "16",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "17",
+              "backend": "gloo",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "21",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "22",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "23",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "33",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "34",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "35",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "36",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "37",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "38",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "42",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "46",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "50",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "54",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "55",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "56",
+              "backend": "gloo",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "57",
+              "backend": "nccl",
+              "ranks": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "name": "8",
+              "backend": "nccl",
+              "ranks": [
+                3
+              ]
+            },
+            {
+              "name": "9",
+              "backend": "gloo",
+              "ranks": [
+                3
+              ]
+            }
+          ],
+          "model_sha256": "7b409769e7ef9d361eb1a9e968a95240852183d1772380e4521ab04ee268a279",
+          "optimizer_sha256": "566c7dc72a27ad75b77e984c9ad2d737366561801f47d462802c0a42a4e6abe6",
+          "rng_sha256": "6e1730ce905de42413672d1bf6fe6788122bb276b2a7d236226aa5f71886004c",
+          "torch": "2.13.0+cu130",
+          "cuda": "13.0",
+          "nccl": [
+            2,
+            29,
+            7
+          ],
+          "allocated_bytes": 5532889600
+        }
+      ],
+      "optimizer": {
+        "update_successful:mean": 1.0,
+        "timing/optimizer_step": 1.0,
+        "timing/idle_wait_s": 38.36795013599988,
+        "timing/idle_wait_calls": 10.0,
+        "timing/prepare_batch_s": 0.000516601000015271,
+        "timing/prepare_batch_calls": 3.0,
+        "timing/forward_only_s": 1.8480522730000075,
+        "timing/forward_only_calls": 2.0,
+        "timing/build_outputs_s": 0.0002387770000495948,
+        "timing/build_outputs_calls": 3.0,
+        "timing/forward_backward_s": 2.0352202180000063,
+        "timing/forward_backward_calls": 1.0,
+        "timing/optim_step_s": 0.014788651000003483,
+        "timing/optim_step_calls": 1.0,
+        "timing/trainer_step_s": 2.05000886900001,
+        "grad_norm:mean": 571.515380859375
+      },
+      "optimizer_step": 2,
+      "call_to_result_s": 397.448248419998
+    }
+  ]
+}

@@ -1,0 +1,192 @@
+{
+  "experiment_date": "2026-11-06",
+  "scope": "NCCL-only subprocess control; no model or Ray",
+  "gpu_request": "H100!:2",
+  "transport": "P2P/CUMEM",
+  "nvls_enabled": false,
+  "checks": [
+    "all-group rank-sum all-reduce",
+    "saved tensor sum",
+    "saved worker PIDs"
+  ],
+  "rows": [
+    {
+      "init_id": "3586d8e6675c4931b6468efce67fd46e",
+      "creator": "ta-01M6RQ99QVK7MXE9Z6FP6KCENR",
+      "task": "ta-01M6RQ99QVK7MXE9Z6FP6KCENR",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "3ebd4be30a831a3eca0c1d7d6e8ff3f1f32e14e5bd3d7a4393728663dcbcd84f",
+        "nccl.13.log": "74b32f88181c76ab758bb171f50a76cc0b9b1b790263ab6b387200dc161bbd20"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 23/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 23/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ]
+      }
+    },
+    {
+      "init_id": "3586d8e6675c4931b6468efce67fd46e",
+      "creator": "ta-01M6RQ99QVK7MXE9Z6FP6KCENR",
+      "task": "ta-01M6RQBHV99CVTXMKNPQ5C263R",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "3ebd4be30a831a3eca0c1d7d6e8ff3f1f32e14e5bd3d7a4393728663dcbcd84f",
+        "nccl.13.log": "74b32f88181c76ab758bb171f50a76cc0b9b1b790263ab6b387200dc161bbd20"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 23/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 23/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ]
+      }
+    },
+    {
+      "init_id": "3586d8e6675c4931b6468efce67fd46e",
+      "creator": "ta-01M6RQ99QVK7MXE9Z6FP6KCENR",
+      "task": "ta-01M6RQD3NWCJPW1TWMVSE3505R",
+      "ranks": [
+        {
+          "rank": 0,
+          "pid": 12,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        },
+        {
+          "rank": 1,
+          "pid": 13,
+          "sum": 549755289600.0,
+          "torch": "2.13.0+cu130",
+          "nccl": [
+            2,
+            29,
+            7
+          ]
+        }
+      ],
+      "nccl_log_sha256": {
+        "nccl.12.log": "3ebd4be30a831a3eca0c1d7d6e8ff3f1f32e14e5bd3d7a4393728663dcbcd84f",
+        "nccl.13.log": "74b32f88181c76ab758bb171f50a76cc0b9b1b790263ab6b387200dc161bbd20"
+      },
+      "transport_log_excerpt": {
+        "nccl.12.log": [
+          "modal:12:12 [0] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:12:12 [0] NCCL INFO Channel 00/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 01/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO Channel 23/0 : 0[0] -> 1[1] via P2P/CUMEM",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources",
+          "modal:12:12 [0] NCCL INFO ncclCommSuspend: rank 0 suspending memory",
+          "modal:12:12 [0] NCCL INFO ncclCommResume: rank 0 resuming all resources"
+        ],
+        "nccl.13.log": [
+          "modal:13:13 [1] NCCL INFO Bootstrap: Using lo:127.0.0.1<0>",
+          "modal:13:13 [1] NCCL INFO Channel 00/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 01/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO Channel 23/0 : 1[1] -> 0[0] via P2P/CUMEM",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources",
+          "modal:13:13 [1] NCCL INFO ncclCommSuspend: rank 1 suspending memory",
+          "modal:13:13 [1] NCCL INFO ncclCommResume: rank 1 resuming all resources"
+        ]
+      }
+    }
+  ],
+  "platform_and_phase_logs": [
+    "2026-11-06 15:22:56+00:00 ta-01M6RQ99QVK7MXE9Z6FP6KCENR Creating GPU memory snapshot for Function.",
+    "2026-11-06 15:23:15+00:00 ta-01M6RQ99QVK7MXE9Z6FP6KCENR MINIMAL_CONTROL_PASSED [{\"rank\": 0, \"pid\": 12, \"sum\": 549755289600.0, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}, {\"rank\": 1, \"pid\": 13, \"sum\": 549755289600.0, \"torch\": \"2.13.0+cu130\", \"nccl\": [2, 29, 7]}]",
+    "2026-11-06 15:23:15+00:00 ta-01M6RQ99QVK7MXE9Z6FP6KCENR MINIMAL_READY_TO_CAPTURE 3586d8e6675c4931b6468efce67fd46e",
+    "2026-11-06 15:23:18+00:00 ta-01M6RQ99QVK7MXE9Z6FP6KCENR MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:23:18+00:00 ta-01M6RQ99QVK7MXE9Z6FP6KCENR MINIMAL_RESUME_PASSED",
+    "2026-11-06 15:24:18+00:00 ta-01M6RQBHV99CVTXMKNPQ5C263R Restoring Function from memory snapshot.",
+    "2026-11-06 15:24:35+00:00 ta-01M6RQBHV99CVTXMKNPQ5C263R MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:24:36+00:00 ta-01M6RQBHV99CVTXMKNPQ5C263R MINIMAL_RESUME_PASSED",
+    "2026-11-06 15:25:02+00:00 ta-01M6RQD3NWCJPW1TWMVSE3505R Restoring Function from memory snapshot.",
+    "2026-11-06 15:25:07+00:00 ta-01M6RQD3NWCJPW1TWMVSE3505R MINIMAL_RESUME_BEGIN",
+    "2026-11-06 15:25:07+00:00 ta-01M6RQD3NWCJPW1TWMVSE3505R MINIMAL_RESUME_PASSED"
+  ]
+}
