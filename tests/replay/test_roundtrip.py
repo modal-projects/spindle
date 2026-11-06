@@ -106,7 +106,7 @@ def test_sampler_sdk_training_roundtrip(encoding):
     _, _, _, payload = decode_forward_backward(body, content_type)
     assert payload.loss_fn_config["sampling_temperature"] == 0.7
     row = _datum_row(payload.data[0], "ppo", 0)
-    assert row["sampling_mask_offsets"] == [0, 0, 0, 2, 5]
+    assert row["sampling_mask_offsets"].tolist() == [0, 0, 0, 2, 5]
     assert row["routed_experts"]["shape"] == [4, 2, 1]
     # Exercise zero-loss DP padding, not only a single-rank transport.
     rows = pad_slot_rows(((0, row),), 2)

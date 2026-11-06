@@ -16,6 +16,8 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ### Changed
 
+- Replay training prepares expert routes and top-p supports with arrays, reducing CPU work before training.
+
 - Every app a deployment creates now starts with its frontend name, so `spindle deploy --app my-spindle` names its trainers `my-spindle-trainer-<recipe>` and its sampler pools `my-spindle-lora-<recipe>`. Two deployments with different `--app` values can share one Modal environment and recipe names. Deployments without `--app` keep their `spindle-...` names. A deployment made with `--app` on an earlier release gets new worker apps on its next deploy; stop its old `spindle-...` apps with `modal app stop`.
 - When every trainer for a recipe is full, creating a model waits for a slot instead of failing with `trainer capacity exhausted`. The Tinker SDK shows the request's place in line. When a slot frees up, the request that has waited longest gets it. Rarely, a brand-new request takes it first.
 - Spindle requires Modal 1.6.3 or newer, the first release that builds images with [image builder version](https://modal.com/docs/guide/images#image-builder-updates) 2026.10. Multi-node trainers use `modal.clustered` instead of the deprecated `modal.experimental.clustered`.

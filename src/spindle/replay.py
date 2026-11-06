@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import base64
 import math
-import struct
 import time
 
+import numpy as np
 from pydantic import BaseModel, Field
 from tinker import SamplingClient, types
 from tinker.lib.api_future_impl import _APIFuture
@@ -70,7 +70,7 @@ class SamplingReplay(BaseModel):
                 raise ValueError(
                     "router replay shape does not match prompt + response - 1"
                 )
-            values = [v for (v,) in struct.iter_unpack("<i", raw)]
+            values = np.frombuffer(raw, dtype="<i4")
             result["routed_experts"] = types.TensorData(
                 data=values, dtype="int64", shape=[n, num_layers, experts_per_token]
             )

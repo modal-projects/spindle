@@ -6,8 +6,8 @@ are detached. Normalization over the recorded support also replays top-p.
 """
 
 import math
-from itertools import pairwise
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -30,59 +30,89 @@ def validate_loss_config(name, config):
         raise ValueError("sampling_temperature must be positive")
 
 
+def has_duplicate_tokens(values):
+    ordered = np.sort(values)
+    return bool(np.any(ordered[1:] == ordered[:-1]))
+
+
 def validate_support(inputs, labels, weights, *, centered):
     required = {"sampling_mask_ids", "sampling_mask_offsets"}
     if centered:
         required.add("sampling_mask_logprobs")
     if not required <= inputs.keys():
         raise ValueError(f"loss requires replay tensors: {sorted(required)}")
-    ids = list(inputs["sampling_mask_ids"].data)
-    offsets = list(inputs["sampling_mask_offsets"].data)
-    for name in required:
+    arrays = {}
+    for name in required | ({"sampling_mask_logprobs"} & inputs.keys()):
         tensor = inputs[name]
         expected_dtype = "float32" if name == "sampling_mask_logprobs" else "int64"
-        if (
-            tensor.dtype != expected_dtype
-            or tensor.sparse_crow_indices is not None
-            or list(tensor.shape or ()) != [len(tensor.data)]
-        ):
+        if tensor.dtype != expected_dtype or tensor.sparse_crow_indices is not None:
             raise ValueError(
                 f"{name} must be a dense one-dimensional {expected_dtype} tensor"
             )
+        values = np.asarray(tensor.to_numpy()).reshape(-1)
+        if list(tensor.shape or ()) != [values.size]:
+            raise ValueError(
+                f"{name} must be a dense one-dimensional {expected_dtype} tensor"
+            )
+        arrays[name] = values
+    ids, offsets = arrays["sampling_mask_ids"], arrays["sampling_mask_offsets"]
     if (
         len(offsets) != len(labels) + 1
         or offsets[0] != 0
         or offsets[-1] != len(ids)
-        or any(type(x) is not int or x < 0 for x in ids + offsets)
-        or any(a > b for a, b in pairwise(offsets))
+        or np.any(ids < 0)
+        or np.any(offsets < 0)
+        or np.any(offsets[1:] < offsets[:-1])
     ):
         raise ValueError("invalid sampling support IDs or offsets")
-    probabilities = inputs.get("sampling_mask_logprobs")
-    logq = list(probabilities.data) if probabilities is not None else []
-    if probabilities is not None and (
-        len(logq) != len(ids) or any(not math.isfinite(x) or x > 0 for x in logq)
+    logq = arrays.get("sampling_mask_logprobs")
+    if logq is not None and (
+        len(logq) != len(ids) or not np.isfinite(logq).all() or np.any(logq > 0)
     ):
         raise ValueError("sampling_mask_logprobs must align with support IDs")
-    sampled = inputs["logprobs"].data
-    for i, (start, end) in enumerate(pairwise(offsets)):
+    trained = np.asarray(weights) != 0
+    lengths = np.diff(offsets)
+    if np.any(trained & (lengths == 0)):
+        raise ValueError("every trained target must have a recorded support")
+    sampled = np.asarray(inputs["logprobs"].to_numpy()).reshape(-1)
+    for i in np.flatnonzero(lengths):
+        start, end = offsets[i], offsets[i + 1]
         support = ids[start:end]
-        if len(set(support)) != len(support):
+        if support.size == 1:
+            duplicate = False
+            selected = 0 if support[0] == labels[i] else None
+        elif support.size <= 8:
+            small = support.tolist()
+            duplicate = len(set(small)) != len(small)
+            selected = small.index(labels[i]) if labels[i] in small else None
+        else:
+            duplicate = has_duplicate_tokens(support)
+            matches = np.flatnonzero(support == labels[i])
+            selected = matches[0] if matches.size else None
+        if duplicate:
             raise ValueError("sampling support contains duplicate tokens")
-        if weights[i] and labels[i] not in support:
+        if trained[i] and selected is None:
             raise ValueError("every trained target must have a recorded support")
-        if probabilities is not None and support:
-            if not math.isclose(
-                sum(math.exp(x) for x in logq[start:end]), 1, abs_tol=1e-4
-            ):
+        if logq is not None:
+            values = logq[start:end]
+            if support.size == 1:
+                mass = math.exp(float(values[0]))
+            elif support.size <= 8:
+                mass = sum(map(math.exp, values.tolist()))
+            else:
+                mass = np.exp(values.astype(np.float64)).sum()
+            if not math.isclose(mass, 1, abs_tol=1e-4):
                 raise ValueError("sampling support probabilities must sum to one")
-            if weights[i] and not math.isclose(
-                logq[start + support.index(labels[i])], sampled[i], abs_tol=1e-4
+            if trained[i] and not math.isclose(
+                logq[start + selected], sampled[i], abs_tol=1e-4
             ):
                 raise ValueError("sampled logprob disagrees with support probability")
     return {
         "sampling_mask_ids": torch.tensor(ids, dtype=torch.long),
         "sampling_mask_offsets": torch.tensor(offsets, dtype=torch.long),
-        "sampling_mask_logprobs": torch.tensor(logq, dtype=torch.float32),
+        "sampling_mask_logprobs": torch.tensor(
+            logq if logq is not None else [], dtype=torch.float32
+        ),
     }
 
 

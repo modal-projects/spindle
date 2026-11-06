@@ -93,7 +93,7 @@ def test_parallel_padding_rows_are_allowed(runtime):
     rows = _rows([0, 7] * 4, alignment=8)
     _forward(runtime, rows)
     assert len(calls) == 1
-    assert rows[0][1]["routed_experts"]["values"][-4:] == [-1] * 4
+    assert rows[0][1]["routed_experts"]["values"][-4:].tolist() == [-1] * 4
 
 
 def test_bridge_installation_is_idempotent():

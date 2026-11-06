@@ -119,11 +119,15 @@ def _align_row(row: dict[str, Any], multiple: int) -> None:
     if "routed_experts" in row:
         route = row["routed_experts"]
         width = route["shape"][1] * route["shape"][2]
-        route["values"] = [*route["values"], *([-1] * pad * width)]
+        route["values"] = np.concatenate(
+            [route["values"], np.full(pad * width, -1, dtype=np.int32)]
+        )
         route["shape"][0] += pad
     if "sampling_mask_offsets" in row:
         offsets = row["sampling_mask_offsets"]
-        row["sampling_mask_offsets"] = [*offsets, *([offsets[-1]] * pad)]
+        row["sampling_mask_offsets"] = np.concatenate(
+            [offsets, np.full(pad, offsets[-1], dtype=np.int64)]
+        )
 
 
 def build_outputs(
@@ -153,7 +157,7 @@ def build_outputs(
         values = np.asarray(output["logprobs"], dtype=np.float32)[:target_length]
         grouped[item_index][datum_index] = {
             "loss": float(output["loss"]),
-            "logprobs": values.reshape(-1).tolist(),
+            "logprobs": values.reshape(-1),
             "shape": shape,
             "diagnostics": output.get("metrics"),
         }
@@ -273,10 +277,8 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
         weights = row.get("weights")
         validate_support(
             inputs,
-            [int(value) for value in targets],
-            [1.0] * len(targets)
-            if weights is None
-            else [float(value) for value in weights],
+            targets,
+            np.ones(len(targets), dtype=np.float32) if weights is None else weights,
             centered=loss_fn != "mis",
         )
     row.update(replay_row(inputs, targets))
@@ -295,10 +297,10 @@ def _shaped_values(tensor, shape, dtype, datum_index, name) -> np.ndarray:
 
 def _tensor_values(tensor) -> np.ndarray:
     """Return row-major values; the SDK sends mostly-zero 2-D tensors as CSR."""
-    values = np.asarray(tensor.data)
     crow = tensor.sparse_crow_indices
     if crow is None:
-        return values.reshape(-1)
+        return np.asarray(tensor.to_numpy()).reshape(-1)
+    values = np.asarray(tensor.data)
     shape = list(tensor.shape or [])
     columns = tensor.sparse_col_indices
     rows, width = (1, shape[0]) if len(shape) == 1 else (shape + [None, None])[:2]

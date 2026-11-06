@@ -1,0 +1,315 @@
+{
+  "baseline_revision": "effb094580fb45d98b8f39a6de50b9bbffb1f653",
+  "optimized_revision": "containing commit",
+  "optimized_source_sha256": {
+    "src/spindle/replay.py": "e13f3eacbfb0f30d406e3d8987a9dd6429408800dca5dbc810033c44e6865328",
+    "src/spindle/backends/miles_runtime/data.py": "612077eb906448f65af00554074c583660b54826e0e39abeb0491d9a3ac98661",
+    "src/spindle/backends/miles_runtime/replay_data.py": "f717820ba39fdc2dbcc48ccb48c0e6de326914101595c14118c56207bb197394",
+    "src/spindle/backends/score_centering.py": "37c8285486b4481726507369f7fb6b52bf2817c9191b6b553856b132763f9f3f"
+  },
+  "environment": {
+    "cpu": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+    "python": "3.12.3",
+    "tinker": "0.25.0",
+    "torch": "2.10.0+cpu"
+  },
+  "scope": "CPU-only microbenchmarks; three unprofiled wall-time samples per stage on the same host. No GPU throughput or end-to-end HTTP measurement. Synthetic ragged supports have shuffled IDs and normalized probabilities. The script checks IDs, logprobs, and offset length at Miles handoff.",
+  "reproduce": {
+    "script": "scripts/benchmark_replay_preparation.py",
+    "command": "uv run --no-sync python scripts/benchmark_replay_preparation.py results.json --profile",
+    "baseline": "Run this same script with PYTHONPATH pointing to a checkout of baseline_revision/src."
+  },
+  "before": {
+    "top_p_long_prompt": {
+      "input_positions": 49407,
+      "support_entries": 109056,
+      "runs": [
+        {
+          "training_inputs": 0.012900549016194418,
+          "replay_row": 0.11876537700300105,
+          "validate_support": 0.10105329198995605,
+          "prepare_batch": 0.2174604189931415,
+          "handoff": 0.005587808002019301
+        },
+        {
+          "training_inputs": 0.013353463989915326,
+          "replay_row": 0.11727689899271354,
+          "validate_support": 0.08291491400450468,
+          "prepare_batch": 0.19442607500241138,
+          "handoff": 0.004927312984364107
+        },
+        {
+          "training_inputs": 0.01069623400690034,
+          "replay_row": 0.09062033100053668,
+          "validate_support": 0.11990483201225288,
+          "prepare_batch": 0.23163763200864196,
+          "handoff": 0.0071472059935331345
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.012900549016194418,
+        "replay_row": 0.11727689899271354,
+        "validate_support": 0.10105329198995605,
+        "prepare_batch": 0.2174604189931415,
+        "handoff": 0.005587808002019301
+      }
+    },
+    "top_p_wide_support": {
+      "input_positions": 8319,
+      "support_entries": 3495168,
+      "runs": [
+        {
+          "training_inputs": 0.26439071202185005,
+          "replay_row": 1.5313766569888685,
+          "validate_support": 2.0356992190063465,
+          "prepare_batch": 3.413410595996538,
+          "handoff": 0.13069925300078467
+        },
+        {
+          "training_inputs": 0.25933593200170435,
+          "replay_row": 1.4473026359919459,
+          "validate_support": 2.0574058669735678,
+          "prepare_batch": 3.4618387399823405,
+          "handoff": 0.15926889202091843
+        },
+        {
+          "training_inputs": 0.24569533299654722,
+          "replay_row": 1.5878930210019462,
+          "validate_support": 2.070740323018981,
+          "prepare_batch": 3.352917353011435,
+          "handoff": 0.11635614701663144
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.25933593200170435,
+        "replay_row": 1.5313766569888685,
+        "validate_support": 2.0574058669735678,
+        "prepare_batch": 3.413410595996538,
+        "handoff": 0.13069925300078467
+      }
+    },
+    "singleton_support": {
+      "input_positions": 8319,
+      "support_entries": 8192,
+      "runs": [
+        {
+          "training_inputs": 0.0011300600017420948,
+          "replay_row": 0.022528978995978832,
+          "validate_support": 0.029613791994052008,
+          "prepare_batch": 0.044487299979664385,
+          "handoff": 0.0004675370000768453
+        },
+        {
+          "training_inputs": 0.0011375800240784883,
+          "replay_row": 0.01731938699958846,
+          "validate_support": 0.014417858998058364,
+          "prepare_batch": 0.03536572601296939,
+          "handoff": 0.00047878900659270585
+        },
+        {
+          "training_inputs": 0.001154519006377086,
+          "replay_row": 0.020413617981830612,
+          "validate_support": 0.014905398013070226,
+          "prepare_batch": 0.03412226898944937,
+          "handoff": 0.0004736230184789747
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.0011375800240784883,
+        "replay_row": 0.020413617981830612,
+        "validate_support": 0.014905398013070226,
+        "prepare_batch": 0.03536572601296939,
+        "handoff": 0.0004736230184789747
+      }
+    },
+    "small_support": {
+      "input_positions": 8319,
+      "support_entries": 27306,
+      "runs": [
+        {
+          "training_inputs": 0.003897980001056567,
+          "replay_row": 0.03174404997844249,
+          "validate_support": 0.022946265002246946,
+          "prepare_batch": 0.0507483689871151,
+          "handoff": 0.001179034006781876
+        },
+        {
+          "training_inputs": 0.004378829005872831,
+          "replay_row": 0.038263280992396176,
+          "validate_support": 0.02144400600809604,
+          "prepare_batch": 0.045116730994777754,
+          "handoff": 0.0009361879783682525
+        },
+        {
+          "training_inputs": 0.0023716000141575933,
+          "replay_row": 0.02829166001174599,
+          "validate_support": 0.04134418198373169,
+          "prepare_batch": 0.053317304991651326,
+          "handoff": 0.0012018350244034082
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.003897980001056567,
+        "replay_row": 0.03174404997844249,
+        "validate_support": 0.022946265002246946,
+        "prepare_batch": 0.0507483689871151,
+        "handoff": 0.001179034006781876
+      }
+    },
+    "plain_ce_32x4k": {
+      "runs": [
+        0.03338379200431518,
+        0.029756537987850606,
+        0.022288893000222743
+      ],
+      "median_s": 0.029756537987850606
+    }
+  },
+  "after": {
+    "top_p_long_prompt": {
+      "input_positions": 49407,
+      "support_entries": 109056,
+      "runs": [
+        {
+          "training_inputs": 0.010022849979577586,
+          "replay_row": 0.003516085009323433,
+          "validate_support": 0.0059672860079444945,
+          "prepare_batch": 0.013349276996450499,
+          "handoff": 1.4282006304711103e-05
+        },
+        {
+          "training_inputs": 0.011864223022712395,
+          "replay_row": 0.003925854980479926,
+          "validate_support": 0.007228096015751362,
+          "prepare_batch": 0.014827341976342723,
+          "handoff": 1.776099088601768e-05
+        },
+        {
+          "training_inputs": 0.010750733985332772,
+          "replay_row": 0.0032269439834635705,
+          "validate_support": 0.00584112000069581,
+          "prepare_batch": 0.01190995899378322,
+          "handoff": 1.3284996384754777e-05
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.010750733985332772,
+        "replay_row": 0.003516085009323433,
+        "validate_support": 0.0059672860079444945,
+        "prepare_batch": 0.013349276996450499,
+        "handoff": 1.4282006304711103e-05
+      }
+    },
+    "top_p_wide_support": {
+      "input_positions": 8319,
+      "support_entries": 3495168,
+      "runs": [
+        {
+          "training_inputs": 0.2834006499906536,
+          "replay_row": 0.11714045298867859,
+          "validate_support": 0.1833726140030194,
+          "prepare_batch": 0.3051902859879192,
+          "handoff": 4.07799961976707e-05
+        },
+        {
+          "training_inputs": 0.24648687499575317,
+          "replay_row": 0.10760243798722513,
+          "validate_support": 0.15982056301436387,
+          "prepare_batch": 0.28147647899459116,
+          "handoff": 1.7265992937609553e-05
+        },
+        {
+          "training_inputs": 0.25874136498896405,
+          "replay_row": 0.10860720599885099,
+          "validate_support": 0.1828638800070621,
+          "prepare_batch": 0.26847614999860525,
+          "handoff": 2.9548973543569446e-05
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.25874136498896405,
+        "replay_row": 0.10860720599885099,
+        "validate_support": 0.1828638800070621,
+        "prepare_batch": 0.28147647899459116,
+        "handoff": 2.9548973543569446e-05
+      }
+    },
+    "singleton_support": {
+      "input_positions": 8319,
+      "support_entries": 8192,
+      "runs": [
+        {
+          "training_inputs": 0.0012233890010975301,
+          "replay_row": 0.006880925997393206,
+          "validate_support": 0.013667596998857334,
+          "prepare_batch": 0.02054106301511638,
+          "handoff": 1.1772994184866548e-05
+        },
+        {
+          "training_inputs": 0.00218687899177894,
+          "replay_row": 0.01217471802374348,
+          "validate_support": 0.026135571009945124,
+          "prepare_batch": 0.03171493700938299,
+          "handoff": 1.4114979421719909e-05
+        },
+        {
+          "training_inputs": 0.0019725050078704953,
+          "replay_row": 0.009156428015558049,
+          "validate_support": 0.012980180006707087,
+          "prepare_batch": 0.024014396010898054,
+          "handoff": 1.059600617736578e-05
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.0019725050078704953,
+        "replay_row": 0.009156428015558049,
+        "validate_support": 0.013667596998857334,
+        "prepare_batch": 0.024014396010898054,
+        "handoff": 1.1772994184866548e-05
+      }
+    },
+    "small_support": {
+      "input_positions": 8319,
+      "support_entries": 27306,
+      "runs": [
+        {
+          "training_inputs": 0.0021852409990970045,
+          "replay_row": 0.009156585991149768,
+          "validate_support": 0.025845853000646457,
+          "prepare_batch": 0.03723538501071744,
+          "handoff": 1.4946999726817012e-05
+        },
+        {
+          "training_inputs": 0.0031412259850185364,
+          "replay_row": 0.009629230975406244,
+          "validate_support": 0.02566217299317941,
+          "prepare_batch": 0.038152685010572895,
+          "handoff": 1.5425001038238406e-05
+        },
+        {
+          "training_inputs": 0.002592683013062924,
+          "replay_row": 0.011736863001715392,
+          "validate_support": 0.030173803999787197,
+          "prepare_batch": 0.0384942659875378,
+          "handoff": 1.4246994396671653e-05
+        }
+      ],
+      "median_s": {
+        "training_inputs": 0.002592683013062924,
+        "replay_row": 0.009629230975406244,
+        "validate_support": 0.025845853000646457,
+        "prepare_batch": 0.038152685010572895,
+        "handoff": 1.4946999726817012e-05
+      }
+    },
+    "plain_ce_32x4k": {
+      "runs": [
+        0.005177320999791846,
+        0.0053734029934275895,
+        0.004976197000360116
+      ],
+      "median_s": 0.005177320999791846
+    }
+  },
+  "note": "prepare_batch includes replay_row and validate_support; these overlapping timings must not be summed."
+}

@@ -37,9 +37,9 @@ def test_context_parallel_alignment_preserves_routes_and_supports():
     assert row["tokens"].tolist() == [1, 2, 3, 5, 6, 6, 6, 6]
     assert row["target_len"] == 7
     assert row["routed_experts"]["shape"] == [7, 2, 1]
-    assert row["routed_experts"]["values"] == [*range(8), *([-1] * 6)]
-    assert row["sampling_mask_offsets"] == [0, 0, 0, 2, 5, 5, 5, 5]
-    assert row["sampling_mask_ids"] == [5, 7, 6, 8, 9]
+    assert row["routed_experts"]["values"].tolist() == [*range(8), *([-1] * 6)]
+    assert row["sampling_mask_offsets"].tolist() == [0, 0, 0, 2, 5, 5, 5, 5]
+    assert row["sampling_mask_ids"].tolist() == [5, 7, 6, 8, 9]
     assert row["advantages"].tolist() == [0, 0, 1, 1, 0, 0, 0]
 
 
