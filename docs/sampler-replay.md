@@ -29,6 +29,21 @@ Router capture increases the rollout server's memory use, and captured supports
 can make responses large when top-p retains much of the vocabulary. Neither
 capture is requested by default.
 
+Start with `top_k=64` to bound each captured support, then choose the response
+length and training batch size for the total number of support entries. This
+changes the sampler's distribution; set it before sampling and never truncate
+recorded supports afterward. For example, 8,192 generated tokens with `top_k=64`
+have at most 524,288 entries per trajectory. IDs and float32 log probabilities
+alone occupy about 6 MiB before JSON encoding and training intermediates.
+
+The pinned SGLang sampler defaults to
+[`sampling_mask_max_tokens=4096`](https://github.com/modal-projects/sglang/blob/a3e0e1725406b9330bd062520d4f99d0aa73ee4f/python/sglang/srt/arg_groups/fields/exec_.py#L101)
+per position, with
+[overflow detection](https://github.com/modal-projects/sglang/blob/a3e0e1725406b9330bd062520d4f99d0aa73ee4f/python/sglang/srt/layers/sampler.py#L542).
+That bounds one support, not the total request or training microbatch. Full
+vocabulary capture (`top_k=-1`, `top_p=1`) can still create large requests, and
+the loss allocates several arrays proportional to the total support entries.
+
 ## Sample and train
 
 This example assumes `training` is an existing Miles LoRA or Megatron
@@ -47,7 +62,7 @@ prompt = types.ModelInput.from_ints(prompt_tokens)
 sequence = spindle.sample_with_replay(
     sampler,
     prompt,
-    sampling_params=types.SamplingParams(max_tokens=32, temperature=0.8, top_p=0.9),
+    sampling_params=types.SamplingParams(max_tokens=32, temperature=0.8, top_p=0.9, top_k=64),
     return_sampling_probabilities=True,
 ).result().sequences[0]
 

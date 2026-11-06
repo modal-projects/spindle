@@ -7,18 +7,19 @@ from math import prod
 
 import numpy as np
 
-from spindle.backends.score_centering import REPLAY_LOSSES, has_duplicate_tokens
+from spindle.backends.score_centering import has_duplicate_tokens
 from spindle.replay import REPLAY_FIELDS
 
 _replay_builder = None
-_replay_execute = None
 _sharded_package = None
 
 
 def install_distribution_sharding(conversion):
     """Keep support logprobs aligned when Miles partitions a rollout batch."""
     global _sharded_package
-    original = conversion._package_shards
+    original = getattr(conversion, "_package_shards", None)
+    if not callable(original):
+        raise RuntimeError("Miles exact-support replay requires _package_shards")
     if original is _sharded_package:
         return
 
@@ -207,7 +208,7 @@ def add_replay_to_train_data(train_data: dict, datums: list[dict]) -> None:
 
 
 def install_bridge_replay(runtime) -> None:
-    global _replay_builder, _replay_execute
+    global _replay_builder
     original = runtime._build_train_data
     if original is _replay_builder:
         return
@@ -226,35 +227,3 @@ def install_bridge_replay(runtime) -> None:
         and "rollout_sampling_mask_logprobs" not in spec
     ):
         spec["rollout_sampling_mask_logprobs"] = spec["rollout_sampling_mask_ids"]
-    backend = vars(runtime).get("MilesBackend")
-    if backend is None:
-        return
-    original_execute = backend._execute_batch
-
-    @wraps(original_execute)
-    async def execute(self, method, batch_id, slot_datums, loss_fn, loss_fn_config):
-        if loss_fn not in REPLAY_LOSSES:
-            return await original_execute(
-                self, method, batch_id, slot_datums, loss_fn, loss_fn_config
-            )
-        train_data = runtime._build_train_data(
-            runtime._pad_to_dp_multiple(slot_datums, self.dp_size)
-        )
-        train_data.update(loss_fn=loss_fn, loss_fn_config=loss_fn_config)
-        results = await self._call_trainer(method, batch_id, train_data)
-        by_index = {}
-        for result in results:
-            if "error" in result:
-                return result
-            for row in result["per_datum"]:
-                index = int(row["sample_index"])
-                if index not in by_index:
-                    by_index[index] = {
-                        "loss": float(row["loss"]),
-                        "logprobs": row["logprobs"].tolist(),
-                        "metrics": row["metrics"],
-                    }
-        return [by_index[index] for index in range(len(slot_datums))]
-
-    _replay_execute = execute
-    backend._execute_batch = execute

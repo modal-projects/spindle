@@ -26,8 +26,8 @@ def validate_loss_config(name, config):
         raise ValueError("loss_fn_config values must be finite")
     if not 0 < config.get("mis_low", 0.2) <= config.get("mis_high", 5.0):
         raise ValueError("MIS thresholds must satisfy 0 < mis_low <= mis_high")
-    if config.get("sampling_temperature", 1.0) <= 0:
-        raise ValueError("sampling_temperature must be positive")
+    if "sampling_temperature" not in config or config["sampling_temperature"] <= 0:
+        raise ValueError("sampling_temperature must be explicitly set and positive")
 
 
 def has_duplicate_tokens(values):

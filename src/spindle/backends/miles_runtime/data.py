@@ -274,11 +274,14 @@ def _datum_row(datum, loss_fn: str, datum_index: int) -> dict[str, Any]:
             raise ValueError(
                 f"datum {datum_index}: {loss_fn} requires one target per position"
             )
-        weights = row.get("weights")
+        if "weights" not in row:
+            row["weights"] = (
+                (row["sampling_logprobs"] != 0) | (row["advantages"] != 0)
+            ).astype(np.float32)
         validate_support(
             inputs,
             targets,
-            np.ones(len(targets), dtype=np.float32) if weights is None else weights,
+            row["weights"],
             centered=loss_fn != "mis",
         )
     row.update(replay_row(inputs, targets))

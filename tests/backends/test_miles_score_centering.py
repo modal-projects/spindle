@@ -17,7 +17,8 @@ from spindle.backends.miles_runtime.data import (
     prepare_batch,
 )
 from spindle.backends.miles_runtime.replay_data import add_replay_to_train_data
-from spindle.backends.miles_runtime.score_centering import loss_function
+from spindle.backends.miles_runtime.score_centering import install_losses, loss_function
+from tests.replay.test_hooks import miles as miles
 
 
 def tensor(values, dtype="float32"):
@@ -91,7 +92,9 @@ def evaluate(batch, logits, proc=None):
 @pytest.mark.parametrize("name", ["mis", "score_centered", "score_centered_mis"])
 def test_multi_lora_client_weights_and_masked_target_gradient(name):
     request = ForwardBatch(
-        (ForwardItem("b", (datum(0, 0.125, -1.0),)), ForwardItem("a", (datum(),))), name
+        (ForwardItem("b", (datum(0, 0.125, -1.0),)), ForwardItem("a", (datum(),))),
+        name,
+        {"sampling_temperature": 0.7},
     )
     prepared = prepare_batch(request, {"a": 0, "b": 1}, sequence_alignment=4)
     assert prepared.locations == ((1, 0), (0, 0))
@@ -127,7 +130,11 @@ def test_multi_lora_client_weights_and_masked_target_gradient(name):
 
 
 def test_dp_padding_keeps_graph_but_contributes_no_loss_or_metrics():
-    request = ForwardBatch((ForwardItem("a", (datum(),)),), "score_centered_mis")
+    request = ForwardBatch(
+        (ForwardItem("a", (datum(),)),),
+        "score_centered_mis",
+        {"sampling_temperature": 0.7},
+    )
     rows = pad_slot_rows(prepare_batch(request, {"a": 0}).slot_rows, 2)
     batch = batch_from_rows(rows)
     logits = torch.randn(1, 3, 4, requires_grad=True)
@@ -153,26 +160,30 @@ def test_invalid_distribution_rejected_before_distributed_dispatch(field, value)
     if value is not None:
         inputs[field] = value
     request = ForwardBatch(
-        (ForwardItem("a", (Datum(item.model_input, inputs),)),), "score_centered_mis"
+        (ForwardItem("a", (Datum(item.model_input, inputs),)),),
+        "score_centered_mis",
+        {"sampling_temperature": 0.7},
     )
     with pytest.raises(ValueError):
         prepare_batch(request, {"a": 0})
 
 
-def distributed_check(rank, rendezvous, layout):
+def distributed_check(rank, rendezvous, layout, pre_sliced):
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=4)
     try:
         tp_groups = [dist.new_group([0, 1]), dist.new_group([2, 3])]
         cp_groups = [dist.new_group([0, 2]), dist.new_group([1, 3])]
         cp_rank, tp_rank = divmod(rank, 2)
         request = ForwardBatch(
-            (ForwardItem("a", (datum(), datum(0))),), "score_centered_mis"
+            (ForwardItem("a", (datum(), datum(0))),),
+            "score_centered_mis",
+            {"sampling_temperature": 0.7},
         )
         batch = batch_from_rows(
             prepare_batch(request, {"a": 0}, sequence_alignment=4).slot_rows
         )
         full = torch.tensor(
-            [[[2.0, 100.0, 0.0, -1.0], [0.0, 2.0, 3.0, 1.0], [3.0, 2.0, 0.0, 1.0]] * 2],
+            [[[0.0, 100.0, 0.0, 0.0]] * 6],
             requires_grad=True,
         )
         reference, ref_out = evaluate(batch, full)
@@ -198,6 +209,11 @@ def distributed_check(rank, rendezvous, layout):
             tp=SimpleNamespace(size=2, rank=tp_rank, group=tp_groups[cp_rank]),
             indices=select,
         )
+        if pre_sliced:
+            batch["rollout_log_probs"] = [
+                torch.as_tensor(values)[select(len(values))]
+                for values in batch["rollout_log_probs"]
+            ]
         loss, out = evaluate(batch, shard, proc)
         loss.backward()
         torch.testing.assert_close(loss, reference)
@@ -214,7 +230,71 @@ def distributed_check(rank, rendezvous, layout):
 
 
 @pytest.mark.parametrize("layout", ["zigzag", "contiguous"])
-def test_tensor_and_context_parallel_gradients_match_reference(tmp_path, layout):
+@pytest.mark.parametrize("pre_sliced", [False, True])
+def test_tensor_and_context_parallel_gradients_match_reference(
+    tmp_path, layout, pre_sliced
+):
     mp.spawn(
-        distributed_check, args=(f"file://{tmp_path}/rendezvous", layout), nprocs=4
+        distributed_check,
+        args=(f"file://{tmp_path}/rendezvous", layout, pre_sliced),
+        nprocs=4,
     )
+
+
+def test_hooked_get_batch_preserves_probabilities_through_loss(miles):
+    request = ForwardBatch(
+        (ForwardItem("a", (datum(),)),),
+        "score_centered_mis",
+        {"sampling_temperature": 0.7},
+    )
+    data = batch_from_rows(prepare_batch(request, {"a": 0}).slot_rows)
+    keys = [key for key in data if not key.startswith("rollout_sampling_mask_")]
+    batch = miles.model.get_batch(SimpleNamespace(rollout_data=data), keys)
+    logits = torch.tensor([[[0.0, 100.0, 0.0, 0.0]] * 2], requires_grad=True)
+    loss, outputs = evaluate(batch, logits)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert torch.isfinite(logits.grad).all() and logits.grad.abs().sum() > 0
+    assert outputs["per_datum"][0]["metrics"]["tokens"] == 1
+
+
+@pytest.mark.parametrize("unweighted_first", [False, True])
+def test_omitted_weights_mask_prompt_and_mix_with_explicit_clients(unweighted_first):
+    item = datum()
+    inputs = dict(item.loss_fn_inputs)
+    inputs.pop("weights")
+    inputs["target_tokens"] = tensor([1, 2, 3], "int64")
+    inputs["advantages"] = tensor([0.0, 2.0, 0.0])
+    inputs["logprobs"] = tensor([0.0, math.log(0.3), 0.0])
+    inputs["sampling_mask_offsets"] = tensor([0, 0, 3, 3], "int64")
+    implicit = Datum(ModelInput.from_ints([1, 1, 2]), inputs)
+    rows = [implicit, datum()] if unweighted_first else [datum(), implicit]
+    request = ForwardBatch(
+        (ForwardItem("a", tuple(rows)),),
+        "score_centered_mis",
+        {"sampling_temperature": 0.7},
+    )
+    prepared = prepare_batch(request, {"a": 0})
+    batch = batch_from_rows(prepared.slot_rows)
+    index = 0 if unweighted_first else 1
+    assert torch.as_tensor(batch["loss_weights"][index]).tolist() == [0.0, 1.0, 0.0]
+    assert all("weights" in row for _, row in prepared.slot_rows)
+
+
+@pytest.mark.parametrize("missing", ["registry", "positions", "parallel"])
+def test_unsupported_miles_loss_api_fails_at_install(missing):
+    def chunks(logits, *, include_response_indices):
+        return iter(())
+
+    losses = SimpleNamespace(TINKER_LOSS_FUNCTIONS={})
+    proc = SimpleNamespace(
+        _iter_response_chunks=chunks, get_parallel_state=lambda: None
+    )
+    if missing == "registry":
+        del losses.TINKER_LOSS_FUNCTIONS
+    elif missing == "positions":
+        proc._iter_response_chunks = lambda logits: iter(())
+    else:
+        del proc.get_parallel_state
+    with pytest.raises(RuntimeError, match="Miles exact-support replay requires"):
+        install_losses(losses, proc)

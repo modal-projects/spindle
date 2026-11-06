@@ -8,6 +8,7 @@ and leaves each rank's local gradient unchanged.
 
 from argparse import Namespace
 from functools import partial
+from inspect import signature
 
 import torch
 import torch.distributed as dist
@@ -59,10 +60,15 @@ def loss_function(args, batch, logits, sum_of_sample_mean, *, processors):
         )
         if args.vocab_size is None or torch.any(ids >= args.vocab_size):
             raise ValueError("sampling support exceeds the true model vocabulary")
+        rollout_logprobs = torch.as_tensor(
+            batch["rollout_log_probs"][i], device=logits.device
+        )
+        if rollout_logprobs.numel() != positions.numel():
+            rollout_logprobs = rollout_logprobs[positions]
         local = {
             "token_indices": positions,
             "labels": response("target_tokens"),
-            "sampling_logprobs": response("rollout_log_probs"),
+            "sampling_logprobs": rollout_logprobs,
             "sampling_mask_ids": ids,
             "sampling_mask_offsets": torch.as_tensor(
                 batch["rollout_sampling_mask_offsets"][i],
@@ -120,6 +126,18 @@ def loss_function(args, batch, logits, sum_of_sample_mean, *, processors):
 
 
 def install_losses(tinker_losses, logit_processors):
+    registry = getattr(tinker_losses, "TINKER_LOSS_FUNCTIONS", None)
+    chunks = getattr(logit_processors, "_iter_response_chunks", None)
+    if (
+        not isinstance(registry, dict)
+        or not callable(chunks)
+        or "include_response_indices" not in signature(chunks).parameters
+        or not callable(getattr(logit_processors, "get_parallel_state", None))
+    ):
+        raise RuntimeError(
+            "Miles exact-support replay requires the Tinker loss registry, "
+            "parallel state, and _iter_response_chunks(include_response_indices=...)"
+        )
     native_loss = partial(loss_function, processors=logit_processors)
     tinker_losses.TINKER_LOSS_FUNCTIONS.update(
         dict.fromkeys(REPLAY_LOSSES, native_loss)

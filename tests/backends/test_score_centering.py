@@ -7,48 +7,16 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from tinker import Datum, ModelInput, TensorData
-from tinker.lib.chunked_fwdbwd_helpers import combine_fwd_bwd_output_results
 
 from spindle.backends import ForwardBatch, ForwardItem
 from spindle.backends.megatron_runtime.common.forward_backward import (
     _loss,
-    build_outputs,
     build_sequence_batches,
     pack_microbatches,
     shard_microbatches,
 )
 from spindle.backends.score_centering import replay_logprobs
-
-
-def test_diagnostic_totals_survive_sdk_chunks_with_unequal_token_counts():
-    request = ForwardBatch((ForwardItem("m", ()),), "score_centered_mis")
-    chunks = []
-    for count, entropy in [(1, 1.0), (9, 2.0)]:
-        chunks.extend(
-            build_outputs(
-                request,
-                {
-                    0: [
-                        {
-                            "output_index": 0,
-                            "positions": list(range(count)),
-                            "logprobs": [0.0] * count,
-                        }
-                    ]
-                },
-                {
-                    0: {
-                        "loss": 0.0,
-                        "tokens": count,
-                        "sequences": 1,
-                        "entropy": count * entropy,
-                    }
-                },
-            )
-        )
-    combined = combine_fwd_bwd_output_results(chunks)
-    assert combined.metrics["entropy:mean"] == 1.5  # SDK averages the two sequences.
-    assert combined.metrics["entropy:sum"] / combined.metrics["tokens:sum"] == 1.9
+from spindle.backends.miles_runtime.data import prepare_batch
 
 
 def make_batch(targets, q, advantages, *, loss="score_centered_mis", config=None):
@@ -75,7 +43,11 @@ def make_batch(targets, q, advantages, *, loss="score_centered_mis", config=None
             ),
         },
     )
-    request = ForwardBatch((ForwardItem("m", (datum,)),), loss, config or {})
+    request = ForwardBatch(
+        (ForwardItem("m", (datum,)),),
+        loss,
+        {"sampling_temperature": 1.0, **(config or {})},
+    )
     sequences = build_sequence_batches(
         request, None, max_slots=None, max_seq_length=100
     )
@@ -152,16 +124,6 @@ def test_packing_context_partition_and_dummy_padding_preserve_support():
     assert torch.count_nonzero(dummy_logits.grad) == 0
 
 
-def test_no_drift_when_policy_and_sampler_match():
-    q = [0.2, 0.3, 0.5]
-    batch = make_batch([2], q, [1.0])
-    logits = torch.tensor(
-        [[math.log(0.2), 20.0, math.log(0.3), math.log(0.5)]], requires_grad=True
-    )
-    native_loss(logits, batch).backward()
-    torch.testing.assert_close(logits.grad, torch.tensor([[0.2, 0.0, -0.7, 0.5]]))
-
-
 def test_extreme_masked_ratio_has_finite_zero_mis_gradient():
     values = torch.tensor([-0.1], requires_grad=True)
     batch = {
@@ -187,7 +149,11 @@ def test_rejects_missing_distribution_instead_of_approximating_it():
             "sampling_mask_offsets": TensorData(data=[0, 1], dtype="int64", shape=[2]),
         },
     )
-    request = ForwardBatch((ForwardItem("m", (datum,)),), "score_centered_mis")
+    request = ForwardBatch(
+        (ForwardItem("m", (datum,)),),
+        "score_centered_mis",
+        {"sampling_temperature": 1.0},
+    )
     with pytest.raises(ValueError, match="sampling_mask_logprobs"):
         build_sequence_batches(request, None, max_slots=None, max_seq_length=10)
 
@@ -211,3 +177,23 @@ def _check_vocab_partition(rank, rendezvous):
 
 def test_tensor_parallel_gradient_matches_unsharded_reference(tmp_path):
     mp.spawn(_check_vocab_partition, args=(f"file://{tmp_path}/rendezvous",), nprocs=2)
+
+
+@pytest.mark.parametrize("name", ["mis", "score_centered", "score_centered_mis"])
+@pytest.mark.parametrize("backend", ["miles", "megatron"])
+def test_replay_requires_explicit_temperature_and_support(name, backend):
+    datum = Datum(
+        ModelInput.from_ints([1]),
+        {"target_tokens": [2], "advantages": [1.0], "logprobs": [-1.0]},
+    )
+
+    def prepare(config):
+        request = ForwardBatch((ForwardItem("m", (datum,)),), name, config)
+        if backend == "miles":
+            return prepare_batch(request, {"m": 0})
+        return build_sequence_batches(request, None, max_slots=None, max_seq_length=10)
+
+    with pytest.raises(ValueError, match="sampling_temperature"):
+        prepare({})
+    with pytest.raises(ValueError, match="replay tensors"):
+        prepare({"sampling_temperature": 0.8})

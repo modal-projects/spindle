@@ -158,6 +158,14 @@ def _load_actor(monkeypatch):
         monkeypatch, "miles.backends.training_utils.loss_hub.tinker_losses"
     )
     loss_hub.tinker_losses.TINKER_LOSS_FUNCTIONS = {}
+
+    def response_chunks(logits, *, include_response_indices, **kwargs):
+        return iter(())
+
+    loss_hub.logit_processors._iter_response_chunks = response_chunks
+    loss_hub.logit_processors.get_parallel_state = lambda: None
+    conversion = _module(monkeypatch, "miles.ray.rollout.train_data_conversion")
+    conversion._package_shards = lambda args, data, partitions: []
     for module in (training_loss, loss_hub.tinker_losses, megatron_actor, fsdp_actor):
         module.get_log_probs_and_entropy = (
             loss_hub.logit_processors.get_log_probs_and_entropy

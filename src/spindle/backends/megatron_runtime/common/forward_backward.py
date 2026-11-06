@@ -164,11 +164,7 @@ def build_sequence_batches(
             raise ValueError(f"forward_backward has no data for job {item.model_id}")
         for output_index, datum in enumerate(item.data):
             replay_fields = REPLAY_FIELDS & datum.loss_fn_inputs.keys()
-            supports_replay = loss_name in {
-                "mis",
-                "score_centered",
-                "score_centered_mis",
-            }
+            supports_replay = loss_name in REPLAY_LOSSES
             if replay_fields and (
                 not supports_replay or "routed_experts" in replay_fields
             ):
@@ -247,13 +243,13 @@ def build_sequence_batches(
                 "loss_name": loss_name,
                 "loss_config": loss_config,
             }
-            if loss_name.startswith("score_centered") or replay_fields:
+            if loss_name in REPLAY_LOSSES:
                 sequence.update(
                     validate_support(
                         datum.loss_fn_inputs,
                         labels,
                         weights,
-                        centered=loss_name.startswith("score_centered"),
+                        centered=loss_name != "mis",
                     )
                 )
             if slot is not None:
