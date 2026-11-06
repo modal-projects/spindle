@@ -2,7 +2,7 @@
 
 One Spindle deployment that a whole team points tinker-cookbook at, instead of each person deploying their own. It is what the Spindle maintainers run for themselves: recipes on a frontend named `prod` in a Modal environment named `spindle`, which holds nothing else.
 
-Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`. It also sets `platform.requires_proxy_auth`, so Modal turns away any request without a proxy token before it reaches Spindle.
+Each file in `recipes/` subclasses a bundled recipe and changes its name to start with `prod-`, so its apps are easy to tell apart, and points it at the `prod` frontend in the `spindle` environment. The frontend sets `platform.url_label` to `prod`, so its URL is `https://<workspace>-spindle--prod.modal.run`. Modal proxy auth is enabled by default, so Modal turns away any request without a proxy token before it reaches Spindle.
 
 `recipes/` holds one LoRA recipe per base model, 22 in all, from Qwen3.5-2B to Nemotron-3-Ultra-550B.
 

@@ -479,11 +479,22 @@ def show_next_steps(
         )
     else:
         client = f'spindle.create_full_training_client(service, "{preset.model}")'
+    proxy_auth = ""
+    if preset.config.platform.get("requires_proxy_auth", True):
+        proxy_auth = (
+            "  Clients also need a Modal proxy token allowed for this environment.\n"
+            "  Pass its Modal-Key and Modal-Secret to Tinker:\n\n"
+            "  service = tinker.ServiceClient(default_headers_overrides={\n"
+            '      "Modal-Key": "<Modal-Key>", "Modal-Secret": "<Modal-Secret>"\n'
+            "  })\n"
+            "  For Tinker SDKs older than 0.36, use default_headers instead.\n\n"
+        )
     console.print(
         Panel.fit(
             "[bold green]Spindle is live.[/bold green] Point any Tinker script at it:\n\n"
             f"  export TINKER_BASE_URL={url}\n"
             "  export TINKER_API_KEY=<the key in your spindle-api secret>\n\n"
+            f"{proxy_auth}"
             f"  {client}",
             border_style="green",
         )

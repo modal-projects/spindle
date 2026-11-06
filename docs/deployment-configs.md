@@ -150,7 +150,7 @@ config = Config()
 
 The frontend's URL is `https://<workspace>-<environment>--<frontend>-server.modal.run`. To choose the part after `--`, set `"platform.url_label"`; for example `"prod"` gives `https://<workspace>-<environment>--prod.modal.run`. Changing the label changes the URL clients use.
 
-Set `"platform.requires_proxy_auth": True` when the environment blocks unauthenticated URLs, or to keep the server off the open internet. Modal then rejects any request without a [proxy token](https://modal.com/docs/guide/webhook-proxy-auth) allowed for the environment, before it reaches Spindle. Clients send the token as headers next to their Tinker API key:
+Modal proxy auth is enabled by default: Modal rejects any request without a [proxy token](https://modal.com/docs/guide/webhook-proxy-auth) allowed for the environment, before it reaches Spindle. Set `"platform.requires_proxy_auth": False` to opt out. Clients send the token as headers next to their Tinker API key:
 
 ```python
 service = tinker.ServiceClient(

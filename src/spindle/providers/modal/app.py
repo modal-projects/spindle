@@ -777,7 +777,7 @@ def _plane():
 )
 @modal.concurrent(max_inputs=128, target_inputs=16)
 @modal.asgi_app(
-    requires_proxy_auth=PLATFORM.get("requires_proxy_auth", False),
+    requires_proxy_auth=PLATFORM.get("requires_proxy_auth", True),
     label=PLATFORM.get("url_label"),
 )
 def server():

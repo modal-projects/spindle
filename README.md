@@ -67,7 +67,7 @@ export TINKER_API_KEY="tml-$(openssl rand -hex 32)"
 modal secret create spindle-api TINKER_API_KEY="$TINKER_API_KEY"
 ```
 
-The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth).
+The Spindle server requires a [Modal Proxy Token](https://modal.com/docs/guide/webhook-proxy-auth) by default. Set `"platform.requires_proxy_auth": False` to opt out.
 Create one, export the printed `Modal-Key` and `Modal-Secret`, and allow it in your environment:
 
 ```bash
