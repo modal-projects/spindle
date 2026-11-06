@@ -577,6 +577,26 @@ def test_scheduled_gpus_are_logged(monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("rdma", [False, True])
+def test_single_node_trainer_rdma_allocation(builders, monkeypatch, rdma):
+    row = deployment()
+    row.recipe.trainer_rdma = rdma
+    clusters = []
+
+    def clustered(*, size, rdma):
+        clusters.append((size, rdma))
+        return lambda fn: fn
+
+    monkeypatch.setattr(modal, "clustered", clustered)
+    app, _ = deployment_apps.build_trainer_app(row, image="test")
+    settings, _ = app.functions["trainer"]
+    assert clusters == ([(1, True)] if rdma else [])
+    assert settings["experimental_options"] == ({"efa_enabled": True} if rdma else {})
+    restored = DeploymentConfig.model_validate_json(row.model_dump_json())
+    assert restored.recipe.trainer_rdma == rdma
+    assert restored.trainer_identity() == row.trainer_identity()
+
+
 def test_multinode_trainer_uses_cluster_launcher(builders, monkeypatch):
     row = deployment("qwen38-27b-lora-256k")
     clusters = []

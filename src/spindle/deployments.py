@@ -150,6 +150,7 @@ class DeploymentConfig(BaseModel):
             recipe.trainer_gpu,
             recipe.trainer_gpus_per_node,
             recipe.trainer_nodes,
+            recipe.trainer_rdma,
             recipe.trainer_cpu,
             recipe.trainer_memory_mib,
             recipe.trainer_disk_mib,

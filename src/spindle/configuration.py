@@ -41,6 +41,8 @@ class BaseConfig:
     trainer_gpu = "H100"
     trainer_gpus_per_node = 1
     trainer_nodes = 1
+    # Request an RDMA allocation even for a single trainer node.
+    trainer_rdma = False
     trainer_cpu = 8
     trainer_memory_mib = 32768
     trainer_disk_mib = 0

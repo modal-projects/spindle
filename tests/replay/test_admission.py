@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -37,7 +38,7 @@ def test_context_parallel_alignment_preserves_routes_and_supports():
     assert row["tokens"].tolist() == [1, 2, 3, 5, 6, 6, 6, 6]
     assert row["target_len"] == 7
     assert row["routed_experts"]["shape"] == [7, 2, 1]
-    assert row["routed_experts"]["values"] == [*range(8), *([-1] * 6)]
+    assert row["routed_experts"]["values"].tolist() == [*range(8), *([-1] * 6)]
     assert row["sampling_mask_offsets"] == [0, 0, 0, 2, 5, 5, 5, 5]
     assert row["sampling_mask_ids"] == [5, 7, 6, 8, 9]
     assert row["advantages"].tolist() == [0, 0, 1, 1, 0, 0, 0]
@@ -64,8 +65,15 @@ def test_router_requests_not_coalesced_with_ordinary_requests():
     assert key(datum) == key(replay_datum())
 
 
-def test_router_requires_enabled_trainer(tmp_path):
+@pytest.mark.parametrize("explicit_disable", [False, True])
+def test_router_requires_enabled_trainer(tmp_path, explicit_disable):
     backend = _backend(tmp_path)
+    if explicit_disable:
+        backend.config = replace(
+            backend.config,
+            cli_options={"use_rollout_routing_replay": False},
+            extra_args=("--use-rollout-routing-replay",),
+        )
     backend.accept_model("m", _spec())
     with pytest.raises(ValueError, match="use-rollout-routing-replay"):
         backend.forward_backward(
@@ -76,6 +84,26 @@ def test_router_requires_enabled_trainer(tmp_path):
             )
         )
     assert not any(c[0] == "forward_backward" for c in backend.runtime.calls)
+
+
+@pytest.mark.parametrize("setting", ["cli_options", "extra_args"])
+def test_router_accepts_enabled_native_option(tmp_path, setting):
+    backend = _backend(tmp_path)
+    options = (
+        {"cli_options": {"use_rollout_routing_replay": True}}
+        if setting == "cli_options"
+        else {"extra_args": ("--use-rollout-routing-replay",)}
+    )
+    backend.config = replace(backend.config, **options)
+    backend.accept_model("m", _spec())
+    backend.forward_backward(
+        ForwardBatch(
+            items=(ForwardItem("m", (replay_datum(),)),),
+            loss_fn="ppo",
+            loss_fn_config={"sampling_temperature": 0.7},
+        )
+    )
+    assert any(c[0] == "forward_backward" for c in backend.runtime.calls)
 
 
 @pytest.mark.parametrize("temperature", [None, 0.0, -1.0, float("nan"), float("inf")])

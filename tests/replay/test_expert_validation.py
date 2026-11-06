@@ -93,7 +93,7 @@ def test_parallel_padding_rows_are_allowed(runtime):
     rows = _rows([0, 7] * 4, alignment=8)
     _forward(runtime, rows)
     assert len(calls) == 1
-    assert rows[0][1]["routed_experts"]["values"][-4:] == [-1] * 4
+    assert rows[0][1]["routed_experts"]["values"][-4:].tolist() == [-1] * 4
 
 
 def test_bridge_installation_is_idempotent():
@@ -109,3 +109,38 @@ def test_bridge_installation_is_idempotent():
     assert str(routes.dtype) == "int32"
     assert routes.shape == (2, 2, 2)
     assert routes.reshape(-1).tolist() == [0, 7] * 4
+
+
+@pytest.mark.parametrize(
+    "frequency,values", [([0, 1], [0, 0, 2, 3] * 2), (2, [2, 3, 0, 0] * 2)]
+)
+def test_native_sampler_dense_slots_are_preserved_and_ignored(
+    runtime, frequency, values
+):
+    runtime, calls = runtime
+    runtime._args.moe_layer_freq = frequency
+    rows = _rows(values)
+    _forward(runtime, rows)
+    assert len(calls) == 1
+    assert rows[0][1]["routed_experts"]["values"].tolist() == values
+
+
+@pytest.mark.parametrize(
+    "bad,error",
+    [([8, 1], "expert count"), ([-1, 0], "entire top-k row"), ([0, 0], "distinct")],
+)
+def test_moe_routes_still_validated_with_zero_filled_dense_slots(runtime, bad, error):
+    runtime, calls = runtime
+    runtime._args.moe_layer_freq = [0, 1]
+    with pytest.raises(ValueError, match=error):
+        _forward(runtime, _rows([0, 0, *bad] * 2))
+    assert calls == []
+
+
+@pytest.mark.parametrize("frequency", [0, [1]])
+def test_invalid_moe_layout_never_reaches_trainer(runtime, frequency):
+    runtime, calls = runtime
+    runtime._args.moe_layer_freq = frequency
+    with pytest.raises(ValueError, match="moe_layer_freq"):
+        _forward(runtime, _rows([0, 1] * 4))
+    assert calls == []

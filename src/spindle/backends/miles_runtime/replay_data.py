@@ -16,19 +16,30 @@ def replay_row(inputs, targets: np.ndarray) -> dict:
     n = len(targets)
     for name in REPLAY_FIELDS & inputs.keys():
         tensor = inputs[name]
-        values = list(tensor.data)
         shape = list(tensor.shape or ())
-        if (
-            tensor.dtype != "int64"
-            or tensor.sparse_crow_indices is not None
-            or any(type(v) is not int for v in values)
-            or prod(shape) != len(values)
-        ):
+        # TensorData.data materializes a Python list on every access. Keep the
+        # SDK array throughout admission; older/list-backed inputs still work.
+        if tensor.dtype != "int64" or tensor.sparse_crow_indices is not None:
             raise ValueError(
                 f"{name} must be a dense int64 tensor with a matching shape"
             )
-        if any(
-            v < (-1 if name == "routed_experts" else 0) or v > 2**31 - 1 for v in values
+        if hasattr(tensor, "to_numpy"):
+            values = np.asarray(tensor.to_numpy()).reshape(-1)
+        else:
+            data = tensor.data
+            if any(type(value) is not int for value in data):
+                raise ValueError(
+                    f"{name} must be a dense int64 tensor with a matching shape"
+                )
+            values = np.asarray(data).reshape(-1)
+        integral = not values.size or values.dtype.kind in "iu"
+        if not integral or prod(shape) != values.size:
+            raise ValueError(
+                f"{name} must be a dense int64 tensor with a matching shape"
+            )
+        if values.size and (
+            values.min() < (-1 if name == "routed_experts" else 0)
+            or values.max() > 2**31 - 1
         ):
             raise ValueError(f"{name} values are outside the supported int32 range")
         if name == "routed_experts":
@@ -36,11 +47,13 @@ def replay_row(inputs, targets: np.ndarray) -> dict:
                 raise ValueError(
                     "routed_experts must have shape [input_tokens, layers, experts_per_token]"
                 )
-            row[name] = {"values": values, "shape": shape}
+            # Narrow only after range validation, with an owned snapshot of
+            # caller data. Miles consumes int32 routes directly.
+            row[name] = {"values": values.astype(np.int32), "shape": shape}
         else:
             if shape != [len(values)]:
                 raise ValueError(f"{name} must be one-dimensional")
-            row[name] = values
+            row[name] = values.tolist()
     ids, offsets = row.get("sampling_mask_ids"), row.get("sampling_mask_offsets")
     if (ids is None) != (offsets is None):
         raise ValueError(
@@ -69,7 +82,7 @@ def replay_row(inputs, targets: np.ndarray) -> dict:
 
 
 def validate_routed_experts(
-    slot_rows, *, num_layers: int, num_experts: int | None, topk: int
+    slot_rows, *, num_layers: int, num_experts: int | None, topk: int, moe_layer_freq=1
 ) -> None:
     """Check model-specific route constraints before dispatching to any GPU rank.
 
@@ -86,23 +99,39 @@ def validate_routed_experts(
             raise ValueError(
                 f"routed_experts must have {num_layers} layers and {topk} experts per token"
             )
-        values = routes["values"]
-        if any(expert >= num_experts for expert in values):
+        if moe_layer_freq is None:
+            moe_layer_freq = 1
+        if isinstance(moe_layer_freq, int):
+            if moe_layer_freq < 1:
+                raise ValueError("moe_layer_freq must be positive")
+            active_layers = np.arange(num_layers) % moe_layer_freq == 0
+        else:
+            active_layers = np.asarray(moe_layer_freq, dtype=bool)
+            if active_layers.shape != (num_layers,):
+                raise ValueError("moe_layer_freq must have num_layers entries")
+        if not active_layers.any():
+            raise ValueError("routed_experts requires an MoE model")
+        # SGLang leaves dense-layer slots zero-filled. They are not routes, and
+        # Miles selects only MoE streams using this same model layer layout.
+        # Validate one datum at a time to bound temporary memory on long batches.
+        values = np.asarray(routes["values"]).reshape(routes["shape"])
+        values = values[:, active_layers, :]
+        if np.any(values >= num_experts):
             raise ValueError(
                 f"routed_experts IDs must be below the model's expert count ({num_experts})"
             )
-        for offset in range(0, len(values), topk):
-            experts = values[offset : offset + topk]
-            if all(expert == -1 for expert in experts):
-                continue
-            if -1 in experts:
-                raise ValueError(
-                    "routed_experts padding must fill the entire top-k row with -1"
-                )
-            if len(set(experts)) != topk:
-                raise ValueError(
-                    "routed_experts IDs must be distinct within each top-k row"
-                )
+        padding = values == -1
+        fully_padded = padding.all(axis=-1)
+        if np.any(padding.any(axis=-1) & ~fully_padded):
+            raise ValueError(
+                "routed_experts padding must fill the entire top-k row with -1"
+            )
+        sorted_values = np.sort(values, axis=-1)
+        duplicates = (sorted_values[..., 1:] == sorted_values[..., :-1]).any(axis=-1)
+        if np.any(duplicates & ~fully_padded):
+            raise ValueError(
+                "routed_experts IDs must be distinct within each top-k row"
+            )
 
 
 def add_replay_to_train_data(train_data: dict, datums: list[dict]) -> None:

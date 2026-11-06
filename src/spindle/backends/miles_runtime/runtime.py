@@ -132,6 +132,7 @@ class MilesRuntime:
                 num_layers=self._args.num_layers,
                 num_experts=self._args.num_experts,
                 topk=self._args.moe_router_topk,
+                moe_layer_freq=getattr(self._args, "moe_layer_freq", 1),
             )
         unit_id = next(self._unit_ids)
         method = (
