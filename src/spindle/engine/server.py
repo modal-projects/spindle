@@ -22,6 +22,7 @@ from .api import (
     FutureState,
     FutureStatus,
     OperationKind,
+    command_error,
 )
 from .ingress import decode_forward_backward, decode_json_operation
 from .operations import (
@@ -139,6 +140,7 @@ class Engine:
         sampler_persistence_concurrency: int = 1,
         max_forward_backward_batch: int | None = None,
         max_forward_backward_models: int | None = None,
+        overlap_optimizer_step: bool = False,
     ) -> None:
         if sampler_persistence_concurrency < 1:
             raise ValueError("sampler_persistence_concurrency must be positive")
@@ -148,6 +150,11 @@ class Engine:
             raise ValueError("max_forward_backward_batch must be positive")
         if max_forward_backward_models is not None and max_forward_backward_models < 1:
             raise ValueError("max_forward_backward_models must be positive")
+        if overlap_optimizer_step and not callable(
+            getattr(executor, "execute_optimizer_group", None)
+        ):
+            raise ValueError("executor does not support optimizer overlap")
+        self.overlap_optimizer_step = overlap_optimizer_step
         self.executor = executor
         self.observer = observer
         self._persistence_active: dict[str, int] = {}
@@ -486,17 +493,33 @@ class Engine:
                 await self._capture_for_persistence(operation)
                 continue
             models = tuple(dict.fromkeys(item.model_id for item in operations))
-            self._observe_state(models, f"executing:{operation.kind.value}")
+            grouped = operation.kind == OperationKind.OPTIM_STEP and len(operations) > 1
+            name = "optimizer_group" if grouped else operation.kind.value
+            self._observe_state(models, f"executing:{name}")
             if operation.kind == OperationKind.LOAD_WEIGHTS:
                 await self._join_persistence()
             mark(
                 "engine.op.exec_begin",
-                kind=operation.kind.value,
+                kind=name,
                 request_ids=[item.request_id for item in operations],
             )
             started = time.time()
             try:
-                if operation.kind in BATCHED_OPERATIONS:
+                if grouped:
+                    results = await self.executor.execute_optimizer_group(
+                        tuple(
+                            Command(
+                                item.model_id,
+                                item.kind,
+                                item.payload,
+                                item.encoded_payload,
+                            )
+                            for item in operations
+                        )
+                    )
+                    if len(results) != len(operations):
+                        raise RuntimeError("executor returned the wrong result count")
+                elif operation.kind in BATCHED_OPERATIONS:
                     results = await self._execute_batch(operations)
                 else:
                     results = (
@@ -507,17 +530,19 @@ class Engine:
                         ),
                     )
                 states = tuple(
-                    FutureState(FutureStatus.COMPLETE, result=result)
+                    FutureState(FutureStatus.FAILED, error=error)
+                    if (error := command_error(result)) is not None
+                    else FutureState(FutureStatus.COMPLETE, result=result)
                     for result in results
                 )
                 mark(
                     "engine.op.exec_end",
-                    kind=operation.kind.value,
+                    kind=name,
                     request_ids=[item.request_id for item in operations],
-                    ok=True,
+                    ok=all(state.status == FutureStatus.COMPLETE for state in states),
                 )
             except Exception as exc:  # noqa: BLE001
-                error = _failure(exc, f"{operation.kind.value} x{len(operations)}")
+                error = _failure(exc, f"{name} x{len(operations)}")
                 if operation.kind == OperationKind.FORWARD and len(operations) > 1:
                     # Forwards change no state: retry alone so one client's bad
                     # input does not fail the others it was batched with.
@@ -531,13 +556,13 @@ class Engine:
                     )
                 mark(
                     "engine.op.exec_end",
-                    kind=operation.kind.value,
+                    kind=name,
                     request_ids=[item.request_id for item in operations],
                     ok=False,
                 )
             self._observe_span(
                 models,
-                operation.kind.value,
+                name,
                 "gpu",
                 started,
                 seq_ids=[item.seq_id for item in operations],
@@ -549,7 +574,7 @@ class Engine:
                     self._finish(item, state)
             mark(
                 "engine.op.finished",
-                kind=operation.kind.value,
+                kind=name,
                 request_ids=[item.request_id for item in operations],
             )
 
@@ -816,6 +841,17 @@ class Engine:
             )
         )
 
+        if self.overlap_optimizer_step and ready[0].kind == OperationKind.OPTIM_STEP:
+            optimizers = [
+                item for item in ready if item.kind == OperationKind.OPTIM_STEP
+            ]
+            forwards = [item for item in ready if item.kind in BATCHED_OPERATIONS]
+            if len(optimizers) > 1 or forwards:
+                batched = self._batch_forward_backward(forwards) if forwards else ()
+                return (*optimizers, *batched)
+        return self._batch_forward_backward(ready)
+
+    def _batch_forward_backward(self, ready: list[Operation]) -> tuple[Operation, ...]:
         selected = [ready[0]]
         if ready[0].kind in BATCHED_OPERATIONS:
             limit = self.max_forward_backward_batch

@@ -147,6 +147,7 @@ def run_engine_with_backend(
     sampler_persistence_concurrency: int = 1,
     max_forward_backward_batch: int | None = None,
     max_forward_backward_models: int | None = None,
+    overlap_optimizer_step: bool = False,
     startup_timeout: float = BACKEND_STARTUP_TIMEOUT,
     operation_timeout: float = BACKEND_OPERATION_TIMEOUT,
     notify_reconciler: bool = True,
@@ -227,6 +228,7 @@ def run_engine_with_backend(
                                 sampler_persistence_concurrency=sampler_persistence_concurrency,
                                 max_forward_backward_batch=max_forward_backward_batch,
                                 max_forward_backward_models=max_forward_backward_models,
+                                overlap_optimizer_step=overlap_optimizer_step,
                             )
                     except httpx.TransportError:
                         pass

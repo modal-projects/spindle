@@ -12,7 +12,7 @@ import struct
 from collections.abc import Iterable
 
 import numpy as np
-from tinker import ModelInput
+from tinker import AdamParams, ModelInput
 from tinker.types._pydantic_types.datum import Datum
 from tinker.types._pydantic_types.tensor_data import TensorData
 from tinker.types.encoded_text_chunk import EncodedTextChunk
@@ -21,7 +21,7 @@ from tinker.types.forward_backward_input import ForwardBackwardInput
 from spindle.encoding import canonical_json
 from spindle.proto.responses import EncodedResult, encode_forward_backward_exact
 
-from .api import BATCHED_OPERATIONS, Command, OperationKind
+from .api import BATCHED_OPERATIONS, Command, OperationKind, split_optimizer_group
 
 TRAINING_BATCH_CONTENT_TYPE = "application/vnd.spindle.training.v1"
 FORWARD_RESULTS_CONTENT_TYPE = "application/vnd.spindle.forward-results.v1"
@@ -212,6 +212,42 @@ def decode_batch(body: bytes) -> tuple[Command, ...]:
         )
         for i in range(1, len(parts), 2)
     )
+
+
+def encode_optimizer_group(commands: tuple[Command, ...]) -> bytes:
+    optimizers, forwards = split_optimizer_group(commands)
+    metadata = canonical_json(
+        {
+            "optimizers": [
+                {
+                    "model_id": item.model_id,
+                    "adam": item.payload.model_dump(mode="json", exclude_unset=True),
+                }
+                for item in optimizers
+            ]
+        }
+    ).encode()
+    parts = [metadata]
+    if forwards:
+        parts.append(encode_batch(forwards))
+    return _bundle(parts)
+
+
+def decode_optimizer_group(body: bytes) -> tuple[Command, ...]:
+    parts = _parts(body)
+    if len(parts) not in (1, 2):
+        raise ValueError("invalid optimizer group")
+    metadata = json.loads(bytes(parts[0]))
+    optimizers = tuple(
+        Command(
+            item["model_id"],
+            OperationKind.OPTIM_STEP,
+            AdamParams.model_validate(item["adam"]),
+        )
+        for item in metadata["optimizers"]
+    )
+    forwards = decode_batch(bytes(parts[1])) if len(parts) == 2 else ()
+    return (*optimizers, *forwards)
 
 
 def encode_results(results: tuple[object, ...], telemetry: dict | None = None) -> bytes:

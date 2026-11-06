@@ -971,3 +971,56 @@ def test_a_capture_short_of_a_nodes_shards_is_refused(monkeypatch, tmp_path):
 )
 def test_hf_targets_match_tinker_training_flags(targets, expected):
     assert lora_target_flags(targets) == expected
+
+
+def test_optimizer_group_isolates_failures_and_preserves_accumulation(tmp_path):
+    class Runtime(FakeMilesRuntime):
+        failing_slot = None
+
+        def optim_step_group(self, rows, *, adam_params_by_slot, **kwargs):
+            assert set(adam_params_by_slot).isdisjoint(slot for slot, _ in rows)
+            outputs = self.forward_backward(rows, **kwargs) if rows else []
+            outcomes = self.optim_step(adam_params_by_slot)
+            if self.failing_slot in outcomes:
+                outcomes[self.failing_slot] = {"error": "boom"}
+            return outputs, outcomes
+
+    runtime = Runtime()
+    backend = MilesCommandBackend(
+        _config(max_lora_slots=3),
+        checkpoint_dir=tmp_path,
+        capture_dir=tmp_path,
+        base_model="Qwen/Qwen3-4B",
+        runtime=runtime,
+    )
+    for model in ("a", "b", "c"):
+        backend.accept_model(model, _spec())
+    batches = {
+        model: ForwardBatch(
+            items=(ForwardItem(model, (_datum([1, 2], 3),)),), loss_fn="cross_entropy"
+        )
+        for model in ("a", "b", "c")
+    }
+    backend.forward_backward(batches["a"])
+    backend.forward_backward(batches["c"])
+    runtime.failing_slot = backend.job_to_slot["c"]
+    (output_a, output_c), outputs = backend.optim_step_group(
+        (("a", AdamParams()), ("c", AdamParams(learning_rate=0.5))), batches["b"]
+    )
+    assert output_a.metrics["update_successful:mean"] == 1.0
+    assert output_c == "Miles optimizer failed for c: boom"
+    assert len(outputs) == 1
+    assert runtime.calls[-1][1][backend.job_to_slot["c"]]["learning_rate"] == 0.5
+    assert backend.jobs["a"].optimizer_step == 1
+    assert backend.jobs["c"].optimizer_step == 0
+    assert not backend.jobs["a"].accumulating
+    assert not backend.jobs["c"].accumulating
+    assert backend.jobs["b"].accumulating
+    assert backend.jobs["b"].optimizer_step == 0
+    with pytest.raises(ValueError, match="disjoint"):
+        backend.optim_step_group((("b", AdamParams()),), batches["b"])
+    runtime.failing_slot = None
+    (output_b,), outputs = backend.optim_step_group((("b", AdamParams()),), None)
+    assert output_b.metrics["update_successful:mean"] == 1.0
+    assert outputs == ()
+    assert backend.jobs["b"].optimizer_step == 1

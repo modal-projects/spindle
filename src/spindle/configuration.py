@@ -48,6 +48,7 @@ class BaseConfig:
     trainer_max_clients_per_instance = 1
     # Clients whose forward_backward requests may share one trainer call; None packs all.
     trainer_max_clients_per_batch = None
+    trainer_overlap_optimizer_step = False
     trainer_timeout_s = 86400
     trainer_env = {}
     # A name from TRAINER_IMAGES in spindle.providers.modal.deployment_apps; empty uses the default.

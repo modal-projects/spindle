@@ -79,6 +79,10 @@ def backend_config(spec, asset_path="/assets/pending"):
         and spec.trainer_max_clients_per_batch < 1
     ):
         raise ValueError("trainer_max_clients_per_batch must be positive")
+    if spec.trainer_overlap_optimizer_step and (
+        spec.backend != "miles" or spec.parameterization != "lora"
+    ):
+        raise ValueError("trainer_overlap_optimizer_step requires Miles LoRA")
     if spec.backend == "megatron":
         if spec.trainer_nodes != 1:
             raise ValueError("multi-node training currently requires Miles")

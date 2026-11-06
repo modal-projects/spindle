@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from spindle.backends.miles_runtime import runtime as miles_runtime
+from spindle.backends.miles_runtime.optimizer_overlap import REMOTE_FAILURE
 from spindle.backends.miles_runtime.runtime import (
     MilesRuntime,
     _allow_allgather_cp_bshd_multi_lora,
@@ -222,7 +223,8 @@ def test_allgather_cp_guard_is_skipped_only_for_bshd(allgather_cp, qkv_format, s
     assert args.allgather_cp is allgather_cp
 
 
-def test_array_bridge_keeps_the_miles_contract(monkeypatch):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_array_bridge_keeps_the_miles_contract(monkeypatch, overlap):
     """Rows go to the workers as arrays (RL fields as tensors, which Miles
     slices per context-parallel rank) and come back ordered by sample index."""
 
@@ -293,8 +295,32 @@ def test_array_bridge_keeps_the_miles_contract(monkeypatch):
             },
         ),
     ]
-    bridge = _array_bridge(SimpleNamespace(forward_backward=forward_backward))
-    outputs = asyncio.run(bridge._execute_batch("forward_backward", 1, rows, "ppo", {}))
+
+    async def execute_slots(
+        method, *, adam_params_by_slot, batch_id, rollout_data_ref, forward_only
+    ):
+        assert method == "optim_step_group"
+        assert not forward_only
+        result = await forward_backward(batch_id=batch_id, data_ref=rollout_data_ref)
+        outcomes = [
+            {2: {"grad_norm": 0.5}, 3: {"error": REMOTE_FAILURE}},
+            {2: {"grad_norm": 0.5}, 3: {"error": "RuntimeError: boom"}},
+        ]
+        return [
+            dict(item, optimizer_outcomes=outcome)
+            for item, outcome in zip(result, outcomes, strict=True)
+        ]
+
+    bridge = _array_bridge(
+        SimpleNamespace(forward_backward=forward_backward, _execute_slots=execute_slots)
+    )
+    kwargs = {"adam_params_by_slot": {2: {}, 3: {}}} if overlap else {}
+    outputs = asyncio.run(
+        bridge._execute_batch("forward_backward", 1, rows, "ppo", {}, **kwargs)
+    )
+    if overlap:
+        outputs, outcomes = outputs
+        assert outcomes == {2: {"grad_norm": 0.5}, 3: {"error": "RuntimeError: boom"}}
 
     (sent,) = store.values
     assert [mask.tolist() for mask in sent["loss_masks"]] == [[1, 1, 1], [1, 1]]

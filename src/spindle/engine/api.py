@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
+from tinker import AdamParams
+
 if TYPE_CHECKING:
     from .operations import OperationPayload
 
@@ -102,6 +104,43 @@ async def submit_json_operation(
             raise ValueError(f"{kind.value} is not a JSON operation")
 
 
+FAILED_COMMAND = "failed_command"
+
+
+def command_failure(error: str) -> dict[str, str]:
+    return {FAILED_COMMAND: error}
+
+
+def command_error(result: object) -> str | None:
+    if isinstance(result, dict) and isinstance(result.get(FAILED_COMMAND), str):
+        return result[FAILED_COMMAND]
+    return None
+
+
+def split_optimizer_group(
+    executions: tuple[Command, ...],
+) -> tuple[tuple[Command, ...], tuple[Command, ...]]:
+    """Split a group into its leading optimizer steps and the forward batch."""
+    optimizers = tuple(
+        item for item in executions if item.kind == OperationKind.OPTIM_STEP
+    )
+    forwards = executions[len(optimizers) :]
+    if not optimizers or len(optimizers) + len(forwards) < 2:
+        raise ValueError(
+            "optimizer group requires optimizer steps and forward commands"
+        )
+    if any(item.kind == OperationKind.OPTIM_STEP for item in forwards):
+        raise ValueError("optimizer steps must lead the group")
+    if any(not isinstance(item.payload, AdamParams) for item in optimizers):
+        raise TypeError("optim_step requires an optimizer payload")
+    model_ids = [item.model_id for item in optimizers]
+    if len(set(model_ids)) != len(model_ids):
+        raise ValueError("optimizer group contains duplicate adapters")
+    if any(item.model_id in model_ids for item in forwards):
+        raise ValueError("optimizer and forward batch must use different adapters")
+    return optimizers, forwards
+
+
 class Executor(Protocol):
     async def accept_model(self, model_id: str, spec: object) -> None: ...
 
@@ -116,6 +155,13 @@ class Executor(Protocol):
         self,
         executions: tuple[Command, ...],
     ) -> tuple[object, ...]: ...
+
+    async def execute_optimizer_group(
+        self, executions: tuple[Command, ...]
+    ) -> tuple[object, ...]:
+        """Run the leading optimizer steps and the disjoint forward batch in
+        one command; a slot's failure is returned with ``command_failure``."""
+        ...
 
     async def capture_snapshot(
         self,

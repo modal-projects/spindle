@@ -256,6 +256,7 @@ def run_trainer(deployment, instance_id, platform=None):
         max_models=recipe.trainer_max_clients_per_instance,
         sampler_persistence_concurrency=recipe.sampler_persistence_concurrency,
         max_forward_backward_models=recipe.trainer_max_clients_per_batch,
+        overlap_optimizer_step=recipe.trainer_overlap_optimizer_step,
         on_startup_error=failed,
     )
 

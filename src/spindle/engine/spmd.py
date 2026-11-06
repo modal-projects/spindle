@@ -20,7 +20,13 @@ from spindle.backends.contract import (
     ModelSpec,
 )
 
-from .api import BATCHED_OPERATIONS, Command, OperationKind
+from .api import (
+    BATCHED_OPERATIONS,
+    Command,
+    OperationKind,
+    command_failure,
+    split_optimizer_group,
+)
 from .operations import (
     LoadCheckpointPayload,
     OperationPayload,
@@ -154,6 +160,19 @@ class DistributedExecutor:
         self,
         executions: tuple[Command, ...],
     ) -> tuple[object, ...]:
+        batch = self._forward_batch(executions)
+        outputs = await asyncio.to_thread(
+            self._dispatch,
+            self.command_group,
+            "forward_backward",
+            (batch,),
+        )
+        if len(outputs) != len(executions):
+            raise RuntimeError("backend returned the wrong result count")
+        return tuple(_serialize_forward_output(output) for output in outputs)
+
+    @staticmethod
+    def _forward_batch(executions: tuple[Command, ...]) -> ForwardBatch:
         if not executions:
             raise ValueError("forward_backward batch cannot be empty")
         kind = executions[0].kind
@@ -175,7 +194,7 @@ class DistributedExecutor:
         ):
             raise ValueError("forward_backward batch has incompatible losses")
 
-        batch = ForwardBatch(
+        return ForwardBatch(
             items=tuple(
                 ForwardItem(
                     execution.model_id,
@@ -191,15 +210,29 @@ class DistributedExecutor:
             loss_fn_config=loss_fn_config,
             forward_only=kind == OperationKind.FORWARD,
         )
-        outputs = await asyncio.to_thread(
+
+    async def execute_optimizer_group(
+        self, executions: tuple[Command, ...]
+    ) -> tuple[object, ...]:
+        optimizers, forwards = split_optimizer_group(executions)
+        batch = self._forward_batch(forwards) if forwards else None
+        outputs, forwards_output = await asyncio.to_thread(
             self._dispatch,
             self.command_group,
-            "forward_backward",
-            (batch,),
+            "optim_step_group",
+            (tuple((item.model_id, item.payload) for item in optimizers), batch),
         )
-        if len(outputs) != len(executions):
+        if len(outputs) != len(optimizers) or len(forwards_output) != len(forwards):
             raise RuntimeError("backend returned the wrong result count")
-        return tuple(_serialize_forward_output(output) for output in outputs)
+        return (
+            *(
+                command_failure(output)
+                if isinstance(output, str)
+                else output.model_dump(mode="json")
+                for output in outputs
+            ),
+            *(_serialize_forward_output(item) for item in forwards_output),
+        )
 
     async def capture_snapshot(
         self,

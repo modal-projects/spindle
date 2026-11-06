@@ -48,6 +48,63 @@ command, opportunistically batching compatible ready requests. `forward_backward
 grouped and their variable-length sequences packed under the backend's token
 budget.
 
+Set `trainer_overlap_optimizer_step=True` in a Miles LoRA recipe to let the
+scheduler group every ready optimizer step (one per adapter) with a compatible
+forward or forward/backward batch for other adapters. The setting is
+experimental and disabled by default. The stock Tinker API is unchanged: submit
+each adapter's operations in order without waiting for unrelated adapters'
+futures.
+
+The group is dispatched as one command to all trainer ranks. One staging round
+gives every slot in the group copies of its gradients and weights, so backward
+can reset shared gradient buffers and routed kernels read stable weights from
+every slot. Each slot's optimizer runs its own `apply_adam_params`,
+`prepare_grads`, `clip_and_step` and `zero_grads`; the step math is enqueued
+round-robin on a pool of side CUDA streams (`SPINDLE_OPTIMIZER_STREAMS` in the
+trainer environment, default 4) while the forward/backward batch runs on the
+compute stream. After the batch returns and the side streams drain, the updated
+weights are copied back in one round and the parameters of every stepped slot
+are all-gathered in ascending slot order.
+
+Collectives follow one rule: Spindle issues every collective from the actor
+thread in ascending slot order, which is the same on every rank. For each slot
+in turn, the gradient-norm reduction inside `clip_and_step` finishes before the
+forward starts, then a one-element all-reduce agrees whether that slot's step
+failed on any rank; the all-gathers after the batch use the same order. A slot's
+`clip_and_step` runs with its side stream current, so the norm reduction and any
+collective the optimizer's own step issues (for example tensor-parallel gathers
+of sharded factors) are enqueued while that stream is current. That only sets
+what the collective waits on: a PyTorch process group runs its collectives on
+one internal stream in issue order, so the side streams cannot reorder them and
+every rank sees the same sequence. The norm reduction syncs the host, so a
+slot's step kernels are enqueued after its own reduction and overlap the next
+slot's reduction and the batch, not their own.
+
+When every optimizer in the group has the same class and that class defines
+`step_many`, the runtime calls `step_many(requests)` once instead of the
+per-slot loop. `requests` are `(optimizer, adam_params)` pairs in ascending
+slot order and the call returns one outcome per pair; it must issue its
+collectives in that order on every rank. The call runs on the first side
+stream, and an exception fails every slot of the group. Spindle only checks for
+the method; which slots a Miles optimizer family can batch is Miles' decision.
+`patches/miles-step-many.patch` adds `step_many` to Miles' `SlotOptimizer` for the
+pinned Miles commits: one all-reduce carries every slot's squared gradient norm,
+then each slot clips and steps with the sequential per-slot math.
+
+A slot whose step raises fails only that adapter's future; the other slots
+commit and the batch returns its outputs. The failed slot keeps its previous
+weights and drops its accumulated gradients, but its optimizer state may be
+partially updated, so load a checkpoint before training that adapter further. A
+rank-local failure raised before the slot's gradient-norm reduction leaves the
+ranks with different collective sequences; the trainer's watchdog then fails
+the cell, as the serial loop does today.
+
+Later commands, snapshots, and unloads wait for the whole group. Every future
+in the group resolves after it completes. This groups already queued work; it
+does not admit new work into an executing group or overlap an adapter's update
+with its own forward/backward. GPU latency and multi-rank behavior require
+validation before enabling the setting in a deployment.
+
 The engine exposes the command protocol in
 [`engine/api.py`](../src/spindle/engine/api.py). Its scheduler and future handling
 live in [`engine/server.py`](../src/spindle/engine/server.py).

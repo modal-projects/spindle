@@ -162,8 +162,12 @@ class MilesCommandBackend(Backend):
         self,
         batch: ForwardBatch,
     ) -> tuple[ForwardBackwardOutput, ...]:
+        outputs, _ = self._forward_backward(batch)
+        return outputs
+
+    def _forward_backward(self, batch: ForwardBatch, *, adam_params_by_slot=None):
         if not batch.items:
-            return ()
+            return (), None
         self._require_jobs(tuple(item.model_id for item in batch.items))
         step = self.jobs[batch.items[0].model_id].optimizer_step
         if (
@@ -202,7 +206,13 @@ class MilesCommandBackend(Backend):
                     raise ValueError(
                         "sampling replay requires a positive finite sampling_temperature in loss_fn_config"
                     )
-        phase_name = "forward_only" if batch.forward_only else "forward_backward"
+        phase_name = (
+            "optimizer_group"
+            if adam_params_by_slot is not None
+            else "forward_only"
+            if batch.forward_only
+            else "forward_backward"
+        )
         started = time.perf_counter()
         with (
             self._timer.phase(phase_name, step, model_id=batch.items[0].model_id),
@@ -212,12 +222,18 @@ class MilesCommandBackend(Backend):
                 prepared.slot_rows,
                 self.config.data_parallel_size,
             )
-            raw_outputs = self.runtime.forward_backward(
-                slot_rows,
+            arguments = dict(
                 loss_fn=str(batch.loss_fn),
                 loss_fn_config=dict(batch.loss_fn_config),
                 forward_only=batch.forward_only,
             )
+            outcomes = None
+            if adam_params_by_slot is None:
+                raw_outputs = self.runtime.forward_backward(slot_rows, **arguments)
+            else:
+                raw_outputs, outcomes = self.runtime.optim_step_group(
+                    slot_rows, adam_params_by_slot=adam_params_by_slot, **arguments
+                )
         self._first(
             f"first_{phase_name}_done",
             duration_s=round(time.perf_counter() - started, 3),
@@ -228,7 +244,7 @@ class MilesCommandBackend(Backend):
             for item in batch.items:
                 self.jobs[item.model_id].accumulating = True
         with self._timer.phase("build_outputs", step, model_id=batch.items[0].model_id):
-            return build_outputs(batch, prepared, raw_outputs)
+            return build_outputs(batch, prepared, raw_outputs), outcomes
 
     def optim_step(
         self,
@@ -237,16 +253,7 @@ class MilesCommandBackend(Backend):
     ) -> tuple[OptimStepResponse, ...]:
         if not model_ids:
             return ()
-        if len(set(model_ids)) != len(model_ids):
-            raise ValueError("optim_step contains duplicate model ids")
-        self._require_jobs(model_ids)
-        for model_id in model_ids:
-            if not self.jobs[model_id].accumulating:
-                raise ValueError(f"model {model_id} has no accumulated gradients")
-        parameters = _adam_parameters(adam)
-        by_slot = {
-            self.job_to_slot[model_id]: parameters.copy() for model_id in model_ids
-        }
+        by_slot = self._optimizer_parameters(model_ids, adam)
         step = self.jobs[model_ids[0]].optimizer_step
         started = time.perf_counter()
         with (
@@ -259,6 +266,61 @@ class MilesCommandBackend(Backend):
             duration_s=round(time.perf_counter() - started, 3),
             step=step,
         )
+        return self._optimizer_outputs(model_ids, outcomes, step)
+
+    def _optimizer_parameters(self, model_ids, adam):
+        if len(set(model_ids)) != len(model_ids):
+            raise ValueError("optim_step contains duplicate model ids")
+        self._require_jobs(model_ids)
+        for model_id in model_ids:
+            if not self.jobs[model_id].accumulating:
+                raise ValueError(f"model {model_id} has no accumulated gradients")
+        parameters = _adam_parameters(adam)
+        return {self.job_to_slot[model_id]: parameters.copy() for model_id in model_ids}
+
+    def optim_step_group(
+        self,
+        optimizers: tuple[tuple[str, AdamParams], ...],
+        batch: ForwardBatch | None,
+    ) -> tuple[tuple[OptimStepResponse | str, ...], tuple[ForwardBackwardOutput, ...]]:
+        """Step every adapter in ``optimizers`` while ``batch`` runs for others.
+
+        A failed slot comes back as its error message instead of a response.
+        """
+        model_ids = tuple(model_id for model_id, _ in optimizers)
+        if len(set(model_ids)) != len(model_ids):
+            raise ValueError("optimizer group contains duplicate adapters")
+        if batch is not None and any(
+            item.model_id in model_ids for item in batch.items
+        ):
+            raise ValueError("optimizer group requires a disjoint forward batch")
+        by_slot = {}
+        for model_id, adam in optimizers:
+            by_slot.update(self._optimizer_parameters((model_id,), adam))
+        step = self.jobs[model_ids[0]].optimizer_step
+        if batch is not None and batch.items:
+            outputs, outcomes = self._forward_backward(
+                batch, adam_params_by_slot=by_slot
+            )
+        else:
+            outputs = ()
+            with (
+                self._timer.phase("optimizer_group", step, model_id=model_ids[0]),
+                self._record("spindle/optimizer_group"),
+            ):
+                _, outcomes = self.runtime.optim_step_group(
+                    [],
+                    adam_params_by_slot=by_slot,
+                    loss_fn=None,
+                    loss_fn_config=None,
+                    forward_only=False,
+                )
+        optimizer_outputs = self._optimizer_outputs(
+            model_ids, outcomes, step, isolate_failures=True
+        )
+        return optimizer_outputs, outputs
+
+    def _optimizer_outputs(self, model_ids, outcomes, step, *, isolate_failures=False):
         timing_metrics = self._timer.metrics_for_step(step)
         self._timer.pop_step(step)
         outputs = []
@@ -268,9 +330,11 @@ class MilesCommandBackend(Backend):
             slot = self.job_to_slot[model_id]
             outcome = outcomes[slot]
             if "error" in outcome:
-                raise BackendFailed(
-                    f"Miles optimizer failed for {model_id}: {outcome['error']}"
-                )
+                message = f"Miles optimizer failed for {model_id}: {outcome['error']}"
+                if isolate_failures:
+                    outputs.append(message)
+                    continue
+                raise BackendFailed(message)
             successful = "grad_norm" in outcome
             if not successful and "skipped_nonfinite" not in outcome:
                 raise BackendFailed(f"unexpected Miles optimizer outcome: {outcome}")

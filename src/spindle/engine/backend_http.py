@@ -29,8 +29,10 @@ from .training_transport import (
     FORWARD_RESULTS_CONTENT_TYPE,
     TRAINING_BATCH_CONTENT_TYPE,
     decode_batch,
+    decode_optimizer_group,
     decode_results,
     encode_batch,
+    encode_optimizer_group,
     encode_results,
 )
 
@@ -166,6 +168,15 @@ def create_backend_app(
             in request.headers.get("accept", ""),
         )
 
+    @app.post("/execute_optimizer_group")
+    async def execute_optimizer_group(request: Request) -> Response:
+        commands = await asyncio.to_thread(decode_optimizer_group, await request.body())
+        return await run(
+            executor.execute_optimizer_group(commands),
+            path="/execute_optimizer_group",
+            binary_results=True,
+        )
+
     @app.post("/capture_snapshot")
     async def capture_snapshot(body: SnapshotBody) -> JSONResponse:
         return await run(
@@ -253,6 +264,18 @@ class HttpBackendClient:
         encoded = await asyncio.to_thread(encode_batch, executions)
         result = await self._post(
             "/execute_forward_backward_batch",
+            encoded,
+            content_type=TRAINING_BATCH_CONTENT_TYPE,
+            accept=FORWARD_RESULTS_CONTENT_TYPE,
+        )
+        return tuple(result)
+
+    async def execute_optimizer_group(
+        self, executions: tuple[Command, ...]
+    ) -> tuple[object, ...]:
+        encoded = await asyncio.to_thread(encode_optimizer_group, executions)
+        result = await self._post(
+            "/execute_optimizer_group",
             encoded,
             content_type=TRAINING_BATCH_CONTENT_TYPE,
             accept=FORWARD_RESULTS_CONTENT_TYPE,

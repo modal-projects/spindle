@@ -1131,3 +1131,10 @@ async def test_a_concurrent_add_under_the_same_name_is_a_conflict():
         await routes.add(
             await routes.build(DeploymentRequest(name="variant", base=base.name))
         )
+
+
+def test_optimizer_overlap_changes_only_trainer_identity():
+    base = resolved()
+    overlap = resolved(trainer_overlap_optimizer_step=True)
+    assert overlap.trainer_identity() != base.trainer_identity()
+    assert overlap.inference_identity() == base.inference_identity()

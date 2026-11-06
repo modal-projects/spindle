@@ -19,11 +19,13 @@ class LocalEnginePlatform:
         *,
         max_models: int = 8,
         revision: str | None = None,
+        overlap_optimizer_step: bool = False,
     ) -> None:
         self.definition_id = definition_id
         self.executor_factory = executor_factory
         self.max_models = max_models
         self.revision = revision
+        self.overlap_optimizer_step = overlap_optimizer_step
         self._instances: dict[str, EngineInstance] = {}
         self._servers: dict[str, Engine] = {}
         self._current: str | None = None
@@ -123,5 +125,6 @@ class LocalEnginePlatform:
         self._servers[instance.instance_id] = Engine(
             self.executor_factory(),
             max_models=self.max_models,
+            overlap_optimizer_step=self.overlap_optimizer_step,
         )
         return instance

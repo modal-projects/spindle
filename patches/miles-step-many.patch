@@ -1,0 +1,197 @@
+Add SlotOptimizer.step_many: step several LoRA slots with one gradient-norm all-reduce
+
+Applies to modal-projects/miles at fdd808c008175d4895fd8c57c95ef4fa5bb6a2a0 (spindle-miles)
+and f2f8447c33ac0755a0988c30d413d334dea0a26a (spindle-miles-v0.1.2); the touched files are
+identical on both. Apply with `git apply patches/miles-step-many.patch` from the Miles root.
+
+Spindle's optimizer overlap calls `SlotOptimizer.step_many(requests)` when every slot
+optimizer in a group shares a class that defines it; the per-slot math is the sequential
+`clip_and_step` math and only the norm reduction is shared.
+---
+diff --git a/miles/backends/megatron_utils/lora/optimizer.py b/miles/backends/megatron_utils/lora/optimizer.py
+index 514c77200..c25edb26a 100644
+--- a/miles/backends/megatron_utils/lora/optimizer.py
++++ b/miles/backends/megatron_utils/lora/optimizer.py
+@@ -9,10 +9,12 @@ idempotent."""
+ import logging
+ import math
+ from argparse import Namespace
++from collections.abc import Sequence
+ from contextlib import contextmanager
+ from dataclasses import fields
+ 
+ import torch
++import torch.distributed as dist
+ from megatron.core.optimizer import get_megatron_optimizer
+ from megatron.core.optimizer.clip_grads import clip_grad_by_total_norm_fp32, get_grad_norm_fp32
+ from megatron.core.optimizer.layer_wise_optimizer import LayerWiseDistributedOptimizer
+@@ -146,15 +148,42 @@ class SlotOptimizer:
+     def clip_and_step(self, clip_grad: float) -> dict:
+         """-> {"grad_norm": x} stepped, {"skipped_nonfinite": 1.0} dropped.
+         Collective: the slot's grad norm is all-reduced over the world."""
++        grads_for_norm, _ = self._grads_and_params()
++        slot_norm = get_grad_norm_fp32(grads_for_norm, grad_stats_parallel_group=None)
++        return self._clip_and_step_with_norm(clip_grad, slot_norm)
++
++    @classmethod
++    def step_many(cls, requests: Sequence[tuple["SlotOptimizer", dict]]) -> list[dict]:
++        """Step several slots with one gradient-norm all-reduce instead of one per slot.
++
++        ``requests`` are ``(slot_optimizer, adam_params)`` pairs in ascending slot
++        order on every rank. Gradients are prepared for every slot, the squared
++        norms of all slots are reduced in one collective, then each slot clips and
++        steps without further collectives. Per-slot math is the sequential
++        ``clip_and_step`` math; the hyperparameters stay per slot."""
++        for optimizer, adam_params in requests:
++            optimizer.apply_adam_params(adam_params)
++            optimizer.prepare_grads()
++        norms = _reduced_slot_norms([optimizer._grads_and_params()[0] for optimizer, _ in requests])
++        outcomes = []
++        for (optimizer, adam_params), slot_norm in zip(requests, norms, strict=True):
++            outcomes.append(optimizer._clip_and_step_with_norm(adam_params["grad_clip_norm"], slot_norm))
++            optimizer.zero_grads()
++        return outcomes
++
++    def _grads_and_params(self) -> tuple[list[torch.Tensor], list[torch.nn.Parameter]]:
+         grads_for_norm = []
+         slot_params = []
+         for child in self._inner.chained_optimizers:
+             grads_for_norm += child.get_grads_for_grad_norm()
+             slot_params += child.get_parameters()
+-        slot_norm = get_grad_norm_fp32(grads_for_norm, grad_stats_parallel_group=None)
++        return grads_for_norm, slot_params
++
++    def _clip_and_step_with_norm(self, clip_grad: float, slot_norm: float) -> dict:
+         # BF16 has no grad scaler; the all-reduced norm detects inf/nan on every rank
+         if not math.isfinite(slot_norm):
+             return {"skipped_nonfinite": 1.0}
++        _, slot_params = self._grads_and_params()
+         if clip_grad > 0.0 and slot_params:
+             clip_grad_by_total_norm_fp32(slot_params, clip_grad, slot_norm, False)
+         for child in self._inner.chained_optimizers:
+@@ -186,6 +215,18 @@ class SlotOptimizer:
+                 main_param.grad = None
+ 
+ 
++def _reduced_slot_norms(grads_by_slot: Sequence[Sequence[torch.Tensor]]) -> list[float]:
++    """World L2 norm of every slot's gradients from one SUM all-reduce of the squared norms."""
++    device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
++    squared = torch.zeros(len(grads_by_slot), dtype=torch.float32, device=device)
++    for index, grads in enumerate(grads_by_slot):
++        for grad in grads:
++            squared[index] += torch.norm(grad.detach().float(), 2) ** 2
++    if dist.is_available() and dist.is_initialized():
++        dist.all_reduce(squared, op=dist.ReduceOp.SUM)
++    return [value**0.5 for value in squared.tolist()]
++
++
+ def reset_grad_metadata_keep_grads(model_chunks) -> None:
+     """Reset DDP bookkeeping while retaining each slot's gradient accumulation window."""
+     for model_chunk in model_chunks:
+diff --git a/tests/fast/backends/megatron_utils/test_step_many.py b/tests/fast/backends/megatron_utils/test_step_many.py
+new file mode 100644
+index 000000000..6f4400442
+--- /dev/null
++++ b/tests/fast/backends/megatron_utils/test_step_many.py
+@@ -0,0 +1,101 @@
++"""step_many steps every slot like sequential clip_and_step with one norm reduction."""
++
++import torch
++import torch.distributed as dist
++
++from miles.backends.megatron_utils.lora.optimizer import SlotOptimizer
++
++
++class _Child:
++    """Stands in for a Float16 child: one parameter, SGD step on the clipped gradient."""
++
++    def __init__(self, parameter):
++        self.parameter = parameter
++
++    def get_grads_for_grad_norm(self):
++        return [self.parameter.grad]
++
++    def get_parameters(self):
++        return [self.parameter]
++
++    def step_with_ready_grads(self):
++        self.parameter.data.sub_(self.lr * self.parameter.grad)
++        return True
++
++
++class _FakeSlotOptimizer(SlotOptimizer):
++    def __init__(self, parameters):
++        self._inner = type("Inner", (), {"chained_optimizers": [_Child(p) for p in parameters]})()
++
++    def apply_adam_params(self, adam_params):
++        for child in self._inner.chained_optimizers:
++            child.lr = adam_params["learning_rate"]
++
++    def prepare_grads(self):
++        pass
++
++    def zero_grads(self):
++        for child in self._inner.chained_optimizers:
++            child.parameter.grad = None
++
++
++def _slots(generator, count=3):
++    slots = []
++    for _ in range(count):
++        parameters = []
++        for shape in ((4, 3), (3,)):
++            parameter = torch.nn.Parameter(torch.randn(*shape, generator=generator))
++            parameter.grad = torch.randn(*shape, generator=generator) * 3
++            parameters.append(parameter)
++        slots.append(parameters)
++    return slots
++
++
++def _clone(slots):
++    cloned = []
++    for parameters in slots:
++        copies = []
++        for parameter in parameters:
++            copy = torch.nn.Parameter(parameter.detach().clone())
++            copy.grad = parameter.grad.clone()
++            copies.append(copy)
++        cloned.append(copies)
++    return cloned
++
++
++def test_step_many_matches_sequential_clip_and_step(monkeypatch):
++    reductions = []
++    monkeypatch.setattr(dist, "all_reduce", lambda tensor, **kwargs: reductions.append(tensor.shape))
++    monkeypatch.setattr(dist, "is_initialized", lambda: True)
++    adam = [{"learning_rate": 0.01 * (slot + 1), "grad_clip_norm": 0.5 + slot} for slot in range(3)]
++
++    sequential = _clone(slots := _slots(torch.Generator().manual_seed(0)))
++    for parameters, params in zip(sequential, adam, strict=True):
++        optimizer = _FakeSlotOptimizer(parameters)
++        optimizer.apply_adam_params(params)
++        optimizer.prepare_grads()
++        optimizer.clip_and_step(params["grad_clip_norm"])
++        optimizer.zero_grads()
++    sequential_reductions = len(reductions)
++    reductions.clear()
++
++    batched = [_FakeSlotOptimizer(parameters) for parameters in slots]
++    outcomes = SlotOptimizer.step_many(list(zip(batched, adam, strict=True)))
++
++    assert sequential_reductions == 3 and reductions == [torch.Size([3])]
++    assert [outcome.keys() for outcome in outcomes] == [{"grad_norm"}] * 3
++    for expected, actual in zip(sequential, slots, strict=True):
++        for expected_parameter, actual_parameter in zip(expected, actual, strict=True):
++            assert torch.equal(expected_parameter, actual_parameter)
++            assert actual_parameter.grad is None
++
++
++def test_step_many_skips_a_nonfinite_slot_only(monkeypatch):
++    monkeypatch.setattr(dist, "is_initialized", lambda: False)
++    slots = _slots(torch.Generator().manual_seed(1), count=2)
++    slots[0][0].grad[0, 0] = float("nan")
++    before = _clone(slots)
++    adam = [{"learning_rate": 0.1, "grad_clip_norm": 0.0}] * 2
++    outcomes = SlotOptimizer.step_many(list(zip([_FakeSlotOptimizer(p) for p in slots], adam, strict=True)))
++    assert outcomes[0] == {"skipped_nonfinite": 1.0} and "grad_norm" in outcomes[1]
++    assert torch.equal(slots[0][0], before[0][0]) and not torch.equal(slots[1][0], before[1][0])
