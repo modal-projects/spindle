@@ -6,12 +6,9 @@ from datetime import datetime, timezone
 LOOKBACK_S = 90 * 24 * 3600
 
 STAGES = {
-    "trainer ready": "#6ac345",
+    "startup": "#6ac345",
     "first step": "#85aef8",
-    "sample": "#ffa556",
-    "forward_backward": "#40c6ed",
-    "optim_step": "#c29bfc",
-    "save weights": "#fd76f8",
+    "warm steps": "#ffa556",
 }
 
 _GRAY_00 = "#181818"
@@ -55,9 +52,9 @@ def render_timing_history_chart(
     ]
     xs = list(range(len(points)))
     fig, axes = pyplot.subplots(
-        1 if len(stages) == 1 else 2,
+        1,
         1 if len(stages) == 1 else 3,
-        figsize=(8, 4) if len(stages) == 1 else (14, 10.4),
+        figsize=(8, 4) if len(stages) == 1 else (14, 4),
         layout="constrained",
     )
     fig.patch.set_facecolor(_GRAY_00)
@@ -96,7 +93,7 @@ def render_timing_history_chart(
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
-    for ax in (panels[-1],) if len(stages) == 1 else axes[-1]:
+    for ax in (axes,) if len(stages) == 1 else axes:
         ax.set_xlabel("time (UTC)")
 
     fig.get_layout_engine().set(h_pad=0.18, hspace=0.18)
