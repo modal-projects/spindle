@@ -39,8 +39,11 @@ class BaseConfig:
     backend = "miles"
 
     trainer_gpu = "H100"
+    # None uses platform.modal.region. () schedules in any region.
+    trainer_region = None
     trainer_gpus_per_node = 1
     trainer_nodes = 1
+    trainer_rdma = False
     trainer_cpu = 8
     trainer_memory_mib = 32768
     trainer_disk_mib = 0
@@ -55,6 +58,8 @@ class BaseConfig:
     sampler_persistence_concurrency = 8
 
     inference_gpu = "H100"
+    # None uses platform.modal.region. () schedules compute in any region.
+    inference_region = None
     inference_gpus_per_node = 1
     inference_cpu = 8
     inference_memory_mib = 32768
