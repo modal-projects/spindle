@@ -1,3 +1,6 @@
+import hashlib
+import sys
+
 from types import SimpleNamespace
 
 import pytest
@@ -278,3 +281,24 @@ def test_geglu_patch_requires_known_source():
     original = fused.weighted_bias_quick_geglu_impl
     assert host_syncs.install_geglu(fused, experts=None) is False
     assert fused.weighted_bias_quick_geglu_impl is original
+
+
+@pytest.mark.parametrize("modified", [False, True])
+def test_bridge_requires_matching_source_without_git_metadata(monkeypatch, modified):
+    source = "# pinned multi_lora source\n"
+    monkeypatch.setattr(
+        host_syncs,
+        "MULTI_LORA_SOURCE_SHA256",
+        hashlib.sha256(source.encode()).hexdigest(),
+    )
+    monkeypatch.setitem(
+        sys.modules, "megatron.bridge.peft", SimpleNamespace(multi_lora_layers=object())
+    )
+    monkeypatch.setattr(
+        host_syncs.inspect,
+        "getsource",
+        lambda module: source + ("# changed\n" if modified else ""),
+    )
+    assert host_syncs.bridge_commit() == (
+        None if modified else host_syncs.BRIDGE_COMMIT
+    )

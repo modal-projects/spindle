@@ -111,7 +111,9 @@ def deployed(monkeypatch):
     monkeypatch.setattr(
         cli,
         "build_sampler_image",
-        lambda frontend, environment: state.images.append((frontend, environment)),
+        lambda frontend, environment, images: state.images.append(
+            (frontend, environment)
+        ),
     )
 
     def start_weights(frontend, environment, definition_id):
@@ -229,7 +231,7 @@ def test_progress_run_names_every_app_and_the_retry_command(monkeypatch, deploye
 def test_sampler_image_failure_still_deploys_the_frontend(
     monkeypatch, deployed, capsys
 ):
-    def broken(frontend, environment):
+    def broken(frontend, environment, images):
         raise RuntimeError("image build failed")
 
     monkeypatch.setattr(cli, "build_sampler_image", broken)
@@ -242,7 +244,7 @@ def test_frontend_deploys_while_the_sampler_image_builds(monkeypatch, deployed):
     frontend_deployed = threading.Event()
     deploy_frontend = subprocess.run
 
-    def build(frontend, environment):
+    def build(frontend, environment, images):
         assert frontend_deployed.wait(timeout=5)
         deployed.images.append(frontend)
 

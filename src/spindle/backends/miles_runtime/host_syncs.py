@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import json
 import os
 from functools import wraps
-from importlib.metadata import PackageNotFoundError, distribution
 
 import torch
 import torch.nn.functional as F
 
 ENV_FLAG = "SPINDLE_HOST_SYNC_PATCHES"
 BRIDGE_COMMIT = "8cd3466d14d2337c8492827b3712482c2b3e4866"
+# Complete multi_lora_layers.py at BRIDGE_COMMIT; independent of wheel/editable
+# installation metadata and of whether a Git checkout exists at runtime.
+MULTI_LORA_SOURCE_SHA256 = (
+    "7f3f7d621cbfe40c0adb32a998d83ac3851bf2f550fe3a220304aaaf348fb5aa"
+)
 GEGLU_SOURCE_SHA256 = "7a23f78fb6827f0e2fe3157c679fa735727373c81f3555f950650930c0824727"
 _INSTALLED = "_spindle_host_sync_free"
 
@@ -25,13 +28,15 @@ def install() -> dict[str, bool]:
 
 
 def bridge_commit() -> str | None:
+    """Return the compatible source revision, identified by the patched module."""
     try:
-        direct_url = distribution("megatron-bridge").read_text("direct_url.json")
-    except PackageNotFoundError:
+        from megatron.bridge.peft import multi_lora_layers
+
+        source = inspect.getsource(multi_lora_layers)
+    except (ImportError, OSError, TypeError):
         return None
-    if not direct_url:
-        return None
-    return json.loads(direct_url).get("vcs_info", {}).get("commit_id")
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    return BRIDGE_COMMIT if digest == MULTI_LORA_SOURCE_SHA256 else None
 
 
 def install_multi_lora(layers=None) -> bool:

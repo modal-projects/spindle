@@ -6,6 +6,7 @@ created on demand with the existing LoRA/FFT pool lifecycle.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -60,6 +61,9 @@ def image_for(backend, name=""):
     if not modal.is_local():
         return modal.Image.debian_slim()
     if name:
+        if ":" in name:
+            module, attribute = name.rsplit(":", 1)
+            return getattr(importlib.import_module(module), attribute)
         if name not in TRAINER_IMAGES:
             raise ValueError(
                 f"unknown trainer image {name!r}; choose from {sorted(TRAINER_IMAGES)}"
@@ -70,12 +74,13 @@ def image_for(backend, name=""):
     ]
 
 
-def build_sampler_image(frontend, environment):
+def build_sampler_image(frontend, environment, images=("",)):
     """Build the pool image ahead of the first request; pools reuse the cached build."""
     app = modal.App.lookup(
         frontend, environment_name=environment, create_if_missing=True
     )
-    image_for("sglang").build(app)
+    for name in dict.fromkeys(images):
+        image_for("sglang", name).build(app)
 
 
 def volumes_for(platform):
@@ -294,7 +299,9 @@ def build_rollout_app(deployment, pool, platform=None, *, image=None):
     @app.server(
         name="Server",
         serialized=True,
-        image=image if image is not None else image_for("sglang"),
+        image=image
+        if image is not None
+        else image_for("sglang", recipe.inference_image),
         gpu=gpu_request(recipe.inference_gpu, recipe.inference_gpus_per_node),
         cpu=recipe.inference_cpu,
         memory=recipe.inference_memory_mib,

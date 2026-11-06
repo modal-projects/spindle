@@ -245,7 +245,12 @@ def deploy(configs, *, refresh_trainers=(), refresh_inference=(), run_steps=None
         steps.append(
             (f"Weights    {deployment.name}", partial(start_weights, deployment))
         )
-    build_image = partial(build_sampler_image, platform["frontend"], environment)
+    build_image = partial(
+        build_sampler_image,
+        platform["frontend"],
+        environment,
+        tuple(deployment.recipe.inference_image for deployment in configs),
+    )
     if run_steps is not None:
         run_steps(steps, [("Sampler image", in_background(build_image))])
         return
