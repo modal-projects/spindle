@@ -6,13 +6,16 @@ supports captured by SGLang. Capture is opt-in per sampling request:
 - `return_routed_experts=True` captures the selected MoE expert IDs. Training
   reuses those selections while computing routing weights from its own logits.
 - `return_sampling_mask=True` captures the allowed token IDs after top-k,
-  top-p, and min-p filtering, together with log probabilities normalized over
-  that support. Training normalizes over the same support and temperature.
+  top-p, and min-p filtering, with the sampled token’s log probability.
+- `return_sampling_probabilities=True` also captures normalized log probabilities
+  for every support token. Request this for `score_centered` and
+  `score_centered_mis`; it implies `return_sampling_mask`.
 
 Ordinary Tinker sampling discards additional response fields. Use
 `spindle.sample_with_replay()` to receive them, then pass its replay tensors through
-`Datum.loss_fn_inputs`. The Megatron full-training backend currently rejects
-these fields; this integration is for the Miles LoRA backend.
+`Datum.loss_fn_inputs`. Miles LoRA and Megatron full-parameter training accept
+sampling replay for `mis`, `score_centered`, and `score_centered_mis`.
+Routed-expert replay requires Miles LoRA.
 
 ## Server configuration
 
@@ -26,9 +29,25 @@ Router capture increases the rollout server's memory use, and captured supports
 can make responses large when top-p retains much of the vocabulary. Neither
 capture is requested by default.
 
+Start with `top_k=64` to bound each captured support, then choose the response
+length and training batch size for the total number of support entries. This
+changes the sampler's distribution; set it before sampling and never truncate
+recorded supports afterward. For example, 8,192 generated tokens with `top_k=64`
+have at most 524,288 entries per trajectory. IDs and float32 log probabilities
+alone occupy about 6 MiB before JSON encoding and training intermediates.
+
+The pinned SGLang sampler defaults to
+[`sampling_mask_max_tokens=4096`](https://github.com/modal-projects/sglang/blob/a3e0e1725406b9330bd062520d4f99d0aa73ee4f/python/sglang/srt/arg_groups/fields/exec_.py#L101)
+per position, with
+[overflow detection](https://github.com/modal-projects/sglang/blob/a3e0e1725406b9330bd062520d4f99d0aa73ee4f/python/sglang/srt/layers/sampler.py#L542).
+That bounds one support, not the total request or training microbatch. Full
+vocabulary capture (`top_k=-1`, `top_p=1`) can still create large requests, and
+the loss allocates several arrays proportional to the total support entries.
+
 ## Sample and train
 
-This example assumes `training` is an existing Miles LoRA training client.
+This example assumes `training` is an existing Miles LoRA or Megatron
+full-parameter training client.
 It uses a constant advantage to demonstrate the handoff; replace that with
 advantages computed from your task's rewards.
 
@@ -43,8 +62,8 @@ prompt = types.ModelInput.from_ints(prompt_tokens)
 sequence = spindle.sample_with_replay(
     sampler,
     prompt,
-    sampling_params=types.SamplingParams(max_tokens=32, temperature=0.8, top_p=0.9),
-    return_sampling_mask=True,
+    sampling_params=types.SamplingParams(max_tokens=32, temperature=0.8, top_p=0.9, top_k=64),
+    return_sampling_probabilities=True,
 ).result().sequences[0]
 
 if not sequence.tokens:
@@ -61,13 +80,18 @@ datum = types.Datum(
 )
 forward = training.forward_backward(
     [datum],
-    loss_fn="ppo",
+    loss_fn="score_centered_mis",
     loss_fn_config=sequence.replay.loss_fn_config(),
 )
 optimizer = training.optim_step(types.AdamParams(learning_rate=1e-5))
 print(forward.result().metrics)
 print(optimizer.result().metrics)
 ```
+
+`loss_fn` can also be `score_centered` or `mis`. Pass
+`sequence.replay.loss_fn_config()` to reuse the sampling temperature. For
+`mis` and `score_centered_mis`, set `mis_low` and `mis_high` in that config to
+override the default ratio bounds of 0.2 and 5.
 
 For MoE router replay, additionally request `return_routed_experts=True` and
 supply the model's **total transformer layer count** and routed experts per token:

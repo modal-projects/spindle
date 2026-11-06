@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from spindle.backends.miles_runtime.replay import install_replay_hooks
+from spindle.backends.miles_runtime.replay_data import install_distribution_sharding
 
 
 @pytest.fixture
@@ -41,7 +42,9 @@ def miles():
 
     lora.run_forward_backward = run
     model = SimpleNamespace()
-    model.get_batch = lambda iterator, keys: keys
+    model.get_batch = lambda iterator, keys: {
+        key: iterator.rollout_data.get(key) for key in keys
+    }
     logit = SimpleNamespace()
     logit.build_local_sampling_mask = lambda *args, **kwargs: None
     loss = SimpleNamespace()
@@ -99,6 +102,7 @@ def test_mask_fields_forwarded_and_temperature_is_request_local(miles):
     batch = {
         "rollout_sampling_mask_ids": [[3, 5, 4]],
         "rollout_sampling_mask_offsets": [[0, 0, 2, 3]],
+        "rollout_sampling_mask_logprobs": [[-0.2, -1.7, 0.0]],
         "loss_fn_config": {"sampling_temperature": 0.7},
         "unconcat_tokens": [torch.tensor([1, 2, 3, 4])],
         "target_tokens": [[2, 3, 4]],
@@ -107,11 +111,13 @@ def test_mask_fields_forwarded_and_temperature_is_request_local(miles):
     }
     keys = ["tokens"]
     actual = miles.model.get_batch(SimpleNamespace(rollout_data=batch), keys)
-    assert actual == [
+    assert list(actual) == [
         "tokens",
         "rollout_sampling_mask_ids",
         "rollout_sampling_mask_offsets",
+        "rollout_sampling_mask_logprobs",
     ]
+    assert actual["rollout_sampling_mask_logprobs"] == [[-0.2, -1.7, 0.0]]
     assert keys == ["tokens"]
     args = SimpleNamespace(vocab_size=6, rollout_temperature=1.0)
     result = miles.loss._target_logprobs(args, batch, None)
@@ -126,3 +132,8 @@ def test_mask_fields_forwarded_and_temperature_is_request_local(miles):
     )
     with pytest.raises(ValueError, match="outside the model vocabulary"):
         miles.loss._target_logprobs(SimpleNamespace(vocab_size=5), batch, None)
+
+
+def test_missing_miles_sharding_api_fails_at_install():
+    with pytest.raises(RuntimeError, match="requires _package_shards"):
+        install_distribution_sharding(SimpleNamespace())
