@@ -290,28 +290,35 @@ def deployment_apps(frontend, environment):
             return 0
         return next((i for i, p in enumerate(prefixes, 1) if name.startswith(p)), None)
 
-    names = {row["description"] or "" for row in rows if row["state"] != "stopped"}
+    names = {
+        row["description"] or ""
+        for row in rows
+        if not str(row["state"]).startswith("stop")
+    }
     return sorted(
         (name for name in names if rank(name) is not None),
         key=lambda name: (rank(name), name),
     )
 
 
+def _already_stopped(output):
+    return "App is already stopped." in output or "No App with name" in output
+
+
 def stop(frontend, environment):
     """Stop every app of the deployment, ending its runs."""
     names = deployment_apps(frontend, environment)
+    # Looked up even when the frontend is already stopping, so its folder is deleted.
+    app_id = frontend_app_id(frontend, environment)
     if not names:
         print(f"No running apps for {frontend}.")
-        return
-    # The next deploy gets a new app ID and so a new registry folder; drop this one.
-    app_id = frontend_app_id(frontend, environment) if frontend in names else None
     for name in names:
         command = [sys.executable, "-m", "modal", "app", "stop", "-y", name]
         if environment:
             command += ["--env", environment]
         result = subprocess.run(command, capture_output=True, text=True)
         output = (result.stdout + result.stderr).strip()
-        if result.returncode and "App is already stopped." not in output:
+        if result.returncode and not _already_stopped(output):
             raise ValueError(f"stopping {name} failed: {output}")
         print(f"Stopped {name}")
     if app_id is not None:

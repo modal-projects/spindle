@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import random
 from collections.abc import Awaitable, Callable, Mapping
 
 import modal
@@ -54,6 +55,8 @@ KEY_STORES = {
     "sampler_warm": "engines",
     "deployment_failure": "engines",
     "app_deploy": "engines",
+    "registry_version": "engines",
+    "registry_claim": "engines",
     "engine_call": "engines",
     "engine_current": "engines",
     "trainer_plan": "engines",
@@ -209,13 +212,16 @@ class RoutedKeyValueStore:
         return tuple(sorted(items))
 
 
-def shared_kv(app_id: str | None = None) -> RoutedKeyValueStore:
+def shared_kv(
+    app_id: str | None = None, environment: str | None = None
+) -> RoutedKeyValueStore:
     app_id = app_id or os.environ.get("SPINDLE_FRONTEND_APP_ID") or current_app_id()
     return RoutedKeyValueStore(
         {
             domain: ModalKeyValueStore(
                 modal.Dict.from_name(
                     app_store_name(name, app_id),
+                    environment_name=environment,
                     create_if_missing=True,
                 )
             )
@@ -232,6 +238,19 @@ def fft_pool_kv(app_id: str | None = None) -> ModalKeyValueStore:
             create_if_missing=True,
         )
     )
+
+
+VOLUME_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0)
+
+
+async def _retry_rate_limited(call: Callable[[], Awaitable[object]]) -> object:
+    for delay in (*VOLUME_RETRY_DELAYS_S, None):
+        try:
+            return await call()
+        except modal.exception.ResourceExhaustedError:
+            if delay is None:
+                raise
+            await asyncio.sleep(delay * (1 + random.random()))
 
 
 class ModalVolumeStore:
@@ -251,7 +270,7 @@ class ModalVolumeStore:
             return None
 
     async def get(self, key: str) -> object | None:
-        return await asyncio.to_thread(self.read, key)
+        return await _retry_rate_limited(lambda: asyncio.to_thread(self.read, key))
 
     async def put(self, key: str, value: object) -> None:
         await self.put_many({key: value})
@@ -285,7 +304,9 @@ class ModalVolumeStore:
 
     async def list_keys(self, prefix: str) -> tuple[str, ...]:
         try:
-            entries = await self.volume.listdir.aio(f"/{self.folder}")
+            entries = await _retry_rate_limited(
+                lambda: self.volume.listdir.aio(f"/{self.folder}")
+            )
         except (FileNotFoundError, modal.exception.NotFoundError):
             return ()
         names = [os.path.basename(entry.path) for entry in entries]

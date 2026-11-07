@@ -1,7 +1,8 @@
 import argparse
+import asyncio
+import time
 import json
 import sys
-import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,13 @@ from spindle.control_plane import ControlPlane, create_control_plane_app
 from spindle.control_plane.deployments import (
     DeploymentConflict,
     DeploymentRequest,
+    CLAIM_TIMEOUT_S,
+    REGISTRY_CLAIM_PREFIX,
+    VERSION_CHECK_S,
+    DeploymentNotFound,
     DeploymentRoutes,
+    RegistryUnavailable,
+    mark_registry_changed,
 )
 from spindle.control_plane.keys import model_key, placement_key
 from spindle.control_plane.records import ModelRecord
@@ -70,7 +77,14 @@ class CountingStore(InMemoryKeyValueStore):
 
 def routes_for(*deployments):
     kv = CountingStore({d.name: d.model_dump(mode="json") for d in deployments})
-    return DeploymentRoutes(lambda: kv), kv
+    versions = InMemoryKeyValueStore()
+    return DeploymentRoutes(lambda: kv, lambda: versions), kv
+
+
+async def register_elsewhere(routes, store, deployment):
+    """What `spindle deploy` or another frontend container does: write, then mark."""
+    await store.put(deployment.name, deployment.model_dump(mode="json"))
+    await mark_registry_changed(routes.versions())
 
 
 @pytest.mark.parametrize("preset", ["qwen35-9b-lora-16k", "qwen35-4b-fft-64k"])
@@ -410,59 +424,90 @@ async def names(routes):
 
 
 @pytest.mark.anyio
-async def test_requests_for_cached_recipes_and_models_never_read_the_registry():
+async def test_the_registry_is_reread_only_after_it_changes():
     base = resolved()
     routes, store = routes_for(base)
     await routes.definitions()
-    before = (store.reads, store.gets)
+    before = store.reads
     assert (await routes.select(base.model)).name == base.name
     assert (await routes.select(base.name)).name == base.name
     assert await routes.select("Unknown/Model") is None
-    assert (store.reads, store.gets) == before
+    assert store.reads == before
+    other = resolved(recipe("qwen3-8b-lora-32k"))
+    await register_elsewhere(routes, store, other)
+    found = await asyncio.gather(*(routes.select(other.model) for _ in range(10)))
+    assert {d.name for d in found} == {other.name}
+    assert store.reads == before + 1  # one read for the change, shared
 
 
 @pytest.mark.anyio
-async def test_a_newly_registered_recipe_is_found_on_its_first_request():
+async def test_version_checks_are_shared_and_at_most_once_a_second():
     base = resolved()
-    routes, store = routes_for(base)
+    routes, _ = routes_for(base)
     await routes.definitions()
-    reads = store.reads
-    new = resolved(recipe(name="new-name", max_context_length=32768))
-    await store.put(new.name, new.model_dump(mode="json"))
-    assert (await routes.select(new.name)).name == new.name
-    assert store.reads == reads + 1
+    checks = []
+    get = routes.versions().get
+
+    async def counted(key):
+        checks.append(key)
+        return await get(key)
+
+    routes.versions().get = counted
+    await asyncio.gather(*(routes.select(base.model) for _ in range(20)))
+    assert checks == []
+    routes._checked_at -= VERSION_CHECK_S
+    await asyncio.gather(*(routes.select(base.model) for _ in range(20)))
+    assert len(checks) == 1
 
 
 @pytest.mark.anyio
-async def test_a_stale_cache_is_served_while_one_refresh_runs_in_the_background():
+@pytest.mark.parametrize("retried", ["add", "remove"])
+async def test_a_retried_write_repairs_a_lost_version_update(retried):
     base = resolved()
-    routes, store = routes_for(base)
-    await routes.definitions()
-    added = resolved(recipe(name="added", max_context_length=32768))
-    await store.put(added.name, added.model_dump(mode="json"))
-    routes._loaded_at = time.monotonic() - 6
-    reads = store.reads
-    assert await names(routes) == [base.name]
-    assert await names(routes) == [base.name]
-    await routes._refresh
-    assert store.reads == reads + 1
-    assert set(await names(routes)) == {base.name, added.name}
+    writer, store = routes_for(base)
+    reader = DeploymentRoutes(writer.kv, writer.versions)
+    variant = await writer.build(DeploymentRequest(name="variant", base=base.name))
+    if retried == "remove":
+        await writer.add(variant)
+    await reader.definitions()
+    # The first attempt's registry write landed but its version update was lost.
+    if retried == "add":
+        await store.put("variant", variant.model_dump(mode="json"))
+        await writer.add(variant)
+    else:
+        await store.delete("variant")
+        with pytest.raises(DeploymentNotFound):
+            await writer.remove("variant")
+    reader._checked_at -= VERSION_CHECK_S
+    assert (await reader.get("variant") is not None) == (retried == "add")
 
 
 @pytest.mark.anyio
-async def test_a_failed_refresh_keeps_the_last_recipe_list():
+@pytest.mark.parametrize("failing", ["version", "registry"])
+async def test_a_failed_read_serves_hits_but_never_answers_not_found(failing):
     base = resolved()
     routes, store = routes_for(base)
     await routes.definitions()
+    added = resolved(recipe(name="added"))
+    await register_elsewhere(routes, store, added)
 
-    async def unavailable(prefix):
-        raise ConnectionError("volume unavailable")
+    async def unavailable(*args):
+        raise ConnectionError("unavailable")
 
-    store.list_keys = unavailable
-    routes._loaded_at = time.monotonic() - 6
-    assert await names(routes) == [base.name]
-    await routes._refresh
-    assert await names(routes) == [base.name]
+    if failing == "version":
+        routes.versions().get = unavailable
+    else:
+        store.list_keys = unavailable
+    routes._checked_at -= VERSION_CHECK_S
+    attempts = store.reads
+    for _ in range(10):  # cached hits keep working, and the read backs off
+        assert (await routes.select(base.model)).name == base.name
+    assert store.reads <= attempts + 1
+    with pytest.raises(RegistryUnavailable):
+        await routes.get(added.name)
+    async with client_for(routes) as client:
+        listed = await client.get("/api/v1/spindle/deployments")
+    assert (listed.status_code, listed.json()["error"]) == (503, "registry_unavailable")
 
 
 @pytest.mark.anyio
@@ -1059,14 +1104,38 @@ async def test_adding_a_config_starts_its_app_deploy_and_the_listing_tracks_it()
 
 
 @pytest.mark.anyio
+async def test_removing_a_config_stops_an_app_whose_deploy_finished_during_the_delete():
+    base = resolved()
+    routes, _ = routes_for(base)
+    deployed, stopped = set(), []
+
+    async def stop_apps(definition):
+        if not deployed:  # the deploy worker's modal deploy returns right after this
+            deployed.add(definition.trainer_app_name)
+        else:
+            stopped.extend(deployed)
+
+    async with client_for(routes, stop_apps=stop_apps) as client:
+        await client.post(
+            "/api/v1/spindle/deployments",
+            json={"name": "variant", "base": base.name, "overrides": {}},
+        )
+        variant = await routes.get("variant")
+        removed = await client.delete("/api/v1/spindle/deployments/variant")
+    assert removed.status_code == 200
+    assert stopped == [variant.trainer_app_name]
+    assert await routes.get("variant") is None
+
+
+@pytest.mark.anyio
 async def test_removing_a_config_models_still_train_on_needs_force_and_stops_its_apps():
     base = resolved()
     routes, _ = routes_for(base)
     plane = InMemoryKeyValueStore()
-    stopped = []
+    stopped = set()
 
     async def stop_apps(definition):
-        stopped.append(definition.name)
+        stopped.add(definition.name)
 
     model = ModelRecord(
         model_id="session:train:0",
@@ -1089,14 +1158,14 @@ async def test_removing_a_config_models_still_train_on_needs_force_and_stops_its
         assert refused.json()["models"] == [
             {"model_id": model.model_id, "session_id": "session", "created_at": 1.0}
         ]
-        assert stopped == []
+        assert stopped == set()
         assert await routes.get("variant") is not None
         forced = await client.delete("/api/v1/spindle/deployments/variant?force=true")
         assert forced.status_code == 200, forced.text
         # The orphaned model still names the config, but it is gone: 404, not 409.
         again = await client.delete("/api/v1/spindle/deployments/variant")
         assert again.status_code == 404
-    assert stopped == ["variant"]
+    assert stopped == {"variant"}
     assert await routes.get("variant") is None
 
 
@@ -1111,23 +1180,69 @@ async def test_re_adding_after_a_version_bump_is_no_conflict():
     assert (await store.get("variant"))["spindle_version"] == "0.0.1"
 
 
+@pytest.mark.parametrize("same", [True, False])
 @pytest.mark.anyio
-async def test_a_concurrent_add_under_the_same_name_is_a_conflict():
+async def test_concurrent_first_adds_of_one_name_agree_on_a_winner(same):
+    base = resolved()
+    first, store = routes_for(base)
+    second = DeploymentRoutes(first.kv, first.versions)
+    overrides = {} if same else {"trainer_gpu": "B200"}
+    requests = [
+        DeploymentRequest(name="variant", base=base.name),
+        DeploymentRequest(name="variant", base=base.name, overrides=overrides),
+    ]
+    configs = [await first.build(r) for r in requests]
+    get, first_checks = store.get, asyncio.Barrier(2)
+    checked = []
+
+    async def get_after_both_checked(key):
+        value = await get(key)
+        checked.append(key)
+        if len(checked) <= 2:
+            await first_checks.wait()  # both adds find no config before either writes
+        return value
+
+    store.get = get_after_both_checked
+    results = await asyncio.gather(
+        first.add(configs[0]), second.add(configs[1]), return_exceptions=True
+    )
+    conflicts = [r for r in results if isinstance(r, DeploymentConflict)]
+    assert len(conflicts) == (0 if same else 1)
+    winner = configs[results.index(next(r for r in results if isinstance(r, dict)))]
+    assert (await get("variant"))["recipe"] == winner.model_dump(mode="json")["recipe"]
+
+
+@pytest.mark.anyio
+async def test_a_claim_left_by_a_dead_container_expires():
     base = resolved()
     routes, store = routes_for(base)
-    rival = await routes.build(
-        DeploymentRequest(
-            name="variant", base=base.name, overrides={"trainer_gpu": "B200"}
-        )
+    config = await routes.build(DeploymentRequest(name="variant", base=base.name))
+    stale = time.time() - CLAIM_TIMEOUT_S - 1
+    await routes.versions().put(
+        REGISTRY_CLAIM_PREFIX + "variant", {"recipe": {"other": 1}, "at": stale}
     )
-    put = store.put
+    await routes.add(config)
+    assert await store.get("variant") is not None
 
-    async def put_then_overwritten(key, value):
-        await put(key, value)
-        await put(key, rival.model_dump(mode="json"))
 
-    store.put = put_then_overwritten
-    with pytest.raises(DeploymentConflict):
-        await routes.add(
-            await routes.build(DeploymentRequest(name="variant", base=base.name))
-        )
+async def listed_names(client):
+    listed = (await client.get("/api/v1/spindle/deployments")).json()
+    return {d["name"] for d in listed["deployments"]}
+
+
+async def capability_names(client):
+    body = (await client.get("/api/v1/get_server_capabilities")).json()
+    return {row["model_name"] for row in body["supported_models"]}
+
+
+@pytest.mark.parametrize("read", [listed_names, capability_names])
+@pytest.mark.anyio
+async def test_a_config_another_frontend_container_just_added_shows_at_once(read):
+    base = resolved()
+    writer, store = routes_for(base)
+    reader = DeploymentRoutes(writer.kv, writer.versions)
+    await reader.definitions()  # this container's cache predates the add
+    other = resolved(recipe("qwen3-8b-lora-32k"))
+    await writer.add(other)
+    async with client_for(reader) as client:
+        assert await read(client) & {other.name, other.model}

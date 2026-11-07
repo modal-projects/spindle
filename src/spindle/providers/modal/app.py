@@ -14,7 +14,7 @@ from huggingface_hub import snapshot_download
 from stitch.pools.modal_flash import ModalFlashPool
 
 from spindle.control_plane import ControlPlane, create_control_plane_app
-from spindle.control_plane.deployments import DeploymentRoutes
+from spindle.control_plane.deployments import DeploymentRoutes, RegistryUnavailable
 from spindle.control_plane.keys import model_key, placement_key, trainer_demand_key
 from spindle.control_plane.queues import RECENT_WINDOW_S, prune_queue_events
 from spindle.control_plane.records import ModelRecord
@@ -87,7 +87,7 @@ from .trainer_reconciler import (
 
 SETTINGS = frontend_settings_from_env()
 PLATFORM = SETTINGS.platform
-DEPLOYMENTS = DeploymentRoutes(lambda: deployment_kv())
+DEPLOYMENTS = DeploymentRoutes(lambda: deployment_kv(), lambda: shared_kv())
 APP_NAME = PLATFORM["frontend"]
 # Placement for the CPU-only frontend; trainers and samplers keep their own
 # (unpinned by default) placement.
@@ -862,6 +862,7 @@ def _stop_app(name: str) -> None:
     if (
         result.returncode
         and "App is already stopped." not in result.stdout + result.stderr
+        and "No App with name" not in result.stdout + result.stderr
     ):
         raise RuntimeError(f"stopping {name} failed: {result.stderr[-2000:]}")
 
@@ -897,6 +898,14 @@ async def deploy_apps(name: str) -> None:
                 raise RuntimeError(f"could not look up {app_name}")
             if not exists:
                 await asyncio.to_thread(_deploy_app, deployment, role)
+                try:
+                    removed = await DEPLOYMENTS.get(name) is None
+                except RegistryUnavailable:
+                    removed = False  # a DELETE meanwhile stops the apps itself
+                if removed:
+                    # Removed while deploying; a DELETE before the app existed missed it.
+                    await _stop_apps(deployment)
+                    return
     except Exception as exc:
         await shared_kv().put(
             _app_deploy_key(name),

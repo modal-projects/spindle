@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from rich.console import Console
 
 from spindle import deploy_wizard
 from spindle import deployment_cli as cli
+from spindle.control_plane.deployments import REGISTRY_VERSION_KEY
 from spindle.deployments import DeploymentConfig, config_path, load
 from spindle.providers.local import InMemoryKeyValueStore
 from spindle.providers.modal import deployment_configs
@@ -789,6 +791,7 @@ def test_stop_stops_the_frontend_then_pool_creators_then_pools(monkeypatch, caps
         ("my-spindle-lora-qwen35-9b-lora-16k", "deployed"),
         ("my-spindle-trainer-qwen35-9b-lora-16k", "deployed"),
         ("my-spindle-trainer-qwen3-8b-lora-32k", "stopped"),
+        ("my-spindle-trainer-removed", "stopping..."),
         ("my-spindle-inference-qwen35-9b-lora-16k", "deployed"),
         ("my-spindle-fft-0123456789abcdef-latest", "deployed"),
         ("my-spindle", "deployed"),
@@ -806,6 +809,11 @@ def test_stop_stops_the_frontend_then_pool_creators_then_pools(monkeypatch, caps
         if command[5].endswith("-latest"):
             return subprocess.CompletedProcess(
                 command, 1, "", "App is already stopped."
+            )
+        if command[5].startswith("my-spindle-inference"):
+            # Stopped by a DELETE after the listing was taken.
+            return subprocess.CompletedProcess(
+                command, 1, "", "No App with name 'x' found in the 'dev' environment."
             )
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -833,7 +841,7 @@ def test_stop_stops_the_frontend_then_pool_creators_then_pools(monkeypatch, caps
     listed[:] = [("my-spindle", "stopped")]
     cli.main(["stop", "--app", "my-spindle"])
     assert calls == [["app", "list", "--json"]]
-    assert len(deleted) == 1
+    assert len(deleted) == 2  # a leftover registry folder is deleted even so
     assert "No running apps for my-spindle" in capsys.readouterr().out
 
 
@@ -900,3 +908,22 @@ def test_remove_lists_training_models_and_asks_before_forcing(monkeypatch, capsy
     with pytest.raises(SystemExit):
         cli.main(["remove", "variant"])
     assert len(requests) == 1
+
+
+def test_write_registry_tells_every_frontend_container_to_reread(monkeypatch):
+    registry, shared = SimpleNamespace(), InMemoryKeyValueStore()
+
+    async def no_files(prefix):
+        return ()
+
+    async def put_many(items):
+        pass
+
+    registry.list_keys, registry.put_many = no_files, put_many
+    monkeypatch.setattr(deployment_configs, "frontend_app_id", lambda *a: "ap-1")
+    monkeypatch.setattr(deployment_configs, "deployment_kv", lambda *a: registry)
+    monkeypatch.setattr(deployment_configs, "shared_kv", lambda *a: shared)
+    deployment_configs.write_registry(
+        "spindle", "dev", [deployment().model_dump(mode="json")]
+    )
+    assert asyncio.run(shared.get(REGISTRY_VERSION_KEY))

@@ -8,10 +8,10 @@ import os
 
 import modal
 
-from spindle.control_plane.deployments import FrontendSettings
+from spindle.control_plane.deployments import FrontendSettings, mark_registry_changed
 from spindle.deployments import DeploymentConfig
 
-from .kv import deployment_kv
+from .kv import deployment_kv, shared_kv
 
 FRONTEND_SETTINGS_ENV = "SPINDLE_FRONTEND_SETTINGS"
 PLATFORM_ENV = "SPINDLE_PLATFORM"
@@ -81,6 +81,7 @@ def write_registry(frontend, environment, configs, *, keep_existing=()):
         }
         items.update((config["recipe"]["name"], config) for config in configs)
         await registry.put_many(items)
+        await mark_registry_changed(shared_kv(app_id, environment))
 
     asyncio.run(write())
     return True

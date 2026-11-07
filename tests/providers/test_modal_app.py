@@ -49,6 +49,9 @@ def reset_lora_pool_cache(monkeypatch):
     modal_app = importlib.import_module("spindle.providers.modal.app")
     store = InMemoryKeyValueStore()
     monkeypatch.setattr(modal_app, "deployment_kv", lambda: store)
+    shared = InMemoryKeyValueStore()
+    monkeypatch.setattr(modal_app, "shared_kv", lambda: RoutedTestStore(shared))
+    monkeypatch.setattr(modal_app.DEPLOYMENTS, "_version_store", None)
     monkeypatch.setattr(modal_app, "_lora_pool_gateways", {})
     monkeypatch.setattr(modal_app, "_lora_pool_checks", {})
     monkeypatch.setattr(modal_app, "_weights_ready", set())
@@ -1578,3 +1581,27 @@ def test_a_crash_at_any_step_of_a_deploy_leaves_a_status_a_repost_recovers_from(
     spawned = spawn.await_count
     asyncio.run(modal_app._start_app_deploy(recipe))  # what a re-sent POST does
     assert spawn.await_count == spawned + 1
+
+
+def test_deploy_apps_stops_what_it_deployed_for_a_config_removed_meanwhile(monkeypatch):
+    modal_app = importlib.import_module("spindle.providers.modal.app")
+    recipe = asyncio.run(modal_app.module_for(LORA_DEFINITION))
+    deployed = set()
+    modal_app, _ = app_deploy_fakes(monkeypatch, deployed)
+    lookups = iter([recipe, None])
+
+    async def get(name):
+        return next(lookups)
+
+    monkeypatch.setattr(modal_app.DEPLOYMENTS, "get", get)
+    monkeypatch.setattr(
+        modal_app,
+        "_deploy_app",
+        lambda deployment, role: deployed.add(deployment.trainer_app_name),
+    )
+    stopped = []
+    monkeypatch.setattr(modal_app, "_stop_app", stopped.append)
+    monkeypatch.setattr(modal_app, "_start_weights_download", AsyncMock())
+    asyncio.run(modal_app.deploy_apps.local(recipe.name))
+    assert stopped == [recipe.trainer_app_name]
+    modal_app._start_weights_download.assert_not_awaited()

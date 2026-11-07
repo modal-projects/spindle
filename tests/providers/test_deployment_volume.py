@@ -2,6 +2,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+import modal
+
+from spindle.providers.modal import kv
 from spindle.providers.modal.kv import ModalVolumeStore
 
 
@@ -102,5 +105,27 @@ def test_put_many_writes_every_recipe_in_one_commit():
         await store.put_many({})
         assert volume.commits == 1
         assert dict(await store.list_items("")) == {"a": {"n": 1}, "b": {"n": 2}}
+
+    asyncio.run(run())
+
+
+def test_rate_limited_volume_calls_are_retried(monkeypatch):
+    monkeypatch.setattr(kv, "VOLUME_RETRY_DELAYS_S", (0, 0, 0))
+
+    async def run():
+        volume = FakeVolume()
+        store = ModalVolumeStore(volume, "ap-one")
+        await store.put("qwen", {"n": 1})
+        listdir, failures = volume.listdir.aio, []
+
+        async def limited(path):
+            if len(failures) < 2:
+                failures.append(path)
+                raise modal.exception.ResourceExhaustedError("rate limit exceeded")
+            return await listdir(path)
+
+        volume.listdir.aio = limited
+        assert await store.list_keys("") == ("qwen",)
+        assert len(failures) == 2
 
     asyncio.run(run())
