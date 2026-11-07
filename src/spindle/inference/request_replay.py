@@ -66,6 +66,9 @@ class RequestReplay:
             return
         else:
             response = generation.task.result()
+        # Admission rejections must check capacity again on the next delivery.
+        if response.status_code in (429, 503):
+            return
         # Non-string keys are unique batch pass-throughs, with no reusable reply.
         if (
             not self.closed

@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Fixed
+
+- Sampling requests rejected with HTTP 429 or 503 can retry with the same request ID as soon as capacity is available, instead of replaying the rejection for 30 seconds.
+
 ## 0.1.6 - 2026-11-06
 
 Add and remove configs on a running frontend without redeploying it, wait in line for a trainer slot instead of failing, and see each recipe's training queue.
