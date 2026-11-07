@@ -298,7 +298,9 @@ async def _prepare_adapter(
                         "pinned": False,
                     },
                 )
-                if response.is_error:
+                if response.is_error and not await _adapter_is_registered(
+                    app.state.client, resolved.identity, str(path)
+                ):
                     return resolved, response
                 if not app.state.registered_adapters:
                     timeline("sampler-sidecar").mark(
@@ -321,6 +323,20 @@ async def _prepare_adapter(
     # Share only in-flight work. Later requests still resolve the latest version.
     # One disconnected request must not cancel registration for other callers.
     return await asyncio.shield(task)
+
+
+async def _adapter_is_registered(
+    client: httpx.AsyncClient, name: str, path: str
+) -> bool:
+    try:
+        response = await client.get("/v1/models", timeout=10.0)
+        response.raise_for_status()
+        models = response.json().get("data", [])
+        return any(
+            model.get("id") == name and model.get("root") == path for model in models
+        )
+    except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+        return False
 
 
 async def _post_generate(

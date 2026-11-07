@@ -4,6 +4,10 @@ Notable changes to Spindle, following [Keep a Changelog](https://keepachangelog.
 
 ## Unreleased
 
+### Fixed
+
+- Sampling recovers when SGLang loads an adapter but its acknowledgement is lost. A later load error is accepted only when SGLang's registry confirms the same adapter name and checkpoint path.
+
 ## 0.1.6 - 2026-11-06
 
 Add and remove configs on a running frontend without redeploying it, wait in line for a trainer slot instead of failing, and see each recipe's training queue.
